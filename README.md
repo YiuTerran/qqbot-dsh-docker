@@ -63,6 +63,7 @@ dsh --profile qqbot
    | `LLM_API_KEY` | Optional; API key for a custom OpenAI-compatible route configured with `apiKeyEnv: LLM_API_KEY` |
    | `QQBOT_APPID` | your QQ Bot AppID |
    | `QQBOT_SECRET` | your QQ Bot secret |
+   | `QQBOT_STARTUP_WARN_MS` | Optional; emit a gateway diagnostic after this many ms (default `20000`) |
    | `QQBOT_VISION_PROVIDER` | Optional visual-model route override; empty reuses `LLM_PROVIDER`, then `deepseek-official` |
    | `QQBOT_VISION_MODEL` | Optional visual-model override; empty reuses `LLM_MODEL`, then `deepseek-flash` |
    | `DSH_PERMISSION_MODE` | `read-only` (default) or `workspace-write` for deliberate `/workspace` changes |
@@ -81,6 +82,13 @@ dsh --profile qqbot
 The first start seeds `/data`; later starts retain it. The QQ plugin may guide a
 first credential setup when the supplied credentials are incomplete. The local
 test intentionally avoids that interactive QR flow.
+
+For operational visibility, this image adds three secret-free QQ startup lines:
+credentials resolved, gateway connection requested, and either `Bot ready!` or
+the SDK startup error. If it is still not ready after 20 seconds it prints a
+warning pointing to DNS, TLS/proxy egress, or QQ Bot credential/permission
+checks. Set `QQBOT_STARTUP_WARN_MS` to adjust that warning threshold; it does
+not terminate or restart a connection that is still retrying.
 
 ## Default persona and safety policy
 

@@ -19,6 +19,8 @@ services:
       LLM_API_PROTOCOL: ${LLM_API_PROTOCOL:-}
       QQBOT_VISION_PROVIDER: ${QQBOT_VISION_PROVIDER:-}
       QQBOT_VISION_MODEL: ${QQBOT_VISION_MODEL:-}
+      # A diagnostic only; it does not contain or print credentials.
+      QQBOT_STARTUP_WARN_MS: ${QQBOT_STARTUP_WARN_MS:-20000}
       DSH_PERMISSION_MODE: ${DSH_PERMISSION_MODE:-read-only}
       QQBOT_APPID: ${QQBOT_APPID}
       QQBOT_SECRET: ${QQBOT_SECRET}

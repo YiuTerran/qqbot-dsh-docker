@@ -3,6 +3,8 @@
 # published for 24.14.0 (linux/amd64 and linux/arm64 are both available).
 FROM node:24.14.0-bookworm-slim@sha256:d8e448a56fc63242f70026718378bd4b00f8c82e78d20eefb199224a4d8e33d8 AS build
 
+COPY scripts/instrument-qqbot-startup.mjs /usr/local/lib/instrument-qqbot-startup.mjs
+
 ENV DEBIAN_FRONTEND=noninteractive \
     NODE_ENV=production \
     DSH_HOME=/data \
@@ -19,6 +21,10 @@ RUN apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
 # dsh's plugin manager delegates profile installation to the pnpm executable.
 # All three runtime packages are pinned so a rebuild uses the same closure.
 # dsh-qqbot 0.5.0 accepts the dsh component APIs from 0.1.0-rc.6 upward.
+# dsh's default logger has no stdout sink for this profile. The following build
+# step instruments the pinned adapter's compiled entry points so failed/stalled
+# gateway startup is diagnosable without emitting secrets; it fails if that
+# adapter layout changes.
 RUN --mount=type=cache,target=/root/.npm \
     npm install --global --omit=dev \
         pnpm@12.6.0 \
@@ -26,6 +32,7 @@ RUN --mount=type=cache,target=/root/.npm \
     && pnpm --version \
     && pnpm config set store-dir /tmp/pnpm-store \
     && DSH_HOME=/opt/dsh-seed dsh plugin --profile qqbot add @tencent-connect/dsh-qqbot@0.5.0 \
+    && node /usr/local/lib/instrument-qqbot-startup.mjs /opt/dsh-seed/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist \
     && node -e "const p=require('/opt/dsh-seed/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/package.json'); if (p.version !== '0.5.0') process.exit(1)"
 
 FROM node:24.14.0-bookworm-slim@sha256:d8e448a56fc63242f70026718378bd4b00f8c82e78d20eefb199224a4d8e33d8
