@@ -1,0 +1,22 @@
+services:
+  qqbot:
+    # Provide this value in the shell (or replace it in a QNAP Application
+    # definition) with a fully versioned Harbor image reference.
+    image: "${HARBOR_IMAGE:?Set HARBOR_IMAGE to a versioned Harbor image reference}"
+    container_name: dsh-qqbot
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Taipei
+      DSH_HOME: /data
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      QQBOT_APPID: ${QQBOT_APPID}
+      QQBOT_SECRET: ${QQBOT_SECRET}
+    volumes:
+      - dsh-data:/data
+      - dsh-workspace:/workspace
+
+volumes:
+  dsh-data:
+    name: dsh-qqbot-data
+  dsh-workspace:
+    name: dsh-qqbot-workspace
