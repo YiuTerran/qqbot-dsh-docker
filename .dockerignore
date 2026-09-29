@@ -6,4 +6,7 @@ node_modules
 npm-debug.log*
 *.log
 README.md
-scripts
+# The image build needs this startup-instrumentation helper; keep the remaining
+# local test and release helpers out of the Docker context.
+scripts/*
+!scripts/instrument-qqbot-startup.mjs
