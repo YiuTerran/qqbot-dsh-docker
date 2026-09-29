@@ -2,6 +2,12 @@
 # AGENTS.md remains freely replaceable; it must not be the only safety boundary.
 - id: im-qqbot
   config:
+    # This overlay replaces the component config supplied by the installed
+    # profile. Preserve the plugin's explicit environment placeholders so the
+    # gateway receives QQBOT_APPID/QQBOT_SECRET instead of silently entering
+    # the interactive QR-binding path during container startup.
+    appId: __FROM_ENV__
+    appSecret: __FROM_ENV__
     cwd: /workspace
     requireMention: true
     directPrompt: >-

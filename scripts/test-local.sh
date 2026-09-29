@@ -25,6 +25,11 @@ if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
     docker build --pull --quiet --tag "$IMAGE" .
 fi
 
+# The immutable launcher overlay must preserve the plugin's environment
+# credential placeholders; otherwise a patched profile can wait for QR setup.
+grep -Fq 'appId: __FROM_ENV__' defaults/cordis.safety.patch.yml
+grep -Fq 'appSecret: __FROM_ENV__' defaults/cordis.safety.patch.yml
+
 docker volume create "$data_volume" >/dev/null
 docker volume create "$workspace_volume" >/dev/null
 docker volume create "$override_data_volume" >/dev/null
