@@ -15,13 +15,15 @@ operation.
 | Component | Version |
 | --- | --- |
 | Base | Official `node:24.14.0-bookworm-slim@sha256:d8e448a…e33d8` (Debian slim) |
+| pnpm | `12.6.0` |
 | dsh | `@deepseek-ai/dsh@0.1.7-rc.2` |
 | QQ plugin | `@tencent-connect/dsh-qqbot@0.5.0` |
 
 The plugin declares support for the dsh component APIs from `0.1.0-rc.6`; npm's
-stable dsh release was `0.1.7-rc.2` when this project was checked. Both package
-versions, the Node 24.14.0 image tag, and its multi-architecture manifest digest
-are explicitly pinned in the Dockerfile.
+stable dsh release was `0.1.7-rc.2` when this project was checked. dsh delegates
+plugin installation to `pnpm`, so it is installed explicitly. The package
+versions, Node 24.14.0 image tag, and its multi-architecture manifest digest are
+all pinned in the Dockerfile.
 
 During image build, dsh creates the `qqbot` profile and installs the plugin in
 `/opt/dsh-seed`. At runtime `DSH_HOME=/data`. The entrypoint copies the seed to

@@ -15,9 +15,13 @@ RUN apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
         util-linux \
     && rm -rf /var/lib/apt/lists/*
 
+# dsh's plugin manager delegates profile installation to the pnpm executable.
+# All three runtime packages are pinned so a rebuild uses the same closure.
 # dsh-qqbot 0.5.0 accepts the dsh component APIs from 0.1.0-rc.6 upward.
-# 0.1.7-rc.2 is the stable npm release verified when this image was authored.
-RUN npm install --global --omit=dev @deepseek-ai/dsh@0.1.7-rc.2 \
+RUN npm install --global --omit=dev \
+        pnpm@12.6.0 \
+        @deepseek-ai/dsh@0.1.7-rc.2 \
+    && pnpm --version \
     && DSH_HOME=/opt/dsh-seed dsh plugin --profile qqbot add @tencent-connect/dsh-qqbot@0.5.0 \
     && node -e "const p=require('/opt/dsh-seed/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/package.json'); if (p.version !== '0.5.0') process.exit(1)"
 
