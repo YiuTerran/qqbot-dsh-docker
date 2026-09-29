@@ -2,7 +2,7 @@
 
 This repository produces a QNAP-friendly Docker image for Tencent's
 [`dsh-qqbot`](https://github.com/tencent-connect/dsh-qqbot) plugin. Build the
-image on a Mac or in CI, push a versioned tag to Harbor, then use QNAP Container
+image on a Mac or in CI, push a versioned tag to Docker Hub, then use QNAP Container
 Station only to pull the image, set environment variables, attach two Docker
 named volumes, and start it.
 
@@ -35,11 +35,11 @@ dsh --profile qqbot
 
 ## QNAP Container Station GUI deployment
 
-1. In **Container Station**, add your private Harbor registry under Registry
-   (enter the registry hostname, then sign in there). Do not put this password
-   in this repository or image.
-2. Pull one explicit image tag, for example
-   `harbor.example.com/ai/dsh-qqbot:2026.09.29-01`. Do not select `latest`.
+1. In **Container Station**, find the Docker Hub image `tryao/qqbot-dsh` under
+   Registry. If the Docker Hub repository is private, sign in to Docker Hub in
+   Container Station; never put its password in this repository or image.
+2. Pull one explicit image tag, for example `tryao/qqbot-dsh:v0.1.0`. Do not
+   select `latest`.
 3. Create a container from that image, name it `dsh-qqbot`, and set restart
    policy to **unless stopped** (or Container Station's equivalent).
 4. Add these environment variables in the GUI:
@@ -69,35 +69,35 @@ test intentionally avoids that interactive QR flow.
 
 ## Compose option
 
-For command-line Docker Compose, copy `.env.example` to `.env`, enter only the
-three secrets, and keep `.env` out of Git. Set `HARBOR_IMAGE` in your shell to a
-fully versioned reference, then run:
+For command-line Docker Compose, copy `.env.example` to `.env`, enter the three
+secrets and an explicit `IMAGE_TAG`, then keep `.env` out of Git. Run:
 
 ```bash
-export HARBOR_IMAGE=harbor.example.com/ai/dsh-qqbot:2026.09.29-01
+export IMAGE_TAG=v0.1.0
 docker compose --env-file .env -f docker-compose.qnap.yml up -d
 ```
 
-`.env` is solely for Compose users. In Container Station, set the secrets
-directly through the GUI instead. The Compose file creates the same named
-volumes, `dsh-qqbot-data` and `dsh-qqbot-workspace`.
+`.env` is solely for Compose users. It also contains the immutable `IMAGE_TAG`.
+In Container Station, set the secrets directly through the GUI instead. The
+Compose file creates the same named volumes, `dsh-qqbot-data` and
+`dsh-qqbot-workspace`.
 
-## Build and push to Harbor
+## GitHub Actions release to Docker Hub
 
-Log in yourself first; the script never accepts, stores, or prints a Harbor
-password. It makes a multi-platform manifest for `linux/amd64` and
-`linux/arm64` and pushes it directly.
+Pushing a Git tag beginning with `v` runs
+`.github/workflows/dockerhub-release.yml`. It logs in using the GitHub Actions
+secrets `DOCKERHUB_USER` and `DOCKERHUB_SECRET`, then pushes one multi-platform
+manifest for `linux/amd64` and `linux/arm64`. It publishes only the tag you
+pushed; it never creates `latest`.
 
 ```bash
-docker login harbor.example.com
-HARBOR_REGISTRY=harbor.example.com \
-HARBOR_PROJECT=ai \
-IMAGE_TAG=2026.09.29-01 \
-./scripts/build-and-push.sh
+git tag v0.1.0
+git push origin v0.1.0
 ```
 
-`IMAGE_NAME` defaults to `dsh-qqbot`. If `IMAGE_TAG` is omitted, the script
-generates a UTC tag such as `2026.09.29-143000`; it refuses `latest`.
+This creates `tryao/qqbot-dsh:v0.1.0`. The tag must point to a commit already
+pushed to GitHub. The workflow uses GitHub-hosted runners, so it does not depend
+on the local OrbStack build network.
 
 ## Local validation
 
@@ -124,9 +124,9 @@ continuing to mount **the same** `dsh-qqbot-data` and `dsh-qqbot-workspace`
 volumes. For example:
 
 ```text
-harbor.example.com/ai/dsh-qqbot:2026.09.29-01
+tryao/qqbot-dsh:v0.1.0
     + dsh-qqbot-data + dsh-qqbot-workspace
-        -> harbor.example.com/ai/dsh-qqbot:2026.10.03-01
+        -> tryao/qqbot-dsh:v0.2.0
 ```
 
 If the new image misbehaves, switch back to the old tag and retain those exact

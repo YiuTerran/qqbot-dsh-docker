@@ -1,8 +1,6 @@
 services:
   qqbot:
-    # Provide this value in the shell (or replace it in a QNAP Application
-    # definition) with a fully versioned Harbor image reference.
-    image: "${HARBOR_IMAGE:?Set HARBOR_IMAGE to a versioned Harbor image reference}"
+    image: "tryao/qqbot-dsh:${IMAGE_TAG:?Set IMAGE_TAG to a versioned Docker Hub image tag}"
     container_name: dsh-qqbot
     restart: unless-stopped
     environment:

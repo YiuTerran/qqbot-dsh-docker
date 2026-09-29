@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-: "${HARBOR_REGISTRY:?Set HARBOR_REGISTRY, for example harbor.example.com}"
-: "${HARBOR_PROJECT:?Set HARBOR_PROJECT, for example ai}"
+: "${DOCKERHUB_USER:?Set DOCKERHUB_USER, for example tryao}"
 
-IMAGE_NAME="${IMAGE_NAME:-dsh-qqbot}"
+IMAGE_NAME="${IMAGE_NAME:-qqbot-dsh}"
 IMAGE_TAG="${IMAGE_TAG:-$(date -u +%Y.%m.%d-%H%M%S)}"
 
 if [[ "$IMAGE_TAG" == "latest" ]]; then
@@ -12,8 +11,8 @@ if [[ "$IMAGE_TAG" == "latest" ]]; then
     exit 64
 fi
 
-if [[ "$HARBOR_REGISTRY" == */* || "$HARBOR_PROJECT" == */* || -z "$IMAGE_NAME" ]]; then
-    echo "Use a registry host, a single Harbor project name, and a non-empty image name" >&2
+if [[ "$DOCKERHUB_USER" == */* || "$IMAGE_NAME" == */* || -z "$IMAGE_NAME" ]]; then
+    echo "Use a Docker Hub namespace and a non-empty image name" >&2
     exit 64
 fi
 
@@ -27,12 +26,12 @@ if ! docker buildx version >/dev/null 2>&1; then
     exit 69
 fi
 
-image="${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${IMAGE_NAME}:${IMAGE_TAG}"
+image="${DOCKERHUB_USER}/${IMAGE_NAME}:${IMAGE_TAG}"
 
 cat <<EOF
-Building and pushing: $image
+Building and pushing to Docker Hub: $image
 Platforms: linux/amd64,linux/arm64
-Authentication: uses the existing 'docker login $HARBOR_REGISTRY' session.
+Authentication: uses the existing 'docker login' session.
 EOF
 
 docker buildx build \
