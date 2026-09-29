@@ -6,7 +6,17 @@ services:
     environment:
       TZ: Asia/Taipei
       DSH_HOME: /data
-      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      # Optional: only needed by dsh's default deepseek-official route.
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      # Optional: use this generic key name from an OpenAI-compatible dsh
+      # provider configuration (apiKeyEnv: LLM_API_KEY).
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      # Set the four required LLM_* values together to configure a third-party
+      # route. LLM_API_PROTOCOL is optional and defaults to openai-responses.
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_API_BASE_URL: ${LLM_API_BASE_URL:-}
+      LLM_API_PROTOCOL: ${LLM_API_PROTOCOL:-}
       QQBOT_APPID: ${QQBOT_APPID}
       QQBOT_SECRET: ${QQBOT_SECRET}
     volumes:

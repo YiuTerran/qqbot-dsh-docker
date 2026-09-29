@@ -72,12 +72,12 @@ if [[ "$cmd" != '["dsh","--profile","qqbot"]' ]]; then
     exit 1
 fi
 
-if docker image inspect "$IMAGE" | grep -Eqi 'DEEPSEEK_API_KEY|QQBOT_SECRET'; then
+if docker image inspect "$IMAGE" | grep -Eqi 'DEEPSEEK_API_KEY|LLM_API_KEY|QQBOT_SECRET'; then
     echo "Secret variable name unexpectedly present in image configuration" >&2
     exit 1
 fi
 
-if docker history --no-trunc "$IMAGE" | grep -Eqi 'DEEPSEEK_API_KEY|QQBOT_SECRET'; then
+if docker history --no-trunc "$IMAGE" | grep -Eqi 'DEEPSEEK_API_KEY|LLM_API_KEY|QQBOT_SECRET'; then
     echo "Secret variable name unexpectedly present in image history" >&2
     exit 1
 fi

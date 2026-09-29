@@ -50,7 +50,8 @@ dsh --profile qqbot
    | --- | --- |
    | `DSH_HOME` | `/data` |
    | `TZ` | `Asia/Taipei` |
-   | `DEEPSEEK_API_KEY` | your secret |
+   | `DEEPSEEK_API_KEY` | Optional; only for dsh's default `deepseek-official` route |
+   | `LLM_API_KEY` | Optional; API key for a custom OpenAI-compatible route configured with `apiKeyEnv: LLM_API_KEY` |
    | `QQBOT_APPID` | your QQ Bot AppID |
    | `QQBOT_SECRET` | your QQ Bot secret |
 
@@ -69,10 +70,74 @@ The first start seeds `/data`; later starts retain it. The QQ plugin may guide a
 first credential setup when the supplied credentials are incomplete. The local
 test intentionally avoids that interactive QR flow.
 
+## Third-party / OpenAI-compatible model providers
+
+QQ is not limited to the official DeepSeek API. `dsh-qqbot` resolves its model
+route in this order: a QQ conversation's `/model` selection, an explicit QQ
+plugin route, dsh's active default model, then the `deepseek-official` fallback.
+Configure an OpenAI-compatible provider in the **same `qqbot` profile** used by
+this container, then select it as dsh's default model or use `/model` in QQ.
+
+For QNAP Container Station, retain the simple official configuration by setting
+only `DEEPSEEK_API_KEY`; dsh will use its built-in `deepseek-official` default
+route. Do not set any `LLM_*` variables for that case.
+
+For a third-party provider, set the required `LLM_*` variables in the GUI. The
+entrypoint writes a secret-free provider route to the persisted `qqbot` profile
+and makes it dsh's default model. For the endpoint in the screenshot, use this
+pattern (substitute the actual provider key):
+
+| Variable | Example value |
+| --- | --- |
+| `LLM_PROVIDER` | `fan-openai` |
+| `LLM_MODEL` | `deepseek-v4-pro` |
+| `LLM_API_BASE_URL` | `https://slb-v1.api.fan/v1` |
+| `LLM_API_PROTOCOL` | `openai-responses` |
+| `LLM_API_KEY` | the gateway API key |
+
+`LLM_PROVIDER`, `LLM_MODEL`, `LLM_API_BASE_URL`, and `LLM_API_KEY` are required
+together. `LLM_API_PROTOCOL` is optional and defaults to `openai-responses`
+(use `openai-completions` only for a provider that requires it).
+`LLM_PROVIDER` must use lowercase letters, digits, and hyphens. The key is
+never written to `/data`. Changing these values updates the generated route on
+the next container start. Omit every `LLM_*` variable to keep the official
+`DEEPSEEK_API_KEY` route or use a manually configured dsh route instead.
+
+For a route like the one shown in the dsh Models UI, the equivalent provider
+configuration has this shape; it contains no secret:
+
+```yaml
+- id: llm-pi-ai
+  config:
+    providers:
+      my-openai-responses:
+        displayName: My OpenAI Responses gateway
+        apiKeyEnv: LLM_API_KEY
+        api: openai-responses
+        baseURL: https://gateway.example.com/v1
+        models:
+          - id: deepseek-v4-pro
+            name: deepseek-v4-pro
+- id: agent-default-model
+  config:
+    provider: my-openai-responses
+    model: deepseek-v4-pro
+```
+
+Save this through dsh's Models/Settings UI for the `qqbot` profile, or add the
+equivalent rows to `/data/profiles/qqbot/cordis.patch.yml`. Set `LLM_API_KEY`
+only in Container Station's environment-variable UI (or local `.env`), never in
+that YAML file. The container maps dsh's legacy `~/.dsh` settings view back to
+the persistent `/data` volume, so the QQ plugin and dsh resolve the same model
+state. A provider configured in a separate desktop profile is not automatically
+visible to this container.
+
 ## Compose option
 
-For command-line Docker Compose, copy `.env.example` to `.env`, enter the three
-secrets and an explicit `IMAGE_TAG`, then keep `.env` out of Git. Run:
+For command-line Docker Compose, copy `.env.example` to `.env`, enter the QQ
+credentials and the credentials for the selected model route (official
+`DEEPSEEK_API_KEY` or the third-party `LLM_*` route), plus an explicit
+`IMAGE_TAG`; then keep `.env` out of Git. Run:
 
 ```bash
 export IMAGE_TAG=v0.1.0
