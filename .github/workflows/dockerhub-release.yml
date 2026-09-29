@@ -16,6 +16,10 @@ jobs:
   publish:
     name: Build and push linux/amd64 + linux/arm64
     runs-on: ubuntu-24.04
+    # Docker Hub credentials are configured as secrets in the GitHub Environment
+    # named "de". Environment secrets are not available without this binding.
+    environment:
+      name: de
     env:
       IMAGE: tryao/qqbot-dsh
       TAG: ${{ github.ref_name }}
