@@ -56,10 +56,26 @@ RUN apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
 # Copy only the installed global runtime packages and the seeded profile; npm
 # and pnpm download caches exist only in the discarded build stage.
 COPY --from=build /usr/local/lib/node_modules/ /usr/local/lib/node_modules/
-COPY --from=build /usr/local/bin/dsh /usr/local/bin/dsh
-COPY --from=build /usr/local/bin/pnpm /usr/local/bin/pnpm
 COPY --from=build /usr/local/lib/instrument-qqbot-startup.mjs /usr/local/lib/instrument-qqbot-startup.mjs
 COPY --from=build /opt/dsh-seed/ /opt/dsh-seed/
+COPY scripts/link-global-bins.mjs /usr/local/lib/link-global-bins.mjs
+
+# npm installs /usr/local/bin/dsh and /usr/local/bin/pnpm as symlinks into
+# /usr/local/lib/node_modules. Copying them out of the build stage lands a real
+# file in /usr/local/bin instead of a link, and Node's ESM resolver then only
+# looks for node_modules under /usr/local/bin, never in the global package root
+# (ESM ignores the CJS global folders). dsh therefore died at startup with
+# ERR_MODULE_NOT_FOUND for @deepseek-ai/dsh-app-boot. Rebuild the links from
+# each package's own bin field so the running module stays inside the global
+# node_modules tree, then prove the launcher actually boots before publishing.
+RUN set -eu \
+    && node /usr/local/lib/link-global-bins.mjs \
+    && rm -f /usr/local/lib/link-global-bins.mjs \
+    && test -L /usr/local/bin/dsh \
+    && test -L /usr/local/bin/pnpm \
+    && mkdir -p /tmp/dsh-launch-check \
+    && timeout 60 env HOME=/tmp/dsh-launch-check DSH_HOME=/tmp/dsh-launch-check /usr/local/bin/dsh --version >/dev/null \
+    && rm -rf /tmp/dsh-launch-check
 
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY defaults/AGENTS.md /opt/qqbot-defaults/AGENTS.md

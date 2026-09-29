@@ -2,11 +2,15 @@
 .env
 .env.*
 !.env.example
-node_modules
+# Anchored to the context root so it can never filter the global
+# /usr/local/lib/node_modules tree copied out of the build stage.
+/node_modules
 npm-debug.log*
 *.log
 README.md
-# The image build needs this startup-instrumentation helper; keep the remaining
-# local test and release helpers out of the Docker context.
+# The image build needs these two helpers; keep the remaining local test and
+# release helpers out of the Docker context.
 scripts/*
 !scripts/instrument-qqbot-startup.mjs
+!scripts/link-global-bins.mjs
+.workbuddy/

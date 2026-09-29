@@ -65,6 +65,11 @@ docker create \
         test -w /workspace
         touch /workspace/.dsh-qqbot-test-writable
         command -v bwrap
+        # Regression guard: the launcher must stay a symlink into the global
+        # package root. A real file in /usr/local/bin breaks ESM resolution and
+        # dsh dies with ERR_MODULE_NOT_FOUND for @deepseek-ai/dsh-app-boot.
+        test -L /usr/local/bin/dsh
+        test -L /usr/local/bin/pnpm
         dsh --version
         grep -Rqs "gateway initialization failed" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
         grep -Rqs "QQ gateway is still not ready" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
