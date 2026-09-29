@@ -11,6 +11,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
     && apt-get install --yes --no-install-recommends \
         ca-certificates \
+        bubblewrap \
         git \
         tini \
         util-linux \

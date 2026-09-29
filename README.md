@@ -25,6 +25,15 @@ plugin installation to `pnpm`, so it is installed explicitly. The package
 versions, Node 24.14.0 image tag, and its multi-architecture manifest digest are
 all pinned in the Dockerfile.
 
+The image also includes `bubblewrap` (`bwrap`). DSH uses it on Linux to enforce
+the selected Shell sandbox policy; without a usable Bubblewrap or Landlock
+backend, DSH refuses to run a Shell command rather than executing it outside the
+sandbox. Installing it does not grant the bot extra container privileges:
+`read-only` remains the default, and `workspace-write` remains confined to
+`/workspace`. Some Docker hosts block unprivileged user namespaces; in that
+case DSH will keep failing closed and the Container Station log will show the
+Bubblewrap runner error rather than silently running an unrestricted command.
+
 During image build, dsh creates the `qqbot` profile and installs the plugin in
 `/opt/dsh-seed`. At runtime `DSH_HOME=/data`. The entrypoint copies the seed to
 `/data` only when `/data/.initialized` is absent. It never overwrites an

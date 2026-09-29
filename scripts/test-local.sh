@@ -59,6 +59,7 @@ docker create \
         grep -q "蓝色大肥鱼" /data/AGENTS.md
         test -w /workspace
         touch /workspace/.dsh-qqbot-test-writable
+        command -v bwrap
         dsh --version
         dsh --profile qqbot --patch /opt/qqbot-defaults/cordis.safety.patch.yml --dump-config >/dev/null
     ' >/dev/null
