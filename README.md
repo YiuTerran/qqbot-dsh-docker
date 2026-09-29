@@ -54,6 +54,8 @@ dsh --profile qqbot
    | `LLM_API_KEY` | Optional; API key for a custom OpenAI-compatible route configured with `apiKeyEnv: LLM_API_KEY` |
    | `QQBOT_APPID` | your QQ Bot AppID |
    | `QQBOT_SECRET` | your QQ Bot secret |
+   | `QQBOT_VISION_PROVIDER` | Optional visual-model route override; empty reuses `LLM_PROVIDER`, then `deepseek-official` |
+   | `QQBOT_VISION_MODEL` | Optional visual-model override; empty reuses `LLM_MODEL`, then `deepseek-flash` |
    | `DSH_PERMISSION_MODE` | `read-only` (default) or `workspace-write` for deliberate `/workspace` changes |
 
 5. Create and attach Docker **volumes** (not host directories):
@@ -96,9 +98,16 @@ For Compose, the optional additional mount is:
 In QNAP Container Station, add the equivalent read-only **host-file** mount.
 Replacing `AGENTS.md` changes the persona and soft behavioral guidance, but it
 does not remove the image's transport-level policy: group messages must mention
-the bot, media download is off, file sending remains restricted to
-`/workspace`, and DSH is read-only unless the deployer explicitly opts into
+the bot; images and GIFs attached to the current QQ message may be read through
+a 10 MB, one-hour media pipeline; file sending remains restricted to
+`/workspace`; and DSH is read-only unless the deployer explicitly opts into
 `workspace-write`.
+
+Vision automatically reuses `LLM_PROVIDER` / `LLM_MODEL`, so a third-party
+multimodal route needs no second model or key. Without an `LLM_*` route, it uses
+the built-in `deepseek-official` / `deepseek-flash` route. Set
+`QQBOT_VISION_PROVIDER` and `QQBOT_VISION_MODEL` only when vision should use a
+different multimodal route.
 
 ## Third-party / OpenAI-compatible model providers
 
@@ -239,8 +248,10 @@ The image does not contain a Docker socket, QNAP host path, or Mac
 This image leaves private-chat and group admission to the QQ Open Platform's own
 allowlist and permission settings rather than duplicating those OpenIDs in the
 container. Group messages require an @mention. The image adds a group system
-prompt forbidding tool use and environment-changing actions, but the upstream
+prompt forbidding general tool use and environment-changing actions, with one
+narrow exception for visual analysis of the current QQ attachment. The upstream
 plugin does not offer a separate, hard per-group tool-permission boundary;
-treat `DSH_PERMISSION_MODE`, container isolation, and the confirmation flow as
-the actual enforcement layers. The plugin's file sending path restriction remains
-enabled; do not add unrestricted extra roots casually.
+treat `DSH_PERMISSION_MODE`, container isolation, media size/retention limits,
+and the confirmation flow as the actual enforcement layers. The plugin's file
+sending path restriction remains enabled; do not add unrestricted extra roots
+casually.

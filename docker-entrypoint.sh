@@ -77,10 +77,13 @@ const route = upsert('llm-pi-ai');
 route.config.providers ||= {};
 route.config.providers[provider] = {
   displayName: provider,
-  apiKeyEnv: 'LLM_API_KEY',
-  api,
-  baseURL: url.toString().replace(/\/$/, ''),
-  models: [{ id: model, name: model }],
+    apiKeyEnv: 'LLM_API_KEY',
+    api,
+    baseURL: url.toString().replace(/\/$/, ''),
+    // The QQ vision tool reuses this route when no QQBOT_VISION_* override is
+    // present. Declare image input so dsh does not reject that tool result
+    // before the OpenAI-compatible provider receives it.
+    models: [{ id: model, name: model, input: ['text', 'image'] }],
 };
 const defaultModel = upsert('agent-default-model');
 defaultModel.config.provider = provider;
