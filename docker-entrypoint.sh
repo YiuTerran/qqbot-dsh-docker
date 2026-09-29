@@ -22,7 +22,15 @@ chown -h node:node "$HOME/.dsh"
 if [ ! -e /data/.initialized ]; then
     cp -a /opt/dsh-seed/. /data/
     : > /data/.initialized
-    chown -R node:node /data
+    # /opt/dsh-seed is already node-owned.  Do not recursively chown /data:
+    # users may bind mount /data/AGENTS.md read-only to replace the default.
+    chown node:node /data /data/.initialized
+fi
+
+# Seed the shared, user-overridable instruction file separately from the dsh
+# profile seed. A read-only bind mount at this target therefore wins safely.
+if [ ! -e /data/AGENTS.md ]; then
+    install -o node -g node -m 0644 /opt/qqbot-defaults/AGENTS.md /data/AGENTS.md
 fi
 
 # Container Station can configure a third-party OpenAI-compatible route entirely
@@ -64,6 +72,7 @@ const upsert = (id) => {
   entry.config ||= {};
   return entry;
 };
+
 const route = upsert('llm-pi-ai');
 route.config.providers ||= {};
 route.config.providers[provider] = {
@@ -79,7 +88,7 @@ defaultModel.config.model = model;
 
 fs.writeFileSync(path, `# Generated from LLM_* environment variables; no secret is stored here.\n${yaml.dump(entries)}`);
 NODE
-    chown node:node /data/profiles/qqbot/cordis.patch.yml
+chown node:node /data/profiles/qqbot/cordis.patch.yml
 fi
 
 # A Docker named volume is normally root-owned when first mounted.  Make its
@@ -87,5 +96,13 @@ fi
 # a long-lived agent workspace on every start.
 chown node:node /workspace
 cd /workspace
+
+# Append the immutable transport safety overlay to the stock command while
+# preserving the image's documented CMD. It applies after any persisted profile
+# configuration; AGENTS.md stays separately user-replaceable.
+if [ "$#" -ge 3 ] && [ "$1" = "dsh" ] && [ "$2" = "--profile" ] && [ "$3" = "qqbot" ]; then
+    shift 3
+    set -- dsh --profile qqbot --patch /opt/qqbot-defaults/cordis.safety.patch.yml "$@"
+fi
 
 exec setpriv --reuid=node --regid=node --init-groups -- "$@"

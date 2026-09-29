@@ -54,6 +54,7 @@ dsh --profile qqbot
    | `LLM_API_KEY` | Optional; API key for a custom OpenAI-compatible route configured with `apiKeyEnv: LLM_API_KEY` |
    | `QQBOT_APPID` | your QQ Bot AppID |
    | `QQBOT_SECRET` | your QQ Bot secret |
+   | `DSH_PERMISSION_MODE` | `read-only` (default) or `workspace-write` for deliberate `/workspace` changes |
 
 5. Create and attach Docker **volumes** (not host directories):
 
@@ -69,6 +70,35 @@ dsh --profile qqbot
 The first start seeds `/data`; later starts retain it. The QQ plugin may guide a
 first credential setup when the supplied credentials are incomplete. The local
 test intentionally avoids that interactive QR flow.
+
+## Default persona and safety policy
+
+On the first start, the image creates `/data/AGENTS.md` from its built-in
+default. It defines the **Blue Big Fat Fish** (蓝色大肥鱼) whale-maid persona,
+Chinese-first concise replies, and general safety conventions. DSH loads this
+file as its global agent instruction file.
+
+Users can replace the persona without rebuilding the image: bind mount their
+own regular file at `/data/AGENTS.md` as **read-only**. This works alongside
+the named `/data` volume because the entrypoint seeds the dsh profile and the
+instruction file separately; it intentionally does not recursively `chown`
+`/data`, which would fail against a read-only file mount.
+
+For Compose, the optional additional mount is:
+
+```yaml
+    volumes:
+      - dsh-data:/data
+      - ./my-bot-instructions.md:/data/AGENTS.md:ro
+      - dsh-workspace:/workspace
+```
+
+In QNAP Container Station, add the equivalent read-only **host-file** mount.
+Replacing `AGENTS.md` changes the persona and soft behavioral guidance, but it
+does not remove the image's transport-level policy: group messages must mention
+the bot, media download is off, file sending remains restricted to
+`/workspace`, and DSH is read-only unless the deployer explicitly opts into
+`workspace-write`.
 
 ## Third-party / OpenAI-compatible model providers
 
@@ -206,10 +236,11 @@ Secrets are runtime environment variables only; none are copied into the image.
 The image does not contain a Docker socket, QNAP host path, or Mac
 `node_modules`, and it restricts the bot's working directory to `/workspace`.
 
-Upstream `dsh-qqbot` defaults both `access.c2cMode` (private chats) and
-`access.groupMode` (groups) to `open`. Consequently, any permitted QQ user or
-group member can trigger an Agent. Before production use, configure the plugin
-profile with `allowlist` or `disabled` as appropriate, use restrictive presets
-and tool permissions, and keep the workspace permissions narrow. The plugin's
-file sending path restriction is enabled by default; do not add unrestricted
-extra roots casually.
+This image leaves private-chat and group admission to the QQ Open Platform's own
+allowlist and permission settings rather than duplicating those OpenIDs in the
+container. Group messages require an @mention. The image adds a group system
+prompt forbidding tool use and environment-changing actions, but the upstream
+plugin does not offer a separate, hard per-group tool-permission boundary;
+treat `DSH_PERMISSION_MODE`, container isolation, and the confirmation flow as
+the actual enforcement layers. The plugin's file sending path restriction remains
+enabled; do not add unrestricted extra roots casually.
