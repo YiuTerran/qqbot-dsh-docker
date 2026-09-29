@@ -66,6 +66,7 @@ docker create \
         touch /workspace/.dsh-qqbot-test-writable
         command -v bwrap
         dsh --version
+        grep -Rqs "gateway initialization failed" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
         grep -Rqs "QQ gateway is still not ready" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
         dsh --profile qqbot --patch /opt/qqbot-defaults/cordis.safety.patch.yml --dump-config >/dev/null
     ' >/dev/null

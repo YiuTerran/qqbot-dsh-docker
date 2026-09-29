@@ -58,6 +58,7 @@ RUN apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
 COPY --from=build /usr/local/lib/node_modules/ /usr/local/lib/node_modules/
 COPY --from=build /usr/local/bin/dsh /usr/local/bin/dsh
 COPY --from=build /usr/local/bin/pnpm /usr/local/bin/pnpm
+COPY --from=build /usr/local/lib/instrument-qqbot-startup.mjs /usr/local/lib/instrument-qqbot-startup.mjs
 COPY --from=build /opt/dsh-seed/ /opt/dsh-seed/
 
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh

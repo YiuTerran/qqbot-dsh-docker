@@ -33,6 +33,16 @@ if [ ! -e /data/AGENTS.md ]; then
     install -o node -g node -m 0644 /opt/qqbot-defaults/AGENTS.md /data/AGENTS.md
 fi
 
+# Existing named volumes retain the originally seeded plugin. Apply the same
+# stdout-only diagnostics to that pinned plugin too, so upgrading the image
+# fixes observability without discarding sessions or settings.
+qqbot_dist=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
+if [ -d "$qqbot_dist" ]; then
+    if ! node /usr/local/lib/instrument-qqbot-startup.mjs "$qqbot_dist"; then
+        echo "[entrypoint] QQ startup diagnostics were not applied; continuing with the installed plugin" >&2
+    fi
+fi
+
 # Container Station can configure a third-party OpenAI-compatible route entirely
 # through environment variables. The generated profile patch contains only the
 # environment-variable *name*, never LLM_API_KEY itself.

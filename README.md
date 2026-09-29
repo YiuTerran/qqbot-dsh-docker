@@ -90,6 +90,13 @@ warning pointing to DNS, TLS/proxy egress, or QQ Bot credential/permission
 checks. Set `QQBOT_STARTUP_WARN_MS` to adjust that warning threshold; it does
 not terminate or restart a connection that is still retrying.
 
+The image also reports exceptions from the setup that precedes the Gateway
+connection, including media and vision-tool registration. Existing `/data`
+volumes are patched at startup, so this diagnostic upgrade does not require
+removing sessions or settings. To isolate a startup problem temporarily, set
+`QQBOT_VISION_ENABLED=false`; if necessary, also set `QQBOT_MEDIA_ENABLED=false`.
+Both remain enabled by default.
+
 ## Default persona and safety policy
 
 On the first start, the image creates `/data/AGENTS.md` from its built-in
