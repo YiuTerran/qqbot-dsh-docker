@@ -11,7 +11,8 @@
 // This runs in the runtime stage, after the global package tree has been
 // copied, and rebuilds each launcher as an absolute symlink so the module that
 // actually executes always lives inside the global node_modules tree. It fails
-// loudly if a bin entry is missing or if the tree cannot be resolved.
+// loudly if a bin entry or its target is missing. The Dockerfile then checks
+// the actual dsh launcher with --version from its own dependency context.
 import fs from "node:fs";
 import path from "node:path";
 
@@ -49,8 +50,7 @@ for (const [name, commands] of wanted) {
   }
 }
 
-// Proof that the copied tree is intact: this file sits in /usr/local/lib, so a
-// successful ESM resolution here is exactly what dsh does from its own package
-// directory. Throws ERR_MODULE_NOT_FOUND if the global tree is broken.
-const resolved = import.meta.resolve("@deepseek-ai/dsh-app-boot");
-console.log(`resolved @deepseek-ai/dsh-app-boot -> ${resolved}`);
+// Do not resolve dsh dependencies from this helper's /usr/local/lib location:
+// npm can install them in @deepseek-ai/dsh/node_modules, which is visible to
+// dsh/lib/bin.js but not to this module. Running the linked CLI in the
+// Dockerfile validates the real ESM imports without this false negative.
