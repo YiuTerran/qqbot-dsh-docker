@@ -50,6 +50,74 @@ await patch('gateway/middleware-setup.js', `import {createScopedQuoteRef} from '
     ].join('\n'), file);
 });
 
+await patch('gateway/middleware-setup.js', '// Chat-only dice command middleware v1.', (content, file) => {
+    const diceImport = `import { createDiceCommandMiddleware, createDiceAwareHistoryBuffer } from '${policy}';`;
+    if (!content.includes(diceImport)) content = `${diceImport}\n${content}`;
+    const originalHistory = [
+        '    bot.use(historyBuffer({',
+        '        limit: config.historyLimit,',
+        '        store: getHistoryStore(),',
+        '        recordOnSkip: true,',
+        '        groupKey: (ctx) => {',
+        '            const gid = ctx.message.groupOpenid;',
+        '            if (ctx.message.kind !== \'group\' || !gid)',
+        '                return undefined;',
+        '            return historyGroupKey(config.appId, gid);',
+        '        },',
+        '    }));',
+    ].join('\n');
+    const wrappedHistory = [
+        '    bot.use(createDiceAwareHistoryBuffer(historyBuffer, {',
+        '        limit: config.historyLimit,',
+        '        store: getHistoryStore(),',
+        '        recordOnSkip: true,',
+        '        groupKey: (ctx) => {',
+        '            const gid = ctx.message.groupOpenid;',
+        '            if (ctx.message.kind !== \'group\' || !gid)',
+        '                return undefined;',
+        '            return historyGroupKey(config.appId, gid);',
+        '        },',
+        '    }, contentSanitizer));',
+    ].join('\n');
+    if (content.includes(originalHistory)) content = replaceOne(content, originalHistory, wrappedHistory, file);
+    else if (!content.includes(wrappedHistory)) throw new Error(`Chat-only patch: expected the pinned group history middleware in ${file}`);
+
+    const originalRateMarker = '    bot.use(rateLimiter());\n';
+    const diceCommandBlock = [
+        '    bot.use(rateLimiter());',
+        '    // Chat-only dice command middleware v1.',
+        '    bot.use(createDiceCommandMiddleware());',
+        '',
+    ].join('\n');
+    if (content.includes(originalRateMarker)) content = replaceOne(content, originalRateMarker, `${diceCommandBlock}\n`, file);
+    else if (!content.includes('    bot.use(createDiceCommandMiddleware());')) {
+        throw new Error(`Chat-only patch: expected rate limiter insertion point in ${file}`);
+    }
+    return content;
+});
+
+const middlewareSetupPath = join(root, 'gateway/middleware-setup.js');
+const patchedMiddlewareSetup = updates.get(middlewareSetupPath) ?? await readFile(middlewareSetupPath, 'utf8');
+const diceMiddlewareMarker = '// Chat-only dice command middleware v1.';
+const diceMiddlewareImport = `import { createDiceCommandMiddleware, createDiceAwareHistoryBuffer } from '${policy}';`;
+const rateLimitPosition = patchedMiddlewareSetup.indexOf('    bot.use(rateLimiter());');
+const diceCommandPosition = patchedMiddlewareSetup.indexOf('    bot.use(createDiceCommandMiddleware());');
+const slashPosition = patchedMiddlewareSetup.indexOf('    const slash = slashCommand({');
+const accessPosition = patchedMiddlewareSetup.indexOf('    bot.use(accessPolicy({');
+const mentionPosition = patchedMiddlewareSetup.indexOf('    bot.use(mentionGate({');
+const sanitizerPosition = patchedMiddlewareSetup.indexOf('    bot.use(contentSanitizer({');
+const attachmentPosition = patchedMiddlewareSetup.indexOf('    bot.use(attachmentProcessor(config, logger));');
+if (patchedMiddlewareSetup.split(diceMiddlewareMarker).length !== 2
+    || patchedMiddlewareSetup.split(diceMiddlewareImport).length !== 2
+    || patchedMiddlewareSetup.split('bot.use(createDiceAwareHistoryBuffer(historyBuffer, {').length !== 2
+    || patchedMiddlewareSetup.split('    }, contentSanitizer));').length !== 2
+    || patchedMiddlewareSetup.split('bot.use(createDiceCommandMiddleware());').length !== 2
+    || accessPosition < 0 || mentionPosition <= accessPosition || sanitizerPosition <= mentionPosition
+    || rateLimitPosition <= sanitizerPosition || diceCommandPosition <= rateLimitPosition
+    || slashPosition <= diceCommandPosition || attachmentPosition <= slashPosition) {
+    throw new Error('Chat-only patch: dice command/history middleware is incomplete or ordered outside the guarded chain');
+}
+
 await patch('index.js', "export const inject = ['agents', 'tools', 'web', 'systemPrompt'];", (content, file) => {
     const desired = "export const inject = ['agents', 'tools', 'web', 'systemPrompt'];";
     const intermediate = "export const inject = ['agents', 'tools', 'web'];";

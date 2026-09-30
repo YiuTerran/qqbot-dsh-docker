@@ -89,6 +89,7 @@ COPY defaults/qqbot-web-pages.mjs /opt/qqbot-defaults/qqbot-web-pages.mjs
 COPY defaults/qqbot-document-scope.mjs /opt/qqbot-defaults/qqbot-document-scope.mjs
 COPY defaults/qqbot-text-documents.mjs /opt/qqbot-defaults/qqbot-text-documents.mjs
 COPY defaults/qqbot-documents.mjs /opt/qqbot-defaults/qqbot-documents.mjs
+COPY defaults/qqbot-dice.mjs /opt/qqbot-defaults/qqbot-dice.mjs
 
 RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh \
     && chown -R node:node /opt/dsh-seed /opt/qqbot-defaults

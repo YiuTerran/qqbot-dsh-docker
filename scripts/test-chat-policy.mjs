@@ -5,9 +5,11 @@ import { mkdtemp, writeFile, readFile, symlink, mkdir, rename, rm } from 'node:f
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { test } from 'node:test';
+import crypto from 'node:crypto';
 import dns from 'node:dns';
 import dnsPromises from 'node:dns/promises';
 import { syncBuiltinESMExports } from 'node:module';
+import { performance } from 'node:perf_hooks';
 import { createScopedQuoteRef, installChatPolicy, setCurrentImages, clearCurrentImages, denyUnsafeTool, QQ_MEDIA_ROOT } from '/opt/qqbot-defaults/qqbot-chat-policy.mjs';
 import { WebPageProvider, PublicHttpProvider, downloadCurrentQQImage } from '/opt/qqbot-defaults/qqbot-web-pages.mjs';
 import { beginDocumentTurn, endDocumentTurn, getDocumentTurn, isDocumentTurnActive, isTurnUrlAllowed, runInDocumentExecution, recordSuccessfulSearchSources, authorizeTurnProviderUrl, runWithProviderAuthorization, assertProviderRequestUrl } from '/opt/qqbot-defaults/qqbot-document-scope.mjs';
@@ -37,6 +39,8 @@ const { MEDIA_ROOT } = await import(`${adapter}media/media-cleaner.js`);
 const { handleInbound } = await import(`${adapter}transport/inbound.js`);
 const { downloadMediaAttachments } = await import(`${adapter}transport/attachment.js`);
 const { attachmentProcessor } = await import(`${adapter}middleware/attachment.js`);
+const { setupMiddlewares } = await import(`${adapter}gateway/middleware-setup.js`);
+const { getHistoryStore, historyGroupKey } = await import(`${adapter}features/history-store.js`);
 const qqbotNode = '/data/profiles/qqbot/node_modules/@tencent-connect/qqbot-nodejs/dist/';
 const { quoteRef } = await import(`${qqbotNode}middleware/quote-ref.js`);
 const logger = { info() {}, warn() {}, debug() {}, error() {} };
@@ -82,6 +86,25 @@ function call(ctx, name, args, agent, signal = new AbortController().signal) {
     return ctx.tools.execute({ name, arguments: args, agent, callId: 'test-call', signal });
 }
 
+function nativeCall(ctx, name, args, agent, callId, signal = new AbortController().signal) {
+    return ctx.tools.execute({ name, arguments: args, agent, callId, signal });
+}
+
+function captureMiddlewareChain(config, manager = {}) {
+    const layers = [];
+    setupMiddlewares({ use(middleware) { layers.push(middleware); } }, config, manager, logger);
+    return layers;
+}
+
+async function runMiddlewareChain(layers, ctx) {
+    let index = 0;
+    const next = async () => {
+        const middleware = layers[index++];
+        if (middleware) await middleware(ctx, next);
+    };
+    await next();
+}
+
 function fakeTool(ctx, name, execute) {
     ctx.tools.register({
         name, description: name,
@@ -112,8 +135,364 @@ test('executor rejects dangerous and unknown tools before their bodies run, even
     assert.equal(prependAllows, 1, 'prepend allow listener was reached');
     assert.equal(executed, 0, 'monotonic guard must still refuse');
     const assembly = await ctx.systemPrompt.assemble();
-    assert.deepEqual(assembly.tools.map((tool) => tool.name), ['qqbot_read_document']);
+    assert.deepEqual(assembly.tools.map((tool) => tool.name), ['qqbot_read_document', 'qqbot_roll_dice']);
     assert.ok(assembly.sections.some((section) => section.name === 'qqbot:chat-only-policy'));
+});
+
+test('qqbot_roll_dice is native, turn-bound, idempotent, and still subject to the monotonic guard', async (t) => {
+    const ctx = await runtime(t);
+    const toolNames = (await ctx.systemPrompt.assemble()).tools.map((tool) => tool.name);
+    assert.ok(toolNames.includes('qqbot_roll_dice'));
+
+    const noTurn = await nativeCall(ctx, 'qqbot_roll_dice', { expression: 'd1' }, {}, 'dice-no-turn');
+    assert.equal(noTurn.isError, true, 'direct tool dispatch outside a QQ turn is denied');
+    const blockedTool = await nativeCall(ctx, 'bash', { command: 'must not run' }, {}, 'dice-dangerous');
+    assert.equal(blockedTool.isError, true, 'existing dangerous tools remain denied');
+
+    let prependedAllows = 0;
+    ctx.on('tools/pre-execute', () => { prependedAllows++; return { kind: 'allow' }; }, { prepend: true });
+    const stillNoTurn = await nativeCall(ctx, 'qqbot_roll_dice', { expression: 'd1' }, {}, 'dice-no-turn-after-allow');
+    assert.equal(stillNoTurn.isError, true, 'a prepended allow cannot remove the message-turn guard');
+    assert.equal(prependedAllows, 1);
+
+    const agent = {};
+    beginDocumentTurn(agent, { content: 'Roll the dice.' });
+    t.after(() => endDocumentTurn(agent));
+    const first = await nativeCall(ctx, 'qqbot_roll_dice', { expression: 'd1' }, agent, 'dice-idempotent');
+    assert.equal(first.isError, false, JSON.stringify(first));
+    const expected = structuredClone(first.value);
+    assert.throws(() => { first.value.results[0].total = 99; }, TypeError, 'native ToolRuntime freezes tool outputs');
+    const abortCached = new AbortController();
+    abortCached.abort(new Error('cancel the retry'));
+    assert.equal((await nativeCall(ctx, 'qqbot_roll_dice', { expression: 'd1' }, agent, 'dice-idempotent', abortCached.signal)).isError, true,
+        'a cancelled replay is rejected before returning a cached success');
+    const replay = await nativeCall(ctx, 'qqbot_roll_dice', { expression: 'd1' }, agent, 'dice-idempotent');
+    assert.equal(replay.isError, false);
+    assert.notStrictEqual(replay.value, first.value);
+    assert.deepEqual(replay.value, expected, 'mutating one returned value cannot alter the cached native result');
+    const changedArgs = await nativeCall(ctx, 'qqbot_roll_dice', { expression: 'd1+0' }, agent, 'dice-idempotent');
+    assert.equal(changedArgs.isError, true, 'a reused call ID with changed arguments is denied');
+
+    const invalid = await nativeCall(ctx, 'qqbot_roll_dice', { expression: 'd6*2' }, agent, 'dice-invalid-cached');
+    assert.equal(invalid.isError, true);
+    const invalidRetry = await nativeCall(ctx, 'qqbot_roll_dice', { expression: 'd6*2' }, agent, 'dice-invalid-cached');
+    assert.equal(invalidRetry.isError, true);
+    assert.deepEqual(invalidRetry.content, invalid.content, 'native retries receive the cached failure');
+    const invalidChanged = await nativeCall(ctx, 'qqbot_roll_dice', { expression: 'd6' }, agent, 'dice-invalid-cached');
+    assert.equal(invalidChanged.isError, true, 'a failed call ID cannot be repurposed');
+
+    const unknownArgs = await nativeCall(ctx, 'qqbot_roll_dice', { expression: 'd1', extra: true }, agent, 'dice-unknown-arg');
+    assert.equal(unknownArgs.isError, true);
+    assert.equal((await nativeCall(ctx, 'qqbot_roll_dice', { expression: 'd1', repeat: 0 }, agent, 'dice-bad-repeat')).isError, true);
+
+    const aborted = new AbortController();
+    aborted.abort(new Error('fixture dice cancellation'));
+    const cancelled = await nativeCall(ctx, 'qqbot_roll_dice', { expression: 'd1' }, agent, 'dice-cancel-retry', aborted.signal);
+    assert.equal(cancelled.isError, true);
+    const cancellationRetry = await nativeCall(ctx, 'qqbot_roll_dice', { expression: 'd1' }, agent, 'dice-cancel-retry');
+    assert.equal(cancellationRetry.isError, false, 'a cancelled pre-dispatch attempt does not poison a later live retry');
+
+    const completedScope = getDocumentTurn(agent);
+    endDocumentTurn(agent);
+    assert.equal(getDocumentTurn(agent), undefined, 'turn cleanup removes the active native authorization scope');
+    assert.equal(completedScope.diceCalls.size, 0, 'turn cleanup deletes cached success and failure records');
+    assert.equal(completedScope.diceCount, 0, 'turn cleanup resets its dice budget');
+});
+
+test('native dice quotas bind to one QQ turn, isolate agents, and reject stale prepared executions', async (t) => {
+    const ctx = await runtime(t);
+    const agent = {};
+    beginDocumentTurn(agent, { content: 'Roll within the turn budget.' });
+    t.after(() => endDocumentTurn(agent));
+    for (let index = 0; index < 8; index++) {
+        const result = await nativeCall(ctx, 'qqbot_roll_dice', { expression: '5d1', repeat: 5 }, agent, `dice-budget-${index}`);
+        assert.equal(result.isError, false, JSON.stringify(result));
+    }
+    assert.equal(getDocumentTurn(agent).diceCount, 200);
+    assert.equal((await nativeCall(ctx, 'qqbot_roll_dice', { expression: 'd1' }, agent, 'dice-budget-ninth')).isError, true);
+
+    const diceLimitedAgent = {};
+    beginDocumentTurn(diceLimitedAgent, { content: 'Check the dice-count quota.' });
+    for (let index = 0; index < 7; index++) {
+        assert.equal((await nativeCall(ctx, 'qqbot_roll_dice', { expression: '5d1', repeat: 5 }, diceLimitedAgent, `dice-count-${index}`)).isError, false);
+    }
+    assert.equal((await nativeCall(ctx, 'qqbot_roll_dice', { expression: '5d1', repeat: 6 }, diceLimitedAgent, 'dice-count-over')).isError, true);
+    assert.equal(getDocumentTurn(diceLimitedAgent).diceCount, 175, 'the denied eighth call does not charge unrolled dice');
+    endDocumentTurn(diceLimitedAgent);
+
+    const secondAgent = {};
+    beginDocumentTurn(secondAgent, { content: 'Independent turn.' });
+    const independent = await nativeCall(ctx, 'qqbot_roll_dice', { expression: 'd1' }, secondAgent, 'dice-budget-0');
+    assert.equal(independent.isError, false, 'the same call ID is independent in another QQ agent scope');
+    assert.equal(getDocumentTurn(secondAgent).diceCount, 1);
+    endDocumentTurn(secondAgent);
+
+    endDocumentTurn(agent);
+    beginDocumentTurn(agent, { content: 'Prepare a bounded dice call.' });
+    const prepared = await ctx.tools.prepareScheduledExecution({
+        name: 'qqbot_roll_dice', arguments: { expression: 'd1' }, agent,
+        callId: 'dice-old-prepared', signal: new AbortController().signal,
+    });
+    assert.equal(prepared.kind, 'dispatch', JSON.stringify(prepared));
+    endDocumentTurn(agent);
+    beginDocumentTurn(agent, { content: 'A replacement turn cannot adopt old work.' });
+    const dispatched = await ctx.tools.dispatchScheduledExecution(prepared.exec);
+    assert.equal(dispatched.result.isError, true, 'the old execution remains expired despite a replacement turn');
+    endDocumentTurn(agent);
+    assert.equal(getDocumentTurn(agent), undefined);
+});
+
+test('the patched QQ middleware chain handles only the current guarded .r message and filters its history', async (t) => {
+    const appId = '123456';
+    const allowedGroup = 'dice-middleware-allowed';
+    const parallelGroup = 'dice-middleware-parallel-peer';
+    const deniedGroup = 'dice-middleware-denied';
+    const historyStore = getHistoryStore();
+    const allowedHistoryKey = historyGroupKey(appId, allowedGroup);
+    const parallelHistoryKey = historyGroupKey(appId, parallelGroup);
+    const deniedHistoryKey = historyGroupKey(appId, deniedGroup);
+    historyStore.clear(allowedHistoryKey);
+    historyStore.clear(parallelHistoryKey);
+    historyStore.clear(deniedHistoryKey);
+    t.after(() => {
+        historyStore.clear(allowedHistoryKey);
+        historyStore.clear(parallelHistoryKey);
+        historyStore.clear(deniedHistoryKey);
+    });
+
+    const config = {
+        access: { c2cMode: 'open', c2cAllow: [], groupMode: 'allowlist', groupAllow: [allowedGroup, parallelGroup] },
+        historyLimit: 16,
+        appId,
+        requireMention: true,
+        maxQueue: 4,
+        processingTimeoutMs: 0,
+        media: { enabled: false, maxMB: 10 },
+        debug: false,
+        textChunkLimit: 2000,
+    };
+    let managerCalls = 0;
+    const manager = {
+        questionChannel: { tryAnswer() { managerCalls++; return false; } },
+    };
+    const layers = captureMiddlewareChain(config, manager);
+    assert.equal(layers.length, 15, 'the real patched gateway chain is installed');
+    assert.match(layers[6].toString(), /rate-limit/, 'the SDK rate limiter precedes direct dice handling');
+    assert.match(layers[7].toString(), /isDiceCommandCandidate/, 'direct command handling follows rate limiting');
+    let terminalCalls = 0;
+    const sends = [];
+    const ctxFor = ({ groupOpenid = allowedGroup, content, messageId, attachments = [], refMsgIdx, msgElements }) => {
+        const ctx = {
+            message: {
+                kind: 'group', groupOpenid, senderId: 'dice-middleware-user', senderName: 'fixture',
+                messageId, content, attachments, timestamp: new Date().toISOString(),
+                ...(refMsgIdx ? { refMsgIdx } : {}),
+                ...(msgElements ? { msgElements } : {}),
+                replyTarget: { scope: 'group', targetId: groupOpenid, msgId: messageId },
+            },
+            state: {},
+            bot: {
+                appId,
+                async sendMarkdown(target, text) { sends.push({ type: 'markdown', target, text }); },
+                async sendText(target, text) { sends.push({ type: 'text', target, text }); },
+            },
+            replyTarget: { scope: 'group', targetId: groupOpenid, msgId: messageId },
+            log: logger,
+            stop(reason) { ctx.stopped = true; ctx.stopReason = reason; },
+        };
+        return ctx;
+    };
+    const run = async (message) => {
+        const ctx = ctxFor(message);
+        await runMiddlewareChain(layers, ctx);
+        if (!ctx.stopped) terminalCalls++;
+        return ctx;
+    };
+
+    const defaultRoll = await run({ content: `<@!${appId}> .r`, messageId: 'dice-default' });
+    assert.equal(defaultRoll.stopReason, 'qqbot-dice-command');
+    assert.match(sends.at(-1).text, /d20\[\d+\] = \d+/);
+    const repeatedRoll = await run({ content: `<@${appId}> .r 2d1 x2`, messageId: 'dice-repeat' });
+    assert.equal(repeatedRoll.stopReason, 'qqbot-dice-command');
+    assert.match(sends.at(-1).text, /1\) 2d1: 2d1\[1,1\] = 2\n2\) 2d1: 2d1\[1,1\] = 2/);
+    const faceRoll = await run({
+        content: `<@!${appId}> .r[<face,id=999/>] d1`,
+        messageId: 'dice-face-marker',
+        attachments: [{ filename: 'unused.txt', content_type: 'text/plain', url: 'https://files.example.com/unused.txt' }],
+    });
+    assert.equal(faceRoll.stopReason, 'qqbot-dice-command', 'pre-cleanup face tags do not stop direct dice recognition');
+    assert.match(sends.at(-1).text, /d1: d1\[1\] = 1/);
+    const malformed = await run({ content: `<@${appId}> .r d6*2`, messageId: 'dice-malformed' });
+    assert.equal(malformed.stopReason, 'qqbot-dice-command');
+    assert.match(sends.at(-1).text, /用法|骰子/);
+    assert.equal(historyStore.list(allowedHistoryKey, 16).length, 0, 'current dice commands never enter persisted group history');
+    assert.equal(managerCalls, 0, 'recognized direct commands never reach question/agent handling');
+    assert.equal(terminalCalls, 0, 'recognized direct commands short-circuit before downstream message handling');
+
+    const duplicateId = 'dice-deduplicated';
+    await run({ content: `<@${appId}> .r d1`, messageId: duplicateId });
+    const sendsAfterFirstDelivery = sends.length;
+    const duplicate = await run({ content: `<@${appId}> .r d1`, messageId: duplicateId });
+    assert.equal(duplicate.stopReason, 'deduplication');
+    assert.equal(sends.length, sendsAfterFirstDelivery, 'message deduplication runs before direct dice');
+
+    const blocked = await run({ groupOpenid: deniedGroup, content: `<@${appId}> .r d1`, messageId: 'dice-access-blocked' });
+    assert.match(blocked.stopReason, /^access:/);
+    assert.equal(historyStore.list(deniedHistoryKey, 16).length, 0, 'blocked groups stop before history and dice');
+
+    const unmentioned = await run({ content: '.r d1', messageId: 'dice-unmentioned' });
+    assert.match(unmentioned.stopReason, /^mention-gate:/);
+    assert.equal(sends.length, sendsAfterFirstDelivery, 'an unmentioned group command does not roll');
+    assert.deepEqual(historyStore.list(allowedHistoryKey, 16), [],
+        'current dice candidates are excluded from history even when the mention gate blocks execution');
+
+    const regular = await run({
+        content: `<@${appId}> .read document context contains .r d20`,
+        messageId: 'ordinary-read',
+        refMsgIdx: 'quote-containing-dice-command',
+        msgElements: [{ content: 'Quoted text: .r d20' }],
+    });
+    assert.equal(regular.stopped, undefined, 'ordinary chat continues through the normal gateway chain');
+    assert.equal(regular.state.quote?.text, 'Quoted text: .r d20', 'quoted dice text remains quote context, not a current command');
+    assert.ok(historyStore.list(allowedHistoryKey, 16).some(({ content }) => content.includes('.read document context contains .r d20')));
+    assert.equal(managerCalls, 1, 'the ordinary message reaches downstream question handling');
+
+    const sendsBeforeOrdinary = sends.length;
+    await Promise.all([
+        run({ content: `<@${appId}> .r d1`, messageId: 'parallel-current-dice' }),
+        run({ groupOpenid: parallelGroup, content: `<@${appId}> ordinary context`, messageId: 'parallel-ordinary' }),
+    ]);
+    assert.deepEqual(historyStore.list(allowedHistoryKey, 16).map(({ content }) => content), ['<@123456> .read document context contains .r d20'],
+        'parallel current dice remains excluded while prior normal history is retained');
+    assert.deepEqual(historyStore.list(parallelHistoryKey, 16).map(({ content }) => content), ['<@123456> ordinary context'],
+        'an overlapping normal peer still receives its own history append');
+    assert.equal(sends.length, sendsBeforeOrdinary + 1, 'only the current .r message replies; normal text remains a chat turn');
+});
+
+test('a failed direct dice reply sends one fallback and duplicate delivery never rerolls', async (t) => {
+    const appId = '654321';
+    const groupOpenid = 'dice-send-failure';
+    const historyStore = getHistoryStore();
+    const historyKey = historyGroupKey(appId, groupOpenid);
+    historyStore.clear(historyKey);
+    t.after(() => historyStore.clear(historyKey));
+    const originalRandomInt = crypto.randomInt;
+    let randomCalls = 0;
+    crypto.randomInt = (_minimum, _maximum) => { randomCalls++; return 1; };
+    syncBuiltinESMExports();
+    t.after(() => {
+        crypto.randomInt = originalRandomInt;
+        syncBuiltinESMExports();
+    });
+    const config = {
+        access: { c2cMode: 'open', c2cAllow: [], groupMode: 'allowlist', groupAllow: [groupOpenid] },
+        historyLimit: 8, appId, requireMention: true, maxQueue: 2, processingTimeoutMs: 0,
+        media: { enabled: false, maxMB: 10 }, debug: false, textChunkLimit: 2000,
+    };
+    const layers = captureMiddlewareChain(config, {});
+    const sends = [];
+    const ctx = {
+        message: {
+            kind: 'group', groupOpenid, senderId: 'sender', messageId: 'dice-send-failure',
+            content: `<@${appId}> .r d6`, attachments: [],
+            replyTarget: { scope: 'group', targetId: groupOpenid, msgId: 'dice-send-failure' },
+        },
+        state: {},
+        bot: {
+            appId,
+            async sendMarkdown(target, content) { sends.push({ type: 'markdown', target, content }); throw new Error('fixture QQ send failure'); },
+            async sendText(target, content) { sends.push({ type: 'text', target, content }); },
+        },
+        replyTarget: { scope: 'group', targetId: groupOpenid, msgId: 'dice-send-failure' },
+        log: logger,
+        stop(reason) { ctx.stopped = true; ctx.stopReason = reason; },
+    };
+    await runMiddlewareChain(layers, ctx);
+    assert.equal(randomCalls, 1, 'the result is generated once before the transport failure');
+    assert.deepEqual(sends.map(({ type }) => type), ['markdown', 'text'], 'the outer error handler makes one fallback send attempt');
+    await runMiddlewareChain(layers, ctx);
+    assert.equal(randomCalls, 1, 'duplicate delivery after send failure is suppressed before any retry roll');
+    assert.equal(sends.length, 2);
+});
+
+test('the real QQ middleware enforces ten dice attempts per sender and leaves ordinary chat unthrottled', async (t) => {
+    const appId = '778899';
+    const groupOpenid = 'dice-sender-rate-window';
+    const historyStore = getHistoryStore();
+    const historyKey = historyGroupKey(appId, groupOpenid);
+    historyStore.clear(historyKey);
+    t.after(() => historyStore.clear(historyKey));
+
+    const originalRandomInt = crypto.randomInt;
+    const originalNowDescriptor = Object.getOwnPropertyDescriptor(performance, 'now');
+    let fakeNow = 50_000;
+    let randomCalls = 0;
+    crypto.randomInt = () => { randomCalls++; return 1; };
+    syncBuiltinESMExports();
+    Object.defineProperty(performance, 'now', { value: () => fakeNow, configurable: true });
+    try {
+        const config = {
+            access: { c2cMode: 'open', c2cAllow: [], groupMode: 'allowlist', groupAllow: [groupOpenid] },
+            historyLimit: 16, appId, requireMention: true, maxQueue: 4, processingTimeoutMs: 0,
+            media: { enabled: false, maxMB: 10 }, debug: false, textChunkLimit: 2000,
+        };
+        let managerCalls = 0;
+        const layers = captureMiddlewareChain(config, {
+            questionChannel: { tryAnswer() { managerCalls++; return false; } },
+        });
+        const sends = [];
+        const ctxFor = (messageId, content) => {
+            const ctx = {
+                message: {
+                    kind: 'group', groupOpenid, senderId: 'one-rate-limited-sender', senderName: 'fixture',
+                    messageId, content, attachments: [], timestamp: new Date().toISOString(),
+                    replyTarget: { scope: 'group', targetId: groupOpenid, msgId: messageId },
+                },
+                state: {},
+                bot: {
+                    appId,
+                    async sendMarkdown(target, text) { sends.push({ type: 'markdown', target, text }); },
+                    async sendText(target, text) { sends.push({ type: 'text', target, text }); },
+                },
+                replyTarget: { scope: 'group', targetId: groupOpenid, msgId: messageId },
+                log: logger,
+                stop(reason) { ctx.stopped = true; ctx.stopReason = reason; },
+            };
+            return ctx;
+        };
+        for (let index = 0; index < 10; index++) {
+            const ctx = ctxFor(`sender-window-${index}`, `<@${appId}> .r d1`);
+            await runMiddlewareChain(layers, ctx);
+            assert.equal(ctx.stopReason, 'qqbot-dice-command');
+        }
+        assert.equal(sends.length, 10, 'the first ten unique .r messages receive results');
+        assert.equal(randomCalls, 10);
+
+        const limited = ctxFor('sender-window-10', `<@${appId}> .r d1`);
+        await runMiddlewareChain(layers, limited);
+        assert.equal(limited.stopReason, 'qqbot-dice-rate-limit');
+        assert.equal(sends.length, 10, 'the eleventh candidate is silently short-circuited');
+        assert.equal(randomCalls, 10, 'a rate hit never reaches the random source');
+
+        const normal = ctxFor('ordinary-after-limit', `<@${appId}> hello normally`);
+        await runMiddlewareChain(layers, normal);
+        assert.equal(normal.stopped, undefined, 'the dice-only limit does not block a regular chat message');
+        assert.equal(managerCalls, 1, 'regular chat still reaches the downstream message handler');
+        assert.equal(randomCalls, 10);
+
+        fakeNow += 10_001;
+        const afterWindow = ctxFor('sender-window-expired', `<@${appId}> .r d1`);
+        await runMiddlewareChain(layers, afterWindow);
+        assert.equal(afterWindow.stopReason, 'qqbot-dice-command');
+        assert.equal(sends.length, 11);
+        assert.equal(randomCalls, 11, 'the sender can roll again after the window expires');
+    }
+    finally {
+        crypto.randomInt = originalRandomInt;
+        syncBuiltinESMExports();
+        if (originalNowDescriptor) Object.defineProperty(performance, 'now', originalNowDescriptor);
+        else delete performance.now;
+    }
 });
 
 test('web_search uses bounded queries, labels external results, forwards cancellation, and remains guarded', async (t) => {
@@ -142,7 +521,7 @@ test('web_search uses bounded queries, labels external results, forwards cancell
     beginDocumentTurn(agent, { content: 'Search the web for DeepSeek and inspect the results.' });
     t.after(() => endDocumentTurn(agent));
     const assembly = await ctx.systemPrompt.assemble();
-    assert.deepEqual(assembly.tools.map((tool) => tool.name).sort(), ['qqbot_read_document', 'web_fetch', 'web_search']);
+    assert.deepEqual(assembly.tools.map((tool) => tool.name).sort(), ['qqbot_read_document', 'qqbot_roll_dice', 'web_fetch', 'web_search']);
     assert.ok(assembly.sections.some((section) => section.name === 'tool:web_search'));
 
     const normal = await call(ctx, 'web_search', { queries: ['DeepSeek web search'] }, agent);
@@ -402,7 +781,7 @@ test('current-message image analysis reaches the real vision tool, other paths a
     assert.equal(visionCalls, 0, 'blocked paths never reach the model');
     assert.equal(ctx.tools.get('qqbot_describe_image').timeoutMs, 120000);
     const assembly = await ctx.systemPrompt.assemble();
-    assert.deepEqual(assembly.tools.map((tool) => tool.name).sort(), ['qqbot_describe_image', 'qqbot_read_document']);
+    assert.deepEqual(assembly.tools.map((tool) => tool.name).sort(), ['qqbot_describe_image', 'qqbot_read_document', 'qqbot_roll_dice']);
 });
 
 test('vision tool accepts only HTTPS image URLs and revalidates them inside execute', async (t) => {
@@ -1275,7 +1654,7 @@ test('webpage reader accepts validated text including attachments and uses publi
         const blocked = await call(ctx, 'web_fetch', { url }, agent);
         assert.equal(blocked.isError, true, url);
     }
-    assert.deepEqual((await ctx.systemPrompt.assemble()).tools.map((tool) => tool.name), ['qqbot_read_document', 'web_fetch']);
+    assert.deepEqual((await ctx.systemPrompt.assemble()).tools.map((tool) => tool.name), ['qqbot_read_document', 'qqbot_roll_dice', 'web_fetch']);
 });
 
 test('QQ file/video attachments are not downloaded', async () => {
