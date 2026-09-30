@@ -68,6 +68,8 @@ docker volume create "$incompatible_data_volume" >/dev/null
 # specifically catches accidental recursive chown/copy operations on the mount.
 log "Checking read-only AGENTS.md mount on a fresh data volume"
 printf 'custom mounted instructions\n' >"$instructions_file"
+# A Linux host can own this fixture as a different UID than the container's node user.
+chmod 0644 "$instructions_file"
 docker run --rm \
     --network none \
     --volume "${override_data_volume}:/data" \
