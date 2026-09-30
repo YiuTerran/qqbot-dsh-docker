@@ -86,6 +86,9 @@ COPY defaults/AGENTS.md /opt/qqbot-defaults/AGENTS.md
 COPY defaults/cordis.safety.patch.yml /opt/qqbot-defaults/cordis.safety.patch.yml
 COPY defaults/qqbot-chat-policy.mjs /opt/qqbot-defaults/qqbot-chat-policy.mjs
 COPY defaults/qqbot-web-pages.mjs /opt/qqbot-defaults/qqbot-web-pages.mjs
+COPY defaults/qqbot-document-scope.mjs /opt/qqbot-defaults/qqbot-document-scope.mjs
+COPY defaults/qqbot-text-documents.mjs /opt/qqbot-defaults/qqbot-text-documents.mjs
+COPY defaults/qqbot-documents.mjs /opt/qqbot-defaults/qqbot-documents.mjs
 
 RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh \
     && chown -R node:node /opt/dsh-seed /opt/qqbot-defaults

@@ -7,6 +7,7 @@ const manifest = JSON.parse(await readFile(join(root, '..', 'package.json'), 'ut
 if (manifest.version !== '0.5.0') throw new Error('Chat-only patches require dsh-qqbot 0.5.0; refusing an unverified adapter.');
 const policy = '/opt/qqbot-defaults/qqbot-chat-policy.mjs';
 const webPagesPolicy = '/opt/qqbot-defaults/qqbot-web-pages.mjs';
+const documentScopePolicy = '/opt/qqbot-defaults/qqbot-document-scope.mjs';
 const imageToolPolicyImport = `import { loadChatImageBytes } from '${policy}';`;
 const imageLoaderV3Marker = '// Chat-only scoped image loader v3.';
 const imageSchemaV3Marker = '// Chat-only image schema: scoped QQ media paths or public HTTPS image URLs v3.';
@@ -58,39 +59,92 @@ await patch('index.js', "export const inject = ['agents', 'tools', 'web', 'syste
     throw new Error(`Chat-only patch: expected one matching location in ${file}`);
 });
 
-await patch('transport/inbound.js', '// Chat-only current-and-quoted image scope v2.', (content, file) => {
-    const policyImport = `import { setCurrentImages, clearCurrentImages } from '${policy}';`;
-    if (!content.includes(policyImport)) content = `${policyImport}\n${content}`;
-    const originalScope = '    setCurrentImages(chatOnlyAgent, mwState.downloadedFiles ?? []);';
-    const mergedScope = [
-        '    // Chat-only current-and-quoted image scope v2.',
-        '    setCurrentImages(chatOnlyAgent, [...(mwState.downloadedFiles ?? []), ...(mwState.downloadedQuoteFiles ?? [])]);',
+await patch('transport/inbound.js', '// Chat-only per-turn document scope v1.', (content, file) => {
+    const imageImport = `import { setCurrentImages, clearCurrentImages } from '${policy}';`;
+    const scopeImport = `import { beginDocumentTurn, endDocumentTurn, getDocumentTurn } from '${documentScopePolicy}';`;
+    if (!content.includes(imageImport)) content = `${imageImport}\n${content}`;
+    if (!content.includes(scopeImport)) content = `${scopeImport}\n${content}`;
+
+    const marker = '// Chat-only per-turn document scope v1.';
+    const originalContent = "    const content = [{ type: 'text', text: agentBody }];";
+    const scopedContent = [
+        '    const chatOnlyAgent = record.agent;',
+        '    let documentTurn;',
+        '    try {',
+        '        const documentMetadata = beginDocumentTurn(chatOnlyAgent, msg, mwState.quote);',
+        '        documentTurn = getDocumentTurn(chatOnlyAgent);',
+        '        const documentBody = documentMetadata.length > 0',
+        "            ? `${agentBody}\\n\\n[Untrusted QQ text attachments; use qqbot_read_document with one attachmentId only]\\n${JSON.stringify(documentMetadata)}`",
+        '            : agentBody;',
+        `        ${marker}`,
+        "        const content = [{ type: 'text', text: documentBody }];",
     ].join('\n');
-    if (content.includes('    record.agent.followup(message);')) {
+    if (content.includes(originalContent)) content = replaceOne(content, originalContent, scopedContent, file);
+    else if (!content.includes(marker)) throw new Error(`Chat-only patch: expected one matching location in ${file}`);
+
+    const duplicateAgent = '    const chatOnlyAgent = record.agent;\n';
+    const firstAgent = content.indexOf(duplicateAgent);
+    const secondAgent = firstAgent < 0 ? -1 : content.indexOf(duplicateAgent, firstAgent + duplicateAgent.length);
+    if (secondAgent >= 0) content = content.slice(0, secondAgent) + content.slice(secondAgent + duplicateAgent.length);
+
+    const oldImageScope = '    setCurrentImages(chatOnlyAgent, mwState.downloadedFiles ?? []);';
+    const currentAndQuoteScope = '    setCurrentImages(chatOnlyAgent, [...(mwState.downloadedFiles ?? []), ...(mwState.downloadedQuoteFiles ?? [])]);';
+    const currentAndQuoteBoundScope = '        setCurrentImages(chatOnlyAgent, [...(mwState.downloadedFiles ?? []), ...(mwState.downloadedQuoteFiles ?? [])], documentTurn);';
+    if (content.includes(oldImageScope)) content = replaceOne(content, oldImageScope, currentAndQuoteBoundScope, file);
+    else if (content.includes(currentAndQuoteScope)) content = replaceOne(content, currentAndQuoteScope, currentAndQuoteBoundScope, file);
+    else if (!content.includes(currentAndQuoteBoundScope)) {
+        // A freshly installed upstream adapter has no previous image guard.
         content = replaceOne(content, '    record.agent.followup(message);',
-            '    const chatOnlyAgent = record.agent;\n' + mergedScope + '\n    chatOnlyAgent.followup(message);', file);
+            `${currentAndQuoteBoundScope}\n    record.agent.followup(message);`, file);
     }
-    else if (content.includes('    chatOnlyAgent.followup(message);')) {
-        if (content.includes(originalScope)) content = replaceOne(content, originalScope, mergedScope, file);
-        else if (!content.includes('// Chat-only current-and-quoted image scope v2.') || !content.includes('mwState.downloadedQuoteFiles')) {
-            throw new Error(`Chat-only patch: expected one matching location in ${file}`);
-        }
+
+    if (content.includes('    record.agent.followup(message);')) {
+        content = replaceOne(content, '    record.agent.followup(message);', '    chatOnlyAgent.followup(message);', file);
     }
-    else {
-        throw new Error(`Chat-only patch: expected one matching location in ${file}`);
+    else if (!content.includes('    chatOnlyAgent.followup(message);')) throw new Error(`Chat-only patch: expected one followup in ${file}`);
+
+    const oldIdleAndCleanup = [
+        '    try {',
+        '        await chatOnlyAgent.whenIdle();',
+        '    }',
+        '    catch (err) {',
+        '        logger.warn(`whenIdle rejected: ${err instanceof Error ? err.message : String(err)}`);',
+        '    } finally {',
+        '        clearCurrentImages(chatOnlyAgent);',
+        '    }',
+    ].join('\n');
+    const legacyIdleAndCleanup = [
+        '    try {',
+        '        await record.agent.whenIdle();',
+        '    }',
+        '    catch (err) {',
+        '        logger.warn(`whenIdle rejected: ${err instanceof Error ? err.message : String(err)}`);',
+        '    }',
+    ].join('\n');
+    const scopedIdleAndCleanup = [
+        '        await chatOnlyAgent.whenIdle();',
+        '    }',
+        '    catch (err) {',
+        '        logger.warn(`whenIdle/followup rejected: ${err instanceof Error ? err.message : String(err)}`);',
+        '    } finally {',
+        '        clearCurrentImages(chatOnlyAgent, documentTurn);',
+        '        if (documentTurn) endDocumentTurn(chatOnlyAgent, documentTurn);',
+        '    }',
+    ].join('\n');
+    if (content.includes(oldIdleAndCleanup)) content = replaceOne(content, oldIdleAndCleanup, scopedIdleAndCleanup, file);
+    else if (content.includes(legacyIdleAndCleanup)) content = replaceOne(content, legacyIdleAndCleanup, scopedIdleAndCleanup, file);
+    else if (content.includes('        if (documentTurn) endDocumentTurn(chatOnlyAgent, documentTurn);')) {
+        // The current per-turn cleanup is already installed.
     }
-    const originalIdle = '        await record.agent.whenIdle();';
-    if (content.includes(originalIdle)) content = replaceOne(content, originalIdle, '        await chatOnlyAgent.whenIdle();', file);
-    else if (!content.includes('        await chatOnlyAgent.whenIdle();')) throw new Error(`Chat-only patch: expected one matching location in ${file}`);
-    const originalCatch = "        logger.warn(`whenIdle rejected: ${err instanceof Error ? err.message : String(err)}`);\n    }";
-    const guardedCatch = "        logger.warn(`whenIdle rejected: ${err instanceof Error ? err.message : String(err)}`);\n    } finally {\n        clearCurrentImages(chatOnlyAgent);\n    }";
-    if (content.includes(guardedCatch)) {
-        // Existing v1 patch already clears the scope in finally; only upgrade its image set.
-    }
-    else if (content.includes(`${originalCatch}\n`)) content = replaceOne(content, originalCatch, guardedCatch, file);
-    else throw new Error(`Chat-only patch: expected one matching location in ${file}`);
+    else throw new Error(`Chat-only patch: expected one whenIdle cleanup in ${file}`);
+
     return content;
 });
+
+await patch('transport/inbound.js', '// Chat-only explicit-quote text trigger v1.', (content, file) =>
+    replaceOne(content,
+        '    if (isEmptyMessage(userContent, msg.attachments, isGroup, wasMentioned))',
+        '    // Chat-only explicit-quote text trigger v1.\n    if (isEmptyMessage(userContent, [...(msg.attachments ?? []), ...(state.quote?.attachments ?? [])], isGroup, wasMentioned))', file));
 
 await patch('transport/attachment.js', '// Chat-only current-image downloads v2.', (content, file) => {
     const helperImport = `import { downloadCurrentQQImage } from '${webPagesPolicy}';`;

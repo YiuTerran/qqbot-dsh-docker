@@ -1,4 +1,18 @@
 import { HttpFetchProvider } from '/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-fetch-http/lib/index.js';
+import {
+    activateCurrentDocumentMode,
+    assertProviderRequestUrl,
+    authorizeDocumentProviderUrl,
+    authorizeTurnProviderUrl,
+    getDocumentExecutionContext,
+    getTurnRequestSignal,
+    runWithProviderAuthorization,
+} from './qqbot-document-scope.mjs';
+import {
+    decodeTextDocumentBytes,
+    normalizeTextMediaType,
+    resolveTextDocumentType,
+} from './qqbot-text-documents.mjs';
 
 const MAX_CURRENT_IMAGE_BYTES = 10 * 1024 * 1024;
 const CURRENT_IMAGE_TIMEOUT_MS = 120000;
@@ -51,13 +65,28 @@ function createPinnedLookup(addresses) {
  * an HTTP proxy would resolve the origin a second time and bypass that pin.
  */
 export class PublicHttpProvider extends HttpFetchProvider {
+    async fetch(request, signal) {
+        const context = getDocumentExecutionContext();
+        const authorization = context?.documentCapability
+            ? authorizeDocumentProviderUrl(request?.url, context.documentCapability)
+            : authorizeTurnProviderUrl(request?.url);
+        const scopedSignal = context?.scope ? getTurnRequestSignal(context.scope, signal) : signal;
+        return runWithProviderAuthorization(authorization, () => super.fetch(request, scopedSignal));
+    }
+
     async requestOnce(url, signal) {
+        assertProviderRequestUrl(url);
         const headers = {
             'user-agent': this.limits.userAgent,
-            accept: this.accept ?? 'text/html,application/xhtml+xml',
+            accept: this.accept ?? 'text/html,application/xhtml+xml,text/*;q=0.9,application/json;q=0.8,application/*+json;q=0.7,application/yaml,application/x-yaml,application/xml,application/*+xml;q=0.6',
         };
         const addresses = await this.resolveAddresses(url.hostname, signal);
+        // The turn may end or enter restricted document mode while DNS resolves.
+        // Recheck the captured scope immediately before opening the connection.
+        assertProviderRequestUrl(url);
         const { Agent, fetch } = await import('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/undici/index.js');
+        assertProviderRequestUrl(url);
+        if (signal?.aborted) throw signal.reason ?? new Error('HTTP request was aborted.');
         const dispatcher = new Agent({
             autoSelectFamily: true,
             connect: { lookup: createPinnedLookup(addresses) },
@@ -99,16 +128,80 @@ export class WebPageProvider extends PublicHttpProvider {
     }
 
     async readBody(response, finalUrl, signal) {
-        const mime = (response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
-        const disposition = response.headers.get('content-disposition') || '';
-        if (!['text/html', 'application/xhtml+xml'].includes(mime) || /^\s*attachment\b/i.test(disposition)) {
+        const declaredContentType = response.headers.get('content-type') || '';
+        const mediaType = normalizeTextMediaType(declaredContentType);
+        const textType = resolveTextDocumentType(declaredContentType, '', { allowExtensionFallback: false });
+        if (!textType.accepted) {
             await response.body?.cancel();
-            throw new Error('Only HTML webpages can be read; file downloads are disabled.');
+            throw new Error('Only validated text webpages can be read.');
         }
-        // No filesystem write occurs: the bounded HTML stays in memory and
-        // the stock web_fetch tool converts it to text without running scripts.
-        return super.readBody(response, finalUrl, signal);
+        // Attachment disposition does not save a file. The response remains
+        // in memory and is accepted only after MIME, signature, charset, and
+        // decoded-control validation all succeed.
+        const { bytes, truncatedByBytes } = await this.readCapped(response, signal);
+        const decoded = decodeTextDocumentBytes(bytes, declaredContentType, { truncatedByBytes });
+        const truncatedByChars = decoded.text.length > this.limits.maxBodyChars;
+        let content = truncatedByChars ? decoded.text.slice(0, this.limits.maxBodyChars) : decoded.text;
+        if (content.length > 0 && /[\uD800-\uDBFF]/u.test(content.at(-1))) content = content.slice(0, -1);
+        const html = mediaType === 'text/html' || mediaType === 'application/xhtml+xml';
+        if (!html) activateCurrentDocumentMode();
+        return {
+            url: finalUrl.toString(),
+            statusCode: response.status,
+            body: { kind: html ? 'html' : 'text', content },
+            truncated: truncatedByBytes || truncatedByChars,
+        };
     }
+}
+
+const MAX_QQ_DOCUMENT_BYTES = 512 * 1024;
+const MAX_QQ_DOCUMENT_TIMEOUT_MS = 30000;
+
+class QQTextDocumentProvider extends PublicHttpProvider {
+    accept = 'text/*,application/xhtml+xml,application/json,application/*+json,application/yaml,application/x-yaml,application/xml,application/*+xml';
+
+    constructor(filename) {
+        super({
+            timeoutMs: MAX_QQ_DOCUMENT_TIMEOUT_MS,
+            maxResponseBytes: MAX_QQ_DOCUMENT_BYTES,
+            maxBodyChars: 50000,
+            maxRedirects: 0,
+            userAgent: 'qqbot-dsh (QQ text document)',
+        });
+        this.filename = filename;
+    }
+
+    async readBody(response, _finalUrl, signal) {
+        if (response.status < 200 || response.status >= 300) {
+            await response.body?.cancel();
+            throw new Error('QQ document request failed.');
+        }
+        const declaredContentType = response.headers.get('content-type') || '';
+        const type = resolveTextDocumentType(declaredContentType, this.filename, { allowExtensionFallback: true });
+        if (!type.accepted) {
+            await response.body?.cancel();
+            throw Object.assign(new Error('QQ attachment response is not an allowed text document.'), { code: 'TEXT_UNSUPPORTED_TYPE' });
+        }
+        const { bytes, truncatedByBytes } = await this.readCapped(response, signal);
+        if (truncatedByBytes) throw Object.assign(new Error('QQ document exceeds the 512 KiB limit.'), { code: 'QQ_DOCUMENT_TOO_LARGE' });
+        const decoded = decodeTextDocumentBytes(bytes, declaredContentType, { truncatedByBytes: false });
+        return {
+            text: decoded.text,
+            contentType: type.contentType,
+            size: bytes.length,
+            truncated: false,
+        };
+    }
+}
+
+/** Fetch one registered QQ document in memory with no redirect or URL exposure. */
+export async function downloadQQTextDocument(url, filename, attachmentId, signal) {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:' || parsed.username || parsed.password) {
+        throw new Error('QQ document source is not an anonymous HTTPS URL.');
+    }
+    const provider = new QQTextDocumentProvider(filename);
+    return provider.fetch({ url: parsed.href, attachmentId }, signal);
 }
 
 class CurrentQQImageProvider extends PublicHttpProvider {

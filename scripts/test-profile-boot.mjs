@@ -112,8 +112,9 @@ try {
   const assembly = await systemPrompt.assemble();
   const modelNames = assembly.tools.map((tool) => tool.name).sort();
   assert.deepEqual(modelNames, searchEnabled
-    ? ['qqbot_describe_image', 'web_fetch', 'web_search']
-    : ['qqbot_describe_image', 'web_fetch'], 'model-facing chat tool catalog does not match configured search availability');
+    ? ['qqbot_describe_image', 'qqbot_read_document', 'web_fetch', 'web_search']
+    : ['qqbot_describe_image', 'qqbot_read_document', 'web_fetch'], 'model-facing chat tool catalog does not match configured search availability');
+  assert.ok(registryNames.includes('qqbot_read_document'), 'QQ document reader must be registered');
   if (!searchEnabled) {
     assert.ok(!registryNames.includes('web_search'), 'web_search must not be registered when native search is disabled');
     const unavailable = await tools.execute({

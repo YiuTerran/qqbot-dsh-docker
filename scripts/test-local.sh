@@ -333,6 +333,47 @@ docker run --rm --network none --entrypoint node --volume "${legacy_data_volume}
         "                ctx.state.downloadedQuoteFiles = downloadedQuote;",
         "            }",
     ].join("\n");
+    const inboundPath = `${root}/transport/inbound.js`;
+    let inbound = fs.readFileSync(inboundPath, "utf8");
+    const documentScopeBlock = [
+        "    const chatOnlyAgent = record.agent;",
+        "    let documentTurn;",
+        "    try {",
+        "        const documentMetadata = beginDocumentTurn(chatOnlyAgent, msg, mwState.quote);",
+        "        documentTurn = getDocumentTurn(chatOnlyAgent);",
+        "        const documentBody = documentMetadata.length > 0",
+        "            ? `${agentBody}\\n\\n[Untrusted QQ text attachments; use qqbot_read_document with one attachmentId only]\\n${JSON.stringify(documentMetadata)}`",
+        "            : agentBody;",
+        "        // Chat-only per-turn document scope v1.",
+        "        const content = [{ type: \x27text\x27, text: documentBody }];",
+    ].join("\n");
+    if (inbound.split(documentScopeBlock).length !== 2) throw new Error("legacy fixture expected one document scope block");
+    inbound = inbound.replace(documentScopeBlock, "    const content = [{ type: \x27text\x27, text: agentBody }];\n    const chatOnlyAgent = record.agent;");
+    inbound = inbound.replace("import { beginDocumentTurn, endDocumentTurn, getDocumentTurn } from \x27/opt/qqbot-defaults/qqbot-document-scope.mjs\x27;\n", "");
+    inbound = inbound.replace("        setCurrentImages(chatOnlyAgent, [...(mwState.downloadedFiles ?? []), ...(mwState.downloadedQuoteFiles ?? [])], documentTurn);",
+        "    setCurrentImages(chatOnlyAgent, [...(mwState.downloadedFiles ?? []), ...(mwState.downloadedQuoteFiles ?? [])]);");
+    const documentCleanup = [
+        "        await chatOnlyAgent.whenIdle();",
+        "    }",
+        "    catch (err) {",
+        "        logger.warn(`whenIdle/followup rejected: ${err instanceof Error ? err.message : String(err)}`);",
+        "    } finally {",
+        "        clearCurrentImages(chatOnlyAgent, documentTurn);",
+        "        if (documentTurn) endDocumentTurn(chatOnlyAgent, documentTurn);",
+        "    }",
+    ].join("\n");
+    if (inbound.split(documentCleanup).length !== 2) throw new Error("legacy fixture expected one document cleanup");
+    inbound = inbound.replace(documentCleanup, [
+        "    try {",
+        "        await chatOnlyAgent.whenIdle();",
+        "    }",
+        "    catch (err) {",
+        "        logger.warn(`whenIdle rejected: ${err instanceof Error ? err.message : String(err)}`);",
+        "    } finally {",
+        "        clearCurrentImages(chatOnlyAgent);",
+        "    }",
+    ].join("\n"));
+    fs.writeFileSync(inboundPath, inbound);
     const edits = {
         "gateway/bootstrap.js": [
             ["import { installChatPolicy } from \x27/opt/qqbot-defaults/qqbot-chat-policy.mjs\x27;\n", ""],
@@ -359,6 +400,8 @@ docker run --rm --network none --entrypoint node --volume "${legacy_data_volume}
             ["export const inject = [\x27agents\x27, \x27tools\x27, \x27web\x27];", "export const inject = [\x27agents\x27];"]
         ],
         "transport/inbound.js": [
+            ["    // Chat-only explicit-quote text trigger v1.\n", ""],
+            ["    if (isEmptyMessage(userContent, [...(msg.attachments ?? []), ...(state.quote?.attachments ?? [])], isGroup, wasMentioned))", "    if (isEmptyMessage(userContent, msg.attachments, isGroup, wasMentioned))"],
             ["import { setCurrentImages, clearCurrentImages } from \x27/opt/qqbot-defaults/qqbot-chat-policy.mjs\x27;\n", ""],
             ["    const chatOnlyAgent = record.agent;\n", ""],
             ["    // Chat-only current-and-quoted image scope v2.\n", ""],
@@ -508,6 +551,10 @@ docker run --rm --network none --entrypoint node --volume "${legacy_data_volume}
         ["gateway/middleware-setup.js", "Chat-only scoped quote references prevent cross-peer message-key collisions."],
         ["index.js", "export const inject = [\x27agents\x27, \x27tools\x27, \x27web\x27, \x27systemPrompt\x27];"],
         ["transport/inbound.js", "Chat-only current-and-quoted image scope v2."],
+        ["transport/inbound.js", "Chat-only per-turn document scope v1."],
+        ["transport/inbound.js", "Chat-only explicit-quote text trigger v1."],
+        ["transport/inbound.js", "beginDocumentTurn"],
+        ["transport/inbound.js", "endDocumentTurn"],
         ["transport/inbound.js", "setCurrentImages"],
         ["transport/inbound.js", "clearCurrentImages"],
         ["transport/attachment.js", "downloadCurrentQQImage"],
@@ -599,4 +646,4 @@ if docker history --no-trunc "$IMAGE" | grep -Eqi 'DEEPSEEK_API_KEY|LLM_API_KEY|
     exit 1
 fi
 
-log "Passed: seed, profile, plugin, workspace, persistence, config policy, chat regression, and image secret scan"
+log "Passed: seed, profile, plugin, workspace, persistence, config policy, chat/document regression, and image secret scan"
