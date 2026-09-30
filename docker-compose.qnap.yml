@@ -23,7 +23,6 @@ services:
       QQBOT_VISION_ENABLED: ${QQBOT_VISION_ENABLED:-true}
       # A diagnostic only; it does not contain or print credentials.
       QQBOT_STARTUP_WARN_MS: ${QQBOT_STARTUP_WARN_MS:-20000}
-      DSH_PERMISSION_MODE: ${DSH_PERMISSION_MODE:-read-only}
       QQBOT_APPID: ${QQBOT_APPID}
       QQBOT_SECRET: ${QQBOT_SECRET}
     volumes:

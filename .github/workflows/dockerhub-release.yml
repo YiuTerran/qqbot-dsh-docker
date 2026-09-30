@@ -43,6 +43,21 @@ jobs:
           username: ${{ env.DOCKERHUB_USER }}
           password: ${{ env.DOCKERHUB_SECRET }}
 
+      - name: Build local validation image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          pull: true
+          load: true
+          push: false
+          platforms: linux/amd64
+          tags: dsh-qqbot:test-local
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run chat-only security regression
+        run: IMAGE=dsh-qqbot:test-local SKIP_BUILD=1 ./scripts/test-local.sh
+
       - name: Build and push multi-architecture image
         uses: docker/build-push-action@v6
         with:

@@ -13,4 +13,5 @@ README.md
 scripts/*
 !scripts/instrument-qqbot-startup.mjs
 !scripts/link-global-bins.mjs
+!scripts/enforce-chat-only.mjs
 .workbuddy/

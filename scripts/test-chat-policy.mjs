@@ -1,0 +1,314 @@
+// Run inside the built image; exercise the pinned dsh executor and QQ adapter
+// without calling QQ or a paid model API.
+import assert from 'node:assert/strict';
+import { mkdtemp, writeFile, readFile, symlink, mkdir, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { test } from 'node:test';
+import { createScopedQuoteRef, installChatPolicy, setCurrentImages, clearCurrentImages } from '/opt/qqbot-defaults/qqbot-chat-policy.mjs';
+import { WebPageProvider, PublicHttpProvider, downloadCurrentQQImage } from '/opt/qqbot-defaults/qqbot-web-pages.mjs';
+
+const dshRoot = '/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/';
+// The profile plugin is deliberately installed without its peer dependencies.
+// dsh loads it through its global package tree, so mirror that peer namespace
+// before importing the adapter directly for this in-image regression test.
+const profilePeers = '/data/profiles/qqbot/node_modules/@deepseek-ai';
+await mkdir(join(profilePeers, '..'), { recursive: true });
+try {
+    await symlink(dshRoot, profilePeers, 'dir');
+} catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+}
+const { Context } = await import(`${dshRoot}cordis/lib/index.js`);
+const { default: SystemPrompt } = await import(`${dshRoot}dsh-system-prompt/lib/index.js`);
+const { default: ToolRuntime } = await import(`${dshRoot}dsh-tools/lib/index.js`);
+const { default: WebRuntime } = await import(`${dshRoot}dsh-web/lib/index.js`);
+const { applyWebFetchTool } = await import(`${dshRoot}dsh-tool-web/lib/index.js`);
+const adapter = '/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/';
+const { registerDescribeImageTool } = await import(`${adapter}media/vision-tool.js`);
+const { handleInbound } = await import(`${adapter}transport/inbound.js`);
+const { downloadMediaAttachments } = await import(`${adapter}transport/attachment.js`);
+const { attachmentProcessor } = await import(`${adapter}middleware/attachment.js`);
+const qqbotNode = '/data/profiles/qqbot/node_modules/@tencent-connect/qqbot-nodejs/dist/';
+const { quoteRef } = await import(`${qqbotNode}middleware/quote-ref.js`);
+const logger = { info() {}, warn() {}, debug() {}, error() {} };
+const png = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489', 'hex');
+const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+async function runtime(t) {
+    const ctx = new Context();
+    t.after(() => ctx.fiber.dispose());
+    await ctx.plugin(SystemPrompt, {});
+    await ctx.plugin(ToolRuntime, { mode: 'native' });
+    await ctx.plugin(WebRuntime, { fetchProvider: 'qqbot-pages' });
+    await ctx.plugin({ inject: ['tools', 'web', 'systemPrompt'], apply: installChatPolicy });
+    return ctx;
+}
+
+function call(ctx, name, args, agent) {
+    return ctx.tools.execute({ name, arguments: args, agent, callId: 'test-call', signal: new AbortController().signal });
+}
+
+function fakeTool(ctx, name, execute) {
+    ctx.tools.register({
+        name, description: name,
+        parameters: { type: 'object', properties: {}, additionalProperties: true },
+        output: { schema: {}, render: (_args, value) => [{ type: 'text', text: String(value) }] },
+        execute,
+    });
+}
+
+test('executor rejects dangerous and unknown tools before their bodies run, even if another listener allows', async (t) => {
+    const ctx = await runtime(t);
+    let executed = 0;
+    let approvals = 0;
+    let prependAllows = 0;
+    // A hostile/persisted preset can register a new tool; it is still denied.
+    for (const name of ['bash', 'run_code', 'read', 'write', 'qqbot_send_file', 'subagent', 'workflow', 'web_search', 'custom-dangerous-tool']) {
+        if (name !== 'run_code') fakeTool(ctx, name, () => { executed++; return 'executed'; });
+        const result = await call(ctx, name, { command: 'touch /tmp/should-not-exist' }, {});
+        assert.equal(result.isError, true, name);
+    }
+    ctx.on('tools/pre-execute', () => { approvals++; return { kind: 'allow' }; });
+    assert.equal((await call(ctx, 'bash', {}, {})).isError, true);
+    assert.equal(executed, 0);
+    assert.equal(approvals, 0, 'early refusal must not offer execution approval');
+    // Emulate an extension that short-circuits the pre-execute waterfall.
+    await ctx.plugin({ apply: (child) => child.on('tools/pre-execute', () => { prependAllows++; return { kind: 'allow' }; }, { prepend: true }) });
+    assert.equal((await call(ctx, 'custom-dangerous-tool', {}, {})).isError, true);
+    assert.equal(prependAllows, 1, 'prepend allow listener was reached');
+    assert.equal(executed, 0, 'monotonic guard must still refuse');
+    const assembly = await ctx.systemPrompt.assemble();
+    assert.deepEqual(assembly.tools, []);
+    assert.ok(assembly.sections.some((section) => section.name === 'qqbot:chat-only-policy'));
+});
+
+test('current-message image analysis reaches the real vision tool, other paths and sessions do not', async (t) => {
+    const ctx = await runtime(t);
+    const dir = await mkdtemp(join(tmpdir(), 'qqbot-image-test-'));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const image = join(dir, 'current.png');
+    const other = join(dir, 'other.png');
+    const outside = join(dir, 'outside.png');
+    await writeFile(image, png);
+    await writeFile(other, png);
+    await writeFile(outside, png);
+    await symlink(outside, join(dir, 'outside-link.png'));
+    let visionCalls = 0;
+    const shim = {
+        get(name) {
+            if (name === 'tools') return ctx.tools;
+            if (name === 'attachments') return { saveImage: async () => ({ id: 'fixture-image', mediaType: 'image/png' }) };
+            if (name === 'llm') return { async *stream(options) {
+                visionCalls++;
+                assert.equal(options.provider, 'test-vision');
+                assert.equal(options.messages[0].content[0].type, 'image');
+                yield { type: 'block-start', index: 0, blockType: 'text' };
+                yield { type: 'text-delta', index: 0, text: '这是测试图片' };
+                yield { type: 'block-end', index: 0, block: { type: 'text', text: '这是测试图片' } };
+                yield { type: 'finish', reason: { kind: 'stop' } };
+            } };
+        },
+    };
+    registerDescribeImageTool(shim, { enabled: true, provider: 'test-vision', model: 'multimodal', maxBytes: 10485760, maxTokens: 1024, timeoutMs: 120000 }, logger);
+    const agent = {};
+    setCurrentImages(agent, [
+        { contentType: 'image', localPath: image },
+        { contentType: 'image', localPath: other },
+    ]);
+    const result = await call(ctx, 'qqbot_describe_image', { image, prompt: '描述图片' }, agent);
+    assert.ok(!result.isError, JSON.stringify(result));
+    assert.ok(result.content.some((block) => block.text === '这是测试图片'));
+    assert.ok(!((await call(ctx, 'qqbot_describe_image', { image: other }, agent)).isError), 'explicit current-message quote image');
+    const history = join(dir, 'history.png');
+    await writeFile(history, png);
+    for (const path of [history, '/data/AGENTS.md', 'https://example.com/picture.png', 'http://127.0.0.1/secret', join(dir, 'outside-link.png')]) {
+        assert.equal((await call(ctx, 'qqbot_describe_image', { image: path }, agent)).isError, true, path);
+    }
+    assert.equal((await call(ctx, 'qqbot_describe_image', { image }, {})).isError, true, 'other peer');
+    clearCurrentImages(agent);
+    assert.equal((await call(ctx, 'qqbot_describe_image', { image }, agent)).isError, true, 'completed turn');
+    assert.equal(visionCalls, 2, 'current attachment and explicit quoted attachment');
+    assert.equal(ctx.tools.get('qqbot_describe_image').timeoutMs, 120000);
+    const assembly = await ctx.systemPrompt.assemble();
+    assert.deepEqual(assembly.tools.map((tool) => tool.name), ['qqbot_describe_image']);
+});
+
+test('QQ inbound binds only current downloaded images and clears them after the turn in private and group chat', async (t) => {
+    const { denyUnsafeTool } = await import('/opt/qqbot-defaults/qqbot-chat-policy.mjs');
+    const dir = await mkdtemp(join(tmpdir(), 'qqbot-inbound-test-'));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const image = join(dir, 'current.png');
+    const quoted = join(dir, 'quoted.png');
+    await writeFile(image, png);
+    await writeFile(quoted, png);
+    for (const kind of ['c2c', 'group']) {
+        let messages = 0;
+        const agent = {
+            followup(message) {
+                messages++;
+                assert.ok(message.content.some((block) => block.text.includes('你好')));
+                assert.equal(denyUnsafeTool({ name: 'qqbot_describe_image', arguments: { image }, agent }), undefined);
+                assert.equal(denyUnsafeTool({ name: 'qqbot_describe_image', arguments: { image: quoted }, agent }), undefined);
+                assert.ok(denyUnsafeTool({ name: 'qqbot_describe_image', arguments: { image: '/data/AGENTS.md' }, agent }));
+            },
+            async whenIdle() {},
+        };
+        await handleInbound({
+            message: { kind, senderId: 'peer', groupOpenid: 'group', messageId: 'msg', content: '你好' },
+            state: { mention: { wasMentioned: true }, downloadedFiles: [{ contentType: 'image', localPath: image }], downloadedQuoteFiles: [{ contentType: 'image', localPath: quoted }] },
+            bot: {},
+        }, { getOrCreate: async () => ({ agent }) }, { appId: 'fixture' }, logger);
+        assert.equal(messages, 1);
+        assert.ok(denyUnsafeTool({ name: 'qqbot_describe_image', arguments: { image }, agent }));
+        assert.ok(denyUnsafeTool({ name: 'qqbot_describe_image', arguments: { image: quoted }, agent }));
+    }
+});
+
+test('quote references are isolated by c2c peer and group, including overlapping middleware calls', async () => {
+    const scopedQuoteRef = createScopedQuoteRef(quoteRef);
+    const run = async (message, wait = 0) => {
+        const state = {};
+        await scopedQuoteRef({ message, state, log: logger }, async () => {
+            if (wait) await delay(wait);
+        });
+        return state;
+    };
+    const sources = [
+        { kind: 'c2c', senderId: 'alice', content: '私聊 Alice' },
+        { kind: 'c2c', senderId: 'bob', content: '私聊 Bob' },
+        { kind: 'group', groupOpenid: 'group-a', senderId: 'same-member', content: '群组 A' },
+        { kind: 'group', groupOpenid: 'group-b', senderId: 'same-member', content: '群组 B' },
+    ];
+    // quote-ref records before awaiting next(); varied delays make the four
+    // middleware fibers overlap while exercising the AsyncLocalStorage scope.
+    await Promise.all(sources.map((source, index) => run({
+        ...source,
+        msgIdx: 'shared-ref',
+        messageId: `source-${index}`,
+    }, (index % 3) + 1)));
+    const quotes = await Promise.all(sources.map((source, index) => run({
+        kind: source.kind,
+        senderId: source.senderId,
+        groupOpenid: source.groupOpenid,
+        refMsgIdx: 'shared-ref',
+        messageId: `quote-${index}`,
+    }, (sources.length - index) * 2)));
+    assert.deepEqual(quotes.map((state) => state.quote?.text), sources.map((source) => source.content));
+    assert.deepEqual(quotes.map((state) => state.quote?.source), sources.map(() => 'store'));
+
+    // A missing peer never enters the shared store, but QQ's trusted current
+    // msg_elements fallback still preserves explicit quoted image metadata.
+    const elementsState = await run({
+        kind: 'c2c',
+        refMsgIdx: 'shared-ref',
+        messageId: 'elements-quote',
+        msgElements: [{
+            content: '引用图片',
+            attachments: [{ content_type: 'image/png', filename: 'quoted.png', url: 'https://example.com/quoted.png' }],
+        }],
+    });
+    assert.equal(elementsState.quote?.source, 'msg_elements');
+    assert.equal(elementsState.quote?.rawContent, '引用图片');
+    assert.equal(elementsState.quote?.attachments[0].contentType, 'image/png');
+    assert.match(elementsState.quote?.text, /quoted\.png/);
+
+    const missingSource = await run({ kind: 'c2c', msgIdx: 'missing-peer', messageId: 'missing-source', content: 'must not leak' });
+    assert.deepEqual(missingSource, {});
+    const missingPeerQuote = await run({ kind: 'c2c', senderId: 'alice', refMsgIdx: 'missing-peer', messageId: 'missing-quote' });
+    assert.equal(missingPeerQuote.quote?.source, 'none');
+
+    const unknownSource = await run({ kind: 'unknown', senderId: 'ghost', msgIdx: 'unknown-kind', messageId: 'unknown-source', content: 'must not leak' });
+    assert.deepEqual(unknownSource, {});
+    const unknownKindQuote = await run({ kind: 'unknown', senderId: 'ghost', refMsgIdx: 'unknown-kind', messageId: 'unknown-quote' });
+    assert.equal(unknownKindQuote.quote?.source, 'none');
+});
+
+test('webpage reader accepts HTML, refuses files and attachment responses, and uses public-network checks', async (t) => {
+    const provider = new WebPageProvider();
+    const signal = new AbortController().signal;
+    for (const url of ['http://127.0.0.1/', 'http://169.254.169.254/', 'http://[::1]/', 'file:///etc/passwd', 'https://user:pass@example.com/']) {
+        await assert.rejects(() => provider.fetch({ url }, signal), undefined, url);
+    }
+    for (const mime of ['application/pdf', 'application/zip', 'image/png', 'application/octet-stream', 'text/x-python', 'text/plain', '']) {
+        await assert.rejects(() => provider.readBody(new Response('file bytes', { headers: { 'content-type': mime } }), new URL('https://example.com/'), signal), /downloads are disabled/);
+    }
+    await assert.rejects(() => provider.readBody(new Response('<p>file</p>', { headers: { 'content-type': 'text/html', 'content-disposition': 'attachment; filename=download.html' } }), new URL('https://example.com/'), signal), /downloads are disabled/);
+    const ctx = await runtime(t);
+    applyWebFetchTool(ctx, 30000, 100000);
+    // Replace only the network boundary with an in-memory response. The real
+    // provider readBody and real web_fetch ToolRuntime still do validation,
+    // HTML conversion, output rendering, and the untrusted-content labeling.
+    const registered = ctx.get('web').fetchProviders.get('qqbot-pages');
+    assert.ok(registered);
+    registered.fetch = (_request, requestSignal) => registered.readBody(
+        new Response('<html><body><h1>网页标题</h1><script>runDangerousCode()</script><p>网页正文</p></body></html>', { headers: { 'content-type': 'text/html; charset=utf-8' } }),
+        new URL('https://example.com/'),
+        requestSignal,
+    );
+    const tool = ctx.tools.get('web_fetch');
+    const result = await call(ctx, 'web_fetch', { url: 'https://example.com/' }, {});
+    assert.ok(!result.isError, JSON.stringify(result));
+    const rendered = result.content.map((block) => block.text).join('\n');
+    assert.match(rendered, /网页正文/);
+    assert.doesNotMatch(rendered, /runDangerousCode/);
+    assert.match(rendered, /untrusted/i);
+    for (const url of ['file:///etc/passwd', 'https://user:pass@example.com/']) {
+        const blocked = await call(ctx, 'web_fetch', { url }, {});
+        assert.equal(blocked.isError, true, url);
+    }
+    assert.deepEqual((await ctx.systemPrompt.assemble()).tools.map((tool) => tool.name), ['web_fetch']);
+});
+
+test('QQ file/video attachments are not downloaded', async () => {
+    assert.deepEqual(await downloadMediaAttachments([
+        { filename: 'program.py', content_type: 'application/octet-stream', url: 'https://example.com/program.py' },
+        { filename: 'video.mp4', content_type: 'video/mp4', url: 'https://example.com/video.mp4' },
+        { filename: 'too-large.png', content_type: 'image/png', size: 11 * 1024 * 1024, url: 'https://127.0.0.1/too-large.png' },
+    ], { enabled: true, maxMB: 10 }, logger), []);
+});
+
+test('current QQ image downloader validates bytes, bounds, redirects, and quoted images', async (t) => {
+    await assert.rejects(() => downloadCurrentQQImage('http://example.com/image.png', 1024), /Only HTTPS allowed/);
+    await assert.rejects(() => downloadCurrentQQImage('https://user:pass@example.com/image.png', 1024), /Credentials/);
+    await assert.rejects(() => downloadCurrentQQImage('https://127.0.0.1/image.png', 1024), /non-public|private/i);
+    await assert.rejects(() => downloadCurrentQQImage('https://example.com/image.png', 0), /size limit/);
+
+    let responseFactory = () => new Response(png, { headers: { 'content-type': 'image/png' } });
+    const originalRequestOnce = PublicHttpProvider.prototype.requestOnce;
+    PublicHttpProvider.prototype.requestOnce = async function () {
+        return { response: responseFactory(), close: async () => {} };
+    };
+    t.after(() => { PublicHttpProvider.prototype.requestOnce = originalRequestOnce; });
+    assert.deepEqual(await downloadCurrentQQImage('https://example.com/image.png', png.length + 1), png);
+
+    responseFactory = () => new Response(Buffer.alloc(128, 0x41), { headers: { 'content-type': 'image/png' } });
+    await assert.rejects(() => downloadCurrentQQImage('https://example.com/large.png', 32), /exceeds/i);
+    responseFactory = () => new Response(png, { headers: { 'content-type': 'image/png', 'content-length': '128' } });
+    await assert.rejects(() => downloadCurrentQQImage('https://example.com/declared-large.png', 32), /exceeds/i);
+    responseFactory = () => new Response(Buffer.from('print("not an image")'), { headers: { 'content-type': 'image/png' } });
+    await assert.rejects(() => downloadCurrentQQImage('https://example.com/program.py', 1024), /invalid|signature|PNG|JPEG|WEBP|image/i);
+    responseFactory = () => new Response('<html>no image</html>', { headers: { 'content-type': 'text/html' } });
+    await assert.rejects(() => downloadCurrentQQImage('https://example.com/page.html', 1024), /inline|image/i);
+    responseFactory = () => new Response(png, { headers: { 'content-type': 'image/png', 'content-disposition': 'attachment; filename=x.png' } });
+    await assert.rejects(() => downloadCurrentQQImage('https://example.com/attachment.png', 1024), /inline|attachment/i);
+    responseFactory = () => new Response('', { status: 302, headers: { location: 'https://example.com/next.png' } });
+    await assert.rejects(() => downloadCurrentQQImage('https://example.com/redirect.png', 1024), /redirect/i);
+
+    responseFactory = () => new Response(png, { headers: { 'content-type': 'image/png' } });
+    const state = {
+        quote: { attachments: [{ contentType: 'image/png', filename: 'quoted.png', url: 'https://example.com/quoted.png' }] },
+    };
+    let nextCalled = false;
+    await attachmentProcessor({ media: { enabled: true, maxMB: 10 } }, logger)({
+        message: { attachments: [] },
+        state,
+    }, async () => { nextCalled = true; });
+    assert.equal(nextCalled, true);
+    assert.deepEqual(state.downloadedFiles, []);
+    assert.equal(state.downloadedQuoteFiles.length, 1);
+    assert.equal(state.downloadedQuoteFiles[0].contentType, 'image');
+    assert.equal(state.downloadedQuoteFiles[0].filename, 'quoted.png');
+    assert.deepEqual(await readFile(state.downloadedQuoteFiles[0].localPath), png);
+    t.after(() => rm(state.downloadedQuoteFiles[0].localPath, { force: true }));
+});

@@ -4,6 +4,8 @@ set -eu
 : "${DSH_HOME:=/data}"
 export DSH_HOME
 export HOME=/home/node
+# Chat-only is a deployment policy, not a permission that a chat user can raise.
+export DSH_PERMISSION_MODE=read-only
 
 if [ "$DSH_HOME" != "/data" ]; then
     echo "DSH_HOME must be /data; refusing to initialize an unexpected path: $DSH_HOME" >&2
@@ -33,14 +35,16 @@ if [ ! -e /data/AGENTS.md ]; then
     install -o node -g node -m 0644 /opt/qqbot-defaults/AGENTS.md /data/AGENTS.md
 fi
 
-# Existing named volumes retain the originally seeded plugin. Apply the same
-# stdout-only diagnostics to that pinned plugin too, so upgrading the image
-# fixes observability without discarding sessions or settings.
+# Existing named volumes retain the originally seeded plugin. Apply the strict
+# chat policy before launch; diagnostics may degrade, but policy must not.
 qqbot_dist=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
-if [ -d "$qqbot_dist" ]; then
-    if ! node /usr/local/lib/instrument-qqbot-startup.mjs "$qqbot_dist"; then
-        echo "[entrypoint] QQ startup diagnostics were not applied; continuing with the installed plugin" >&2
-    fi
+if [ ! -d "$qqbot_dist" ]; then
+    echo "[entrypoint] Pinned QQ plugin is missing; refusing to start without the chat-only policy" >&2
+    exit 78
+fi
+node /usr/local/lib/enforce-chat-only.mjs "$qqbot_dist"
+if ! node /usr/local/lib/instrument-qqbot-startup.mjs "$qqbot_dist"; then
+    echo "[entrypoint] QQ startup diagnostics were not applied; continuing with the installed plugin" >&2
 fi
 
 # Container Station can configure a third-party OpenAI-compatible route entirely
@@ -67,6 +71,9 @@ const url = new URL(baseURL);
 if (url.protocol !== 'https:' && url.protocol !== 'http:') {
   throw new Error('LLM_API_BASE_URL must be an HTTP(S) URL');
 }
+if (url.username || url.password) {
+  throw new Error('LLM_API_BASE_URL must not contain credentials; use LLM_API_KEY');
+}
 
 const existing = fs.existsSync(path) ? yaml.load(fs.readFileSync(path, 'utf8')) : [];
 if (existing != null && !Array.isArray(existing)) {
@@ -87,13 +94,12 @@ const route = upsert('llm-pi-ai');
 route.config.providers ||= {};
 route.config.providers[provider] = {
   displayName: provider,
-    apiKeyEnv: 'LLM_API_KEY',
-    api,
-    baseURL: url.toString().replace(/\/$/, ''),
-    // The QQ vision tool reuses this route when no QQBOT_VISION_* override is
-    // present. Declare image input so dsh does not reject that tool result
-    // before the OpenAI-compatible provider receives it.
-    models: [{ id: model, name: model, input: ['text', 'image'] }],
+  apiKeyEnv: 'LLM_API_KEY',
+  api,
+  baseURL: url.toString().replace(/\/$/, ''),
+  // This declaration permits image inputs but doesn't make a text-only model
+  // multimodal. Deployers must select an image-capable model for vision.
+  models: [{ id: model, name: model, input: ['text', 'image'] }],
 };
 const defaultModel = upsert('agent-default-model');
 defaultModel.config.provider = provider;
@@ -101,7 +107,7 @@ defaultModel.config.model = model;
 
 fs.writeFileSync(path, `# Generated from LLM_* environment variables; no secret is stored here.\n${yaml.dump(entries)}`);
 NODE
-chown node:node /data/profiles/qqbot/cordis.patch.yml
+    chown node:node /data/profiles/qqbot/cordis.patch.yml
 fi
 
 # A Docker named volume is normally root-owned when first mounted.  Make its
@@ -115,7 +121,7 @@ cd /workspace
 # configuration; AGENTS.md stays separately user-replaceable.
 if [ "$#" -ge 3 ] && [ "$1" = "dsh" ] && [ "$2" = "--profile" ] && [ "$3" = "qqbot" ]; then
     shift 3
-    set -- dsh --profile qqbot --patch /opt/qqbot-defaults/cordis.safety.patch.yml "$@"
+    set -- dsh --profile qqbot "$@" --patch /opt/qqbot-defaults/cordis.safety.patch.yml
 fi
 
 exec setpriv --reuid=node --regid=node --init-groups -- "$@"

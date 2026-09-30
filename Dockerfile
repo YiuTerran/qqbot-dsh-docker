@@ -35,6 +35,9 @@ RUN --mount=type=cache,target=/root/.npm \
     && node /usr/local/lib/instrument-qqbot-startup.mjs /opt/dsh-seed/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist \
     && node -e "const p=require('/opt/dsh-seed/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/package.json'); if (p.version !== '0.5.0') process.exit(1)"
 
+COPY scripts/enforce-chat-only.mjs /usr/local/lib/enforce-chat-only.mjs
+RUN node /usr/local/lib/enforce-chat-only.mjs /opt/dsh-seed/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
+
 FROM node:24.14.0-bookworm-slim@sha256:d8e448a56fc63242f70026718378bd4b00f8c82e78d20eefb199224a4d8e33d8
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -57,6 +60,7 @@ RUN apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
 # and pnpm download caches exist only in the discarded build stage.
 COPY --from=build /usr/local/lib/node_modules/ /usr/local/lib/node_modules/
 COPY --from=build /usr/local/lib/instrument-qqbot-startup.mjs /usr/local/lib/instrument-qqbot-startup.mjs
+COPY --from=build /usr/local/lib/enforce-chat-only.mjs /usr/local/lib/enforce-chat-only.mjs
 COPY --from=build /opt/dsh-seed/ /opt/dsh-seed/
 COPY scripts/link-global-bins.mjs /usr/local/lib/link-global-bins.mjs
 
@@ -80,6 +84,8 @@ RUN set -eu \
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY defaults/AGENTS.md /opt/qqbot-defaults/AGENTS.md
 COPY defaults/cordis.safety.patch.yml /opt/qqbot-defaults/cordis.safety.patch.yml
+COPY defaults/qqbot-chat-policy.mjs /opt/qqbot-defaults/qqbot-chat-policy.mjs
+COPY defaults/qqbot-web-pages.mjs /opt/qqbot-defaults/qqbot-web-pages.mjs
 
 RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh \
     && chown -R node:node /opt/dsh-seed /opt/qqbot-defaults
