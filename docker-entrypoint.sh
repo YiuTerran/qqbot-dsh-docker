@@ -12,6 +12,27 @@ if [ "$DSH_HOME" != "/data" ]; then
     exit 64
 fi
 
+# Credential presence selects one deployment mode. Stale LLM_* route fields
+# alone never switch an official-key deployment to a third-party route.
+deepseek_api_key=${DEEPSEEK_API_KEY:-}
+llm_api_key=${LLM_API_KEY:-}
+if [ -n "$deepseek_api_key" ] && [ -n "$llm_api_key" ]; then
+    echo "[entrypoint] Set only one of DEEPSEEK_API_KEY or LLM_API_KEY; the chat credential modes are mutually exclusive" >&2
+    exit 64
+fi
+
+selected_provider=''
+if [ -n "$llm_api_key" ]; then
+    selected_provider=${LLM_PROVIDER:-}
+elif [ -n "$deepseek_api_key" ]; then
+    selected_provider=deepseek-official
+fi
+if [ -n "$selected_provider" ] && [ -n "${QQBOT_VISION_PROVIDER:-}" ] \
+    && [ "$QQBOT_VISION_PROVIDER" != "$selected_provider" ]; then
+    echo "[entrypoint] QQBOT_VISION_PROVIDER must match the active chat credential mode" >&2
+    exit 64
+fi
+
 mkdir -p /data /workspace
 
 # dsh itself resolves its state through DSH_HOME. dsh-qqbot 0.5.0 also reads
@@ -59,22 +80,27 @@ if ! node /usr/local/lib/instrument-qqbot-startup.mjs "$qqbot_dist"; then
     echo "[entrypoint] QQ startup diagnostics were not applied; continuing with the installed plugin" >&2
 fi
 
-# Container Station can configure a third-party OpenAI-compatible route entirely
-# through environment variables. The generated profile patch contains only the
-# environment-variable *name*, never LLM_API_KEY itself.
-if [ -n "${LLM_PROVIDER:-}${LLM_MODEL:-}${LLM_API_BASE_URL:-}${LLM_API_KEY:-}" ]; then
+# A non-empty LLM_API_KEY selects a third-party OpenAI-compatible route. The
+# generated profile patch contains only the environment-variable name, never
+# LLM_API_KEY itself. LLM_SEARCH_BASE_URL is an independent optional native
+# DeepSeek search endpoint; it is not inferred from LLM_API_BASE_URL.
+if [ -n "$llm_api_key" ]; then
     node <<'NODE'
 const fs = require('node:fs');
 const path = '/data/profiles/qqbot/cordis.patch.yml';
 const yaml = require('/data/profiles/qqbot/node_modules/js-yaml');
 const { LLM_PROVIDER: provider, LLM_MODEL: model, LLM_API_BASE_URL: baseURL } = process.env;
 const api = process.env.LLM_API_PROTOCOL || 'openai-responses';
+const searchBaseURL = process.env.LLM_SEARCH_BASE_URL || '';
 
 if (!provider || !model || !baseURL || !process.env.LLM_API_KEY) {
   throw new Error('LLM_PROVIDER, LLM_MODEL, LLM_API_BASE_URL, and LLM_API_KEY must all be set together');
 }
 if (!/^[a-z0-9][a-z0-9-]*$/.test(provider)) {
   throw new Error('LLM_PROVIDER must contain only lowercase letters, digits, and hyphens');
+}
+if (provider === 'deepseek-official') {
+  throw new Error('LLM_PROVIDER deepseek-official is reserved for the built-in DeepSeek route');
 }
 if (!['openai-responses', 'openai-completions'].includes(api)) {
   throw new Error('LLM_API_PROTOCOL must be openai-responses or openai-completions');
@@ -85,6 +111,20 @@ if (url.protocol !== 'https:' && url.protocol !== 'http:') {
 }
 if (url.username || url.password) {
   throw new Error('LLM_API_BASE_URL must not contain credentials; use LLM_API_KEY');
+}
+if (searchBaseURL) {
+  let searchUrl;
+  try {
+    searchUrl = new URL(searchBaseURL);
+  } catch {
+    throw new Error('LLM_SEARCH_BASE_URL must be a valid HTTP(S) URL');
+  }
+  if (searchUrl.protocol !== 'https:' && searchUrl.protocol !== 'http:') {
+    throw new Error('LLM_SEARCH_BASE_URL must be an HTTP(S) URL');
+  }
+  if (searchUrl.username || searchUrl.password) {
+    throw new Error('LLM_SEARCH_BASE_URL must not contain credentials; use LLM_API_KEY');
+  }
 }
 
 const existing = fs.existsSync(path) ? yaml.load(fs.readFileSync(path, 'utf8')) : [];

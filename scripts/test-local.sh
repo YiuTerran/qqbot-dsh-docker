@@ -11,6 +11,9 @@ override_data_volume="dsh-qqbot-test-override-data-${suffix}"
 legacy_data_volume="dsh-qqbot-test-legacy-data-${suffix}"
 incompatible_data_volume="dsh-qqbot-test-incompatible-data-${suffix}"
 media_guard_data_volume="dsh-qqbot-test-media-guard-data-${suffix}"
+search_env_data_volume="dsh-qqbot-test-search-env-data-${suffix}"
+official_data_volume="dsh-qqbot-test-official-data-${suffix}"
+no_search_data_volume="dsh-qqbot-test-no-search-data-${suffix}"
 container="dsh-qqbot-test-${suffix}"
 instructions_file="$(mktemp)"
 incompatible_log="$(mktemp)"
@@ -28,7 +31,7 @@ on_error() {
 cleanup() {
     log "Cleaning up temporary container, volumes, and instruction file"
     docker rm --force "$container" >/dev/null 2>&1 || true
-    docker volume rm "$data_volume" "$workspace_volume" "$override_data_volume" "$legacy_data_volume" "$incompatible_data_volume" "$media_guard_data_volume" >/dev/null 2>&1 || true
+    docker volume rm "$data_volume" "$workspace_volume" "$override_data_volume" "$legacy_data_volume" "$incompatible_data_volume" "$media_guard_data_volume" "$search_env_data_volume" "$official_data_volume" "$no_search_data_volume" >/dev/null 2>&1 || true
     rm -f "$instructions_file"
     rm -f "$incompatible_log"
 }
@@ -65,6 +68,87 @@ docker volume create "$override_data_volume" >/dev/null
 docker volume create "$legacy_data_volume" >/dev/null
 docker volume create "$incompatible_data_volume" >/dev/null
 docker volume create "$media_guard_data_volume" >/dev/null
+docker volume create "$search_env_data_volume" >/dev/null
+docker volume create "$official_data_volume" >/dev/null
+docker volume create "$no_search_data_volume" >/dev/null
+
+run_profile_probe() {
+    local scenario="$1"
+    local volume="$2"
+    local expected_base_url="$3"
+    shift 3
+    log "Checking credential routing: $scenario"
+    docker run --rm --network none \
+        --volume "${volume}:/data" \
+        --mount "type=bind,src=${repo_root}/scripts/test-profile-boot.mjs,dst=/tmp/test-profile-boot.mjs,readonly" \
+        --env QQBOT_APPID=fixture-app-id \
+        --env QQBOT_SECRET=fixture-app-secret \
+        --env QQBOT_TEST_EXPECT_SEARCH_BASE_URL="$expected_base_url" \
+        "$@" \
+        "$IMAGE" node /tmp/test-profile-boot.mjs
+}
+
+run_profile_probe \
+    "official route overrides stale LLM fields" \
+    "$official_data_volume" \
+    "https://api.deepseek.com/anthropic/v1" \
+    --env DEEPSEEK_API_KEY=fixture-official-key \
+    --env LLM_PROVIDER=stale-provider \
+    --env LLM_MODEL=stale-model \
+    --env LLM_API_BASE_URL=https://stale-chat.example.com/v1
+run_profile_probe \
+    "third-party route with native search endpoint" \
+    "$search_env_data_volume" \
+    "https://search-gateway.example.com/anthropic/v1" \
+    --env LLM_PROVIDER=fixture-chat \
+    --env LLM_MODEL=fixture-chat-model \
+    --env LLM_API_BASE_URL=https://chat-gateway.example.com/v1 \
+    --env LLM_API_PROTOCOL=openai-responses \
+    --env LLM_API_KEY=fixture-chat-key \
+    --env LLM_SEARCH_BASE_URL=https://search-gateway.example.com/anthropic/v1
+run_profile_probe \
+    "third-party route without search endpoint" \
+    "$no_search_data_volume" \
+    "" \
+    --env LLM_PROVIDER=fixture-chat \
+    --env LLM_MODEL=fixture-chat-model \
+    --env LLM_API_BASE_URL=https://chat-gateway.example.com/v1 \
+    --env LLM_API_PROTOCOL=openai-responses \
+    --env LLM_API_KEY=fixture-chat-key
+run_profile_probe \
+    "official route after third-party config persists in same volume" \
+    "$search_env_data_volume" \
+    "https://api.deepseek.com/anthropic/v1" \
+    --env DEEPSEEK_API_KEY=fixture-official-key \
+    --env LLM_PROVIDER=stale-provider \
+    --env LLM_MODEL=stale-model \
+    --env LLM_API_BASE_URL=https://stale-chat.example.com/v1
+
+log "Checking keyless diagnostic command with stale LLM route fields"
+docker run --rm --network none --volume "${official_data_volume}:/data" \
+    --env LLM_PROVIDER=stale-provider --env LLM_MODEL=stale-model \
+    --env LLM_API_BASE_URL=https://stale-chat.example.com/v1 \
+    "$IMAGE" sh -c true
+
+log "Checking credential and search endpoint validation failures"
+if docker run --rm --network none --volume "${official_data_volume}:/data" \
+    --env QQBOT_APPID=fixture-app-id --env QQBOT_SECRET=fixture-app-secret \
+    --env DEEPSEEK_API_KEY=fixture-official-key --env LLM_API_KEY=fixture-chat-key \
+    "$IMAGE" sh -c true >"$incompatible_log" 2>&1; then
+    echo "entrypoint unexpectedly accepted both chat credential modes" >&2
+    exit 1
+fi
+grep -Fq "mutually exclusive" "$incompatible_log"
+if docker run --rm --network none --volume "${official_data_volume}:/data" \
+    --env QQBOT_APPID=fixture-app-id --env QQBOT_SECRET=fixture-app-secret \
+    --env LLM_PROVIDER=fixture-chat --env LLM_MODEL=fixture-chat-model \
+    --env LLM_API_BASE_URL=https://chat-gateway.example.com/v1 --env LLM_API_KEY=fixture-chat-key \
+    --env LLM_SEARCH_BASE_URL=https://user:password@search-gateway.example.com/anthropic/v1 \
+    "$IMAGE" sh -c true >"$incompatible_log" 2>&1; then
+    echo "entrypoint unexpectedly accepted credentials embedded in LLM_SEARCH_BASE_URL" >&2
+    exit 1
+fi
+grep -Fq "LLM_SEARCH_BASE_URL must not contain credentials" "$incompatible_log"
 
 log "Checking entrypoint refuses conflicting persistent media paths"
 docker run --rm --network none \
@@ -160,10 +244,13 @@ docker create \
         grep -A2 -F -- "- id: tool-fs" "$dump" | grep -Fq "disabled: true"
         grep -A12 -F -- "- id: tool-subagent" "$dump" | grep -Fq "disabled: true"
         grep -A2 -F -- "- id: ptc-runtime" "$dump" | grep -Fq "disabled: true"
-        grep -A5 -F -- "- id: web" "$dump" | grep -Fq "fetchProvider: qqbot-pages"
+        grep -A4 -F -- "- id: web" "$dump" | grep -Fq "searchProvider: deepseek-official"
+        grep -A4 -F -- "- id: web" "$dump" | grep -Fq "fetchProvider: qqbot-pages"
         grep -A6 -F -- "- id: web-fetch-http" "$dump" | grep -Fq "disabled: true"
-        grep -A7 -F -- "- id: tool-web" "$dump" | grep -Fq "search: false"
-        grep -A7 -F -- "- id: tool-web" "$dump" | grep -Fq "fetch: true"
+        grep -A9 -F -- "- id: tool-web" "$dump" | grep -Fq "searchMaxResults: 8"
+        grep -A9 -F -- "- id: tool-web" "$dump" | grep -Fq "searchMaxQueries: 4"
+        grep -A9 -F -- "- id: tool-web" "$dump" | grep -Fq "searchTimeoutMs: 60000"
+        grep -A9 -F -- "- id: tool-web" "$dump" | grep -Fq "fetch: true"
         grep -A3 -F -- "- id: tools" "$dump" | grep -Fq "mode: native"
         grep -A4 -F -- "- id: agent-loop" "$dump" | grep -Fq "agents: []"
         test "$(grep -A6 -F -- "- id: im-qqbot" "$dump" | grep -Fc "appId: __FROM_ENV__")" -eq 1

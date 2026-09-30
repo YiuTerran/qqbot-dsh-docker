@@ -35,18 +35,19 @@ dsh --profile qqbot
 
 ## 纯聊天能力
 
-本机器人定位为对话式 QQ Bot；除普通文字回复外，仅提供以下两项严格受限的能力：
+本机器人定位为对话式 QQ Bot；除普通文字回复外，仅提供以下三项严格受限的能力：
 
 - 它可以分析**当前 QQ 消息**附带的图片或 GIF、该消息明确引用的图片，或公共 HTTPS 图片 URL。
   本地路径必须是 `/data/qqbot-media` 内的普通文件，并且已登记为当前消息或引用图片；任意工作区路径、未引用的历史附件以及其他会话的附件都会被拒绝。
   两类输入均限制为 10 MB。URL 必须使用 HTTPS，且不得嵌入凭据；拒绝重定向，且只接受内联的 PNG、JPEG、GIF 或 WEBP 响应，并要求 MIME 类型与图片字节相符。在读取字节、保存图片附件或调用视觉模型前，工具内部会再次检查路径或 URL。URL 内容会先经过同一套校验公网 IP、限制大小并在内存中处理的下载器，再进入插件现有的视觉附件流程。这不会开放通用文件下载；URL 辅助程序本身不会写入缓存文件。传输缓存的 TTL 为 1 小时，并按小时清理；这不代表下游附件存储中的每个字节都会在恰好 1 小时后删除。当前消息的本地关联会在本轮结束时清除。
-- 它可以对公共 `http://` 或 `https://` URL 使用 `web_fetch`，前提是响应为 HTML/XHTML。网页内容有大小限制，并在内存中转换为文本；不会运行脚本，也不会将响应保存为文件。PDF、ZIP、图片、纯文本、附件和其他文件类型的响应都会被拒绝。网页搜索已禁用，网页文本一律视为不可信数据。
+- 它可以用 `web_search` 按关键词发现网页。每次最多提交 4 个查询，合并后最多返回 8 个来源；搜索结果是外部不可信数据，不是指令。
+- 它可以对公共 `http://` 或 `https://` URL 使用 `web_fetch`，前提是响应为 HTML/XHTML。网页内容有大小限制，并在内存中转换为文本；不会运行脚本，也不会将响应保存为文件。PDF、ZIP、图片、纯文本、附件和其他文件类型的响应都会被拒绝。搜索到网页后，可用它读取具体来源的正文，后续读取仍受相同限制。需要分析图片时，请使用 `qqbot_describe_image` 提供公共 HTTPS 图片 URL；网页读取器拒绝图片响应，不代表视觉工具不支持图片 URL。搜索结果和网页文本均视为不可信数据。
 
 私聊和群聊中均不可使用 Shell 命令、代码执行、通用文件读写、文件发送、文件下载、后台任务、子 Agent、工作流及类似环境操作。机器人可以解释命令或以文本展示代码，但绝不会运行。用户确认或自定义人设都不能取消这些限制。
 
 ## 通用 Docker Compose 部署
 
-将以下内容保存为 `compose.yaml`，并在同一目录创建 `.env`。将 `YOUR_TAG` 替换为 Docker Hub 上已发布的镜像版本标签。`.env` 至少填写镜像标签、QQ Bot 凭据；若使用 dsh 默认的 `deepseek-official` 路由，再填写 `DEEPSEEK_API_KEY`。不要将密钥写入 `compose.yaml` 或提交到版本库。
+将以下内容保存为 `compose.yaml`，并在同一目录创建 `.env`。将 `YOUR_TAG` 替换为 Docker Hub 上已发布的镜像版本标签。`.env` 至少填写镜像标签和 QQ Bot 凭据。选择官方模式时填写 `DEEPSEEK_API_KEY`；选择第三方模式时填写 `LLM_API_KEY` 和对应的 `LLM_*` 路由值。两种密钥不能同时设置。不要将密钥写入 `compose.yaml` 或提交到版本库。
 
 ```yaml
 services:
@@ -63,6 +64,7 @@ services:
       LLM_MODEL: ${LLM_MODEL:-}
       LLM_API_BASE_URL: ${LLM_API_BASE_URL:-}
       LLM_API_PROTOCOL: ${LLM_API_PROTOCOL:-}
+      LLM_SEARCH_BASE_URL: ${LLM_SEARCH_BASE_URL:-}
       QQBOT_VISION_PROVIDER: ${QQBOT_VISION_PROVIDER:-}
       QQBOT_VISION_MODEL: ${QQBOT_VISION_MODEL:-}
       QQBOT_MEDIA_ENABLED: ${QQBOT_MEDIA_ENABLED:-true}
@@ -85,7 +87,16 @@ volumes:
 
 ```dotenv
 IMAGE_TAG=YOUR_TAG
+# Set exactly one chat key. The official key enables official chat, vision, and search.
 DEEPSEEK_API_KEY=
+# Third-party mode: also set LLM_PROVIDER, LLM_MODEL, and LLM_API_BASE_URL.
+LLM_API_KEY=
+LLM_PROVIDER=
+LLM_MODEL=
+LLM_API_BASE_URL=
+LLM_API_PROTOCOL=
+# Optional in third-party mode. Blank disables only web_search.
+LLM_SEARCH_BASE_URL=
 QQBOT_APPID=
 QQBOT_SECRET=
 ```
@@ -141,15 +152,15 @@ docker run --rm --network none \
       - dsh-workspace:/workspace
 ```
 
-将自己的文件以只读方式挂载到 `/data/AGENTS.md`，即可替换人设和软性行为指引，但不会移除镜像的传输层策略：群聊消息必须提及机器人；只有当前消息图片/GIF（包括明确引用的图片）和公共 HTTPS 图片 URL 可以进入受限视觉流程；只有公共 HTML/XHTML 可以交给 `web_fetch`；Shell、代码、文件操作、文件发送、文件下载和后台工作仍不可用。入口脚本也会强制 DSH 使用 `read-only`；不要把自定义人设当作安全机制。升级时会保留已有的 `/data/AGENTS.md`；如果其中的人设禁止图片 URL，请修改软性指引，使其与本文所述的公共 HTTPS 图片能力一致。
+将自己的文件以只读方式挂载到 `/data/AGENTS.md`，即可替换人设和软性行为指引，但不会移除镜像的传输层策略：群聊消息必须提及机器人；只有当前消息图片/GIF（包括明确引用的图片）和公共 HTTPS 图片 URL 可以进入受限视觉流程；网页只能通过关键词搜索及受限的公共 HTML/XHTML 读取能力访问；Shell、代码、文件操作、文件发送、文件下载和后台工作仍不可用。入口脚本也会强制 DSH 使用 `read-only`；不要把自定义人设当作安全机制。升级时会保留已有的 `/data/AGENTS.md`，不会自动覆盖旧人设文件；如需同步更新其中的软性指引，请手动修改该文件。
 
-视觉能力会自动复用 `LLM_PROVIDER` / `LLM_MODEL`，因此第三方多模态路由无需另配模型或密钥。未配置 `LLM_*` 路由时，会使用内置的 `deepseek-official` / `deepseek-flash` 路由。只有在视觉能力需要使用不同的多模态路由时，才设置 `QQBOT_VISION_PROVIDER` 和 `QQBOT_VISION_MODEL`。所选模型必须确实支持图片输入；生成的提供者声明中的 `input: [text, image]` 只表示该路由符合 dsh 的候选条件，并不会让纯文本模型获得多模态能力。
+视觉能力使用当前密钥模式选定的提供者：官方模式为 `deepseek-official`，第三方模式为 `LLM_PROVIDER`。设置 `QQBOT_VISION_PROVIDER` 时，它必须与当前模式的提供者相同；可用 `QQBOT_VISION_MODEL` 覆盖模型。第三方聊天和视觉共用 `LLM_API_KEY`。所选模型必须确实支持图片输入；提供者声明中的 `input: [text, image]` 只表示该路由符合 dsh 的候选条件，并不会让纯文本模型获得多模态能力。
 
 ## 第三方 / OpenAI 兼容模型提供者
 
-QQ 不限于官方 DeepSeek API。`dsh-qqbot` 按以下顺序确定模型路由：QQ 会话通过 `/model` 选择的模型、QQ 插件中显式配置的路由、dsh 当前默认模型，最后回退到 `deepseek-official`。请在此容器使用的**同一个 `qqbot` 配置档案**中配置 OpenAI 兼容提供者，然后将其选为 dsh 默认模型，或在 QQ 中使用 `/model` 选择。
+QQ 不限于官方 DeepSeek API。`dsh-qqbot` 按以下顺序确定模型路由：QQ 会话通过 `/model` 选择的模型、QQ 插件中显式配置的路由、dsh 当前默认模型，最后回退到 `deepseek-official`。容器以当前密钥模式设置部署默认模型；若需要，可在 QQ 中使用 `/model` 为会话选择其他已配置模型。切换密钥模式会更新部署默认值，不会覆盖已有的会话级 `/model` 选择。
 
-如果使用官方配置，只需在 `.env` 中设置 `DEEPSEEK_API_KEY`；dsh 会使用内置的 `deepseek-official` 默认路由。此时无需设置任何 `LLM_*` 变量。
+只设置 `DEEPSEEK_API_KEY` 会选择内置的 `deepseek-official` 聊天和视觉路由，并启用使用同一密钥的官方原生搜索。即使环境或持久化配置中残留 `LLM_PROVIDER` 等字段，也不会切换到第三方模式。启动时同时设置 `DEEPSEEK_API_KEY` 和 `LLM_API_KEY` 会被拒绝。
 
 使用第三方提供者时，请在 `.env` 中设置所需的 `LLM_*` 变量。入口脚本会将不含密钥的提供者路由写入持久化的 `qqbot` 配置档案，并设为 dsh 默认模型。可参考以下配置（替换为实际的模型名称、网关地址和 API 密钥）：
 
@@ -160,6 +171,7 @@ QQ 不限于官方 DeepSeek API。`dsh-qqbot` 按以下顺序确定模型路由�
 | `LLM_API_BASE_URL` | `https://gateway.example.com/v1` |
 | `LLM_API_PROTOCOL` | `openai-responses` |
 | `LLM_API_KEY` | 你的网关 API 密钥 |
+| `LLM_SEARCH_BASE_URL` | 可选的 Anthropic Messages 原生搜索地址；留空时关闭第三方模式的搜索 |
 
 将这些变量追加到 `.env`，并填写实际的模型名称和 API 密钥：
 
@@ -171,7 +183,14 @@ LLM_API_PROTOCOL=openai-responses
 LLM_API_KEY=
 ```
 
-`LLM_PROVIDER`、`LLM_MODEL`、`LLM_API_BASE_URL` 和 `LLM_API_KEY` 必须同时设置。`LLM_API_PROTOCOL` 为可选项，默认值是 `openai-responses`（仅在提供者要求时使用 `openai-completions`）。`LLM_PROVIDER` 只能包含小写字母、数字和连字符。密钥绝不会写入 `/data`。修改这些值后，下次启动容器时会更新生成的路由。若要继续使用官方 `DEEPSEEK_API_KEY` 路由或手动配置的 dsh 路由，请省略所有 `LLM_*` 变量。
+`LLM_PROVIDER`、`LLM_MODEL`、`LLM_API_BASE_URL` 和 `LLM_API_KEY` 必须同时设置。`LLM_API_PROTOCOL` 为可选项，**仅支持以下两个值**：
+
+- `openai-responses`：OpenAI Responses API；未设置或留空时的默认值。
+- `openai-completions`：OpenAI Chat Completions API（不是旧版文本 Completions API）；提供者仅支持 Chat Completions 时使用。
+
+请按提供者支持的接口选择，容器不会自动探测协议；其他值会导致启动校验失败。该变量只控制第三方聊天和视觉接口，不控制 `LLM_SEARCH_BASE_URL` 对应的原生搜索协议。
+
+`LLM_PROVIDER` 只能包含小写字母、数字和连字符，且不能使用内置 ID `deepseek-official`。密钥绝不会写入 `/data`。修改路由值后，下次启动容器时会更新生成的路由。若要切回官方模式，移除 `LLM_API_KEY` 并设置 `DEEPSEEK_API_KEY`；若两者都未设置，诊断类命令仍可运行，但聊天和视觉没有凭据。
 
 对于 dsh Models 界面中类似的路由，相应的提供者配置如下；其中不包含密钥：
 
@@ -193,7 +212,20 @@ LLM_API_KEY=
     model: your-model
 ```
 
-请通过 `qqbot` 配置档案的 dsh Models/Settings 界面保存这些设置，或将等效条目添加到 `/data/profiles/qqbot/cordis.patch.yml`。可将这些变量追加到 `.env`；`LLM_API_KEY` 绝不能写入 YAML 文件。容器会将 dsh 旧版 `~/.dsh` 设置视图映射回持久化的 `/data` 卷，因此 QQ 插件与 dsh 读取的是同一份模型状态。单独桌面配置档案中的提供者不会自动供此容器使用。
+上面的 YAML 仅展示启动时生成的路由结构；请通过环境变量配置第三方默认路由，不要手动把密钥或路由覆盖写入持久化档案。入口会在 `LLM_API_KEY` 存在时生成无密钥值的提供者条目并选择为默认模型，安全覆盖层也会按当前密钥模式强制默认提供者。容器会将 dsh 旧版 `~/.dsh` 设置视图映射回持久化的 `/data` 卷，因此 QQ 插件与 dsh 读取的是同一份模型状态。QQ `/model` 仍可为会话选择其他已配置模型；单独桌面配置档案中的提供者不会自动供此容器使用。
+
+## 网页搜索后端
+
+`web_search` 使用 DeepSeek 原生 Anthropic Messages 搜索工具，要求搜索服务支持 `web_search_20250305`，并返回 `web_search_tool_result`。搜索模型默认是 `deepseek-v4-flash`。官方模式使用 `DEEPSEEK_API_KEY` 和官方地址 `https://api.deepseek.com/anthropic/v1`。第三方模式只有在设置 `LLM_SEARCH_BASE_URL` 后才启用搜索；搜索请求发往该地址，并复用 `LLM_API_KEY`。该地址与聊天的 OpenAI 兼容地址相互独立。留空或省略 `LLM_SEARCH_BASE_URL` 只会关闭 `web_search`，聊天、视觉和 `web_fetch` 仍可用。
+
+第三方搜索示例：
+
+```dotenv
+LLM_SEARCH_BASE_URL=https://gateway.example.com/anthropic/v1
+LLM_API_KEY=YOUR_GATEWAY_API_KEY
+```
+
+`LLM_SEARCH_BASE_URL` 必须是 HTTP(S) URL，不能在 URL 中嵌入用户名或密码；它应指向 Anthropic Messages API 基础地址，原生客户端会在后面追加 `/messages`。聊天的 OpenAI Responses/Completions 地址不能用于此处。若搜索网关要求不同的模型名，可在 `web-search-deepseek` 原生配置中设置 `model`；它与聊天的 `LLM_MODEL` 无关，密钥仍由当前模式提供。搜索工具只接收关键词，不能指定任意 URL 抓取；搜索服务端点由部署者配置。阅读搜索来源正文时，仍由 `web_fetch` 执行现有的公网地址校验、HTML/XHTML 类型检查、响应大小限制和内存转换，不运行脚本或保存文件。图片 URL 请交给视觉工具处理。
 
 ## 本地验证
 
@@ -203,7 +235,7 @@ LLM_API_KEY=
 ./scripts/test-local.sh
 ```
 
-该脚本会构建当前平台的镜像，为运行时状态使用临时命名卷，并且只挂载只读的回归测试脚本和配置档案探测脚本。它会验证首次初始化、`qqbot` 配置档案、插件版本、`dsh`、只读指令文件挂载、最终的 `native`/禁用/web-provider 配置（包括不启动 Agent）、镜像内真实的 `ToolRuntime` 策略测试，以及使用封装 QQ SDK 的完整本地 Cordis 配置档案启动流程。之后还会验证使用相同卷重启、容器重建前后的媒体缓存字节、为未打补丁的旧配置档案严格打补丁、拒绝不兼容的插件版本、默认命令，以及镜像历史/配置中的密钥扫描。它不会连接 QQ 或付费模型 API，也不是真实的 QQ 端到端测试。它只会删除自己创建的临时容器和卷。
+该脚本会构建当前平台的镜像，为运行时状态使用临时命名卷，并且只挂载只读的回归测试脚本和配置档案探测脚本。它会验证首次初始化、`qqbot` 配置档案、插件版本、`dsh`、只读指令文件挂载、最终的 `native`/禁用/web-provider 配置（包括搜索和读取 provider 以及不启动 Agent）、镜像内真实的 `ToolRuntime` 策略测试，以及使用封装 QQ SDK 的完整本地 Cordis 配置档案启动流程。之后还会验证使用相同卷重启、容器重建前后的媒体缓存字节、为未打补丁的旧配置档案严格打补丁、拒绝不兼容的插件版本、默认命令，以及镜像历史/配置中的密钥扫描。它不会连接 QQ 或付费模型 API，也不是真实的 QQ 端到端测试。它只会删除自己创建的临时容器和卷。
 
 ## 升级、回滚与备份
 
@@ -225,7 +257,7 @@ tryao/qqbot-dsh:v0.1.0
 
 密钥只通过运行时环境变量提供；不会复制到镜像中。构建时不会打包宿主机的依赖目录；运行时无需挂载宿主机目录或 Docker socket，机器人的工作目录为 `/workspace`。
 
-此镜像将私聊和群聊准入交由 QQ 开放平台自身的白名单和权限设置管理，不会在容器中重复配置这些 OpenID。群聊消息必须 @提及机器人。镜像的强制边界由不可变传输层覆盖和聊天策略守卫实现：只有用于处理 QQ 媒体目录内当前消息图片或明确引用图片，以及公共 HTTPS 图片 URL 的视觉工具，还有受限的公共 HTML `web_fetch` 可以调用。镜像还会移除网页搜索提供者、禁用自动启动的 `agent-loop` 智能体，并强制使用原生工具呈现方式。只读沙箱、容器隔离和媒体大小限制属于纵深防御；`read-only` 本身不会禁止 Shell。网页读取器会校验目标为公网地址、固定已校验的连接、直接发送请求而不使用 HTTP 代理，并且绝不写入下载文件。引用缓存键会按聊天类型和对端隔离（私聊使用发送者，群聊使用群组）；无法识别对端的消息不会缓存，但显式引用仍可使用当前 QQ 消息元素回退机制。已配置的 LLM 提供者仍可使用模型端点代理设置。
+此镜像将私聊和群聊准入交由 QQ 开放平台自身的白名单和权限设置管理，不会在容器中重复配置这些 OpenID。群聊消息必须 @提及机器人。镜像的强制边界由不可变传输层覆盖和聊天策略守卫实现：允许的专用能力只有当前消息或明确引用图片、公共 HTTPS 图片 URL 的视觉分析，以及通过 `web_search` 和 `web_fetch` 搜索和读取公共网页。网页搜索固定选择 `deepseek-official` provider ID；provider 的端点、模型和凭据仍可通过插件配置，以支持原生搜索 API 兼容的中转站。`web_search` 只接收关键词，不能让模型指定任意抓取 URL；搜索服务端点由部署者配置。`web_fetch` 仍只处理通过公网地址校验的 HTML/XHTML，不保存下载文件。镜像会禁用自动启动的 `agent-loop` 智能体，并强制使用原生工具呈现方式。只读沙箱、容器隔离和媒体大小限制属于纵深防御；`read-only` 本身不会禁止 Shell。网页读取器会固定已校验的连接并直接发送请求，不使用 HTTP 代理。引用缓存键会按聊天类型和对端隔离（私聊使用发送者，群聊使用群组）；无法识别对端的消息不会缓存，但显式引用仍可使用当前 QQ 消息元素回退机制。已配置的 LLM 提供者仍可使用模型端点代理设置。
 
 用于读取公共网页和下载当前 QQ 图片的容器 DNS 必须返回目标的真实公网 IP。公网目标检查会拒绝 `198.18.0.0/15` 等 Fake-IP 响应；如果 Docker DNS 返回此类地址，请调整 Docker DNS 配置，不要关闭检查。这些请求均为直连，不使用模型端点代理。离线回归测试无法证明能够访问公共互联网、QQ 或付费多模态模型；请使用合适的测试凭据和服务策略，分别验证这些集成。
 

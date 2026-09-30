@@ -7,7 +7,7 @@
 // is wrapped before the profile is loaded and its start/stop lifecycle is local.
 import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
-import { access, unlink, writeFile } from 'node:fs/promises';
+import { access, readFile, unlink, writeFile } from 'node:fs/promises';
 
 const dshRoot = '/usr/local/lib/node_modules/@deepseek-ai/dsh';
 const profileRoot = '/data/profiles/qqbot';
@@ -68,10 +68,36 @@ try {
 
   const { ctx, shutdown } = boot;
   const tools = ctx.get('tools');
+  const agentDefaultModel = ctx.get('agentDefaultModel');
   const systemPrompt = ctx.get('systemPrompt');
+  const web = ctx.get('web');
+  const expectedSearchBaseUrl = process.env.QQBOT_TEST_EXPECT_SEARCH_BASE_URL;
+  const thirdPartyMode = Boolean(process.env.LLM_API_KEY);
+  const expectedProvider = thirdPartyMode ? process.env.LLM_PROVIDER : 'deepseek-official';
+  const expectedModel = thirdPartyMode ? process.env.LLM_MODEL : 'deepseek-flash';
+  const searchEnabled = !thirdPartyMode || Boolean(process.env.LLM_SEARCH_BASE_URL);
   assert.equal(ctx.fiber.state, 2, 'Cordis root did not reach the running state');
   assert.ok(tools && typeof tools.schemas === 'function', 'tools service is missing');
+  assert.ok(agentDefaultModel && typeof agentDefaultModel.currentSelection === 'function', 'agent default model service is missing');
   assert.ok(systemPrompt && typeof systemPrompt.assemble === 'function', 'systemPrompt service is missing');
+  const defaultSelection = agentDefaultModel.currentSelection();
+  assert.equal(defaultSelection.provider, expectedProvider, 'default chat provider did not follow the active credential mode');
+  assert.equal(defaultSelection.model, expectedModel, 'default chat model did not follow the active credential mode');
+  assert.equal(web?.searchProviders?.has('deepseek-official'), searchEnabled, 'native search provider registration does not match the active mode');
+  let searchBaseUrlMatches;
+  if (expectedSearchBaseUrl && searchEnabled) {
+    const searchProvider = web.searchProviders.get('deepseek-official');
+    assert.equal(typeof searchProvider?.resolveOptions, 'function', 'the native search provider options are unavailable');
+    const searchOptions = searchProvider.resolveOptions();
+    assert.equal(searchOptions.baseURL, expectedSearchBaseUrl, 'native search endpoint did not resolve from deployment configuration');
+    assert.equal(searchOptions.apiKeyEnv, thirdPartyMode ? 'LLM_API_KEY' : 'DEEPSEEK_API_KEY', 'search must use the active mode credential');
+    assert.equal(searchOptions.apiKey, undefined, 'persisted literal search keys must be cleared');
+    searchBaseUrlMatches = true;
+  }
+  const persistedPatch = await readFile(`${profileRoot}/cordis.patch.yml`, 'utf8').catch(() => '');
+  for (const fixtureKey of ['fixture-chat-key', 'fixture-official-key']) {
+    assert.ok(!persistedPatch.includes(fixtureKey), `persisted profile must not contain ${fixtureKey}`);
+  }
 
   const logText = captured.map(({ line }) => line).join('\n');
   assert.match(logText, /\[im-qqbot\] chat-only policy installed;/, 'chat policy was not installed');
@@ -81,7 +107,20 @@ try {
   const registryNames = tools.schemas().map((tool) => tool.name).sort();
   const assembly = await systemPrompt.assemble();
   const modelNames = assembly.tools.map((tool) => tool.name).sort();
-  assert.deepEqual(modelNames, ['qqbot_describe_image', 'web_fetch'], 'model-facing tool catalog is not chat-only');
+  assert.deepEqual(modelNames, searchEnabled
+    ? ['qqbot_describe_image', 'web_fetch', 'web_search']
+    : ['qqbot_describe_image', 'web_fetch'], 'model-facing chat tool catalog does not match configured search availability');
+  if (!searchEnabled) {
+    assert.ok(!registryNames.includes('web_search'), 'web_search must not be registered when native search is disabled');
+    const unavailable = await tools.execute({
+      name: 'web_search',
+      arguments: { queries: ['must not call search'] },
+      agent: {},
+      callId: 'qqbot-profile-search-disabled',
+      signal: new AbortController().signal,
+    });
+    assert.equal(unavailable.isError, true, 'direct web_search call must fail when search is disabled');
+  }
   assert.ok(assembly.sections.some((section) => section.name === 'qqbot:chat-only-policy'), 'chat policy prompt section is missing');
 
   const dangerous = await tools.execute({
@@ -97,8 +136,11 @@ try {
     ok: true,
     registryNames,
     modelNames,
+    defaultSelection,
+    searchEnabled,
     policySection: true,
     dangerousToolDenied: true,
+    ...(searchBaseUrlMatches === undefined ? {} : { searchBaseUrlMatches }),
   }));
   await shutdown.shutdown(0);
 } catch (error) {

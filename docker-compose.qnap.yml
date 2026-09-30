@@ -6,8 +6,9 @@ services:
     environment:
       TZ: Asia/Taipei
       DSH_HOME: /data
-      # Optional: only needed by dsh's default deepseek-official route.
+      # Mutually exclusive with LLM_API_KEY; selects the official chat/search mode.
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      # Selects third-party chat mode; reused by native search when enabled.
       # Optional: use this generic key name from an OpenAI-compatible dsh
       # provider configuration (apiKeyEnv: LLM_API_KEY).
       LLM_API_KEY: ${LLM_API_KEY:-}
@@ -17,6 +18,9 @@ services:
       LLM_MODEL: ${LLM_MODEL:-}
       LLM_API_BASE_URL: ${LLM_API_BASE_URL:-}
       LLM_API_PROTOCOL: ${LLM_API_PROTOCOL:-}
+      # Optional independent DeepSeek-native Messages search endpoint. Empty
+      # disables web_search in LLM_API_KEY mode.
+      LLM_SEARCH_BASE_URL: ${LLM_SEARCH_BASE_URL:-}
       QQBOT_VISION_PROVIDER: ${QQBOT_VISION_PROVIDER:-}
       QQBOT_VISION_MODEL: ${QQBOT_VISION_MODEL:-}
       QQBOT_MEDIA_ENABLED: ${QQBOT_MEDIA_ENABLED:-true}
