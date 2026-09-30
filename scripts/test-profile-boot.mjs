@@ -75,6 +75,7 @@ try {
   const thirdPartyMode = Boolean(process.env.LLM_API_KEY);
   const expectedProvider = thirdPartyMode ? process.env.LLM_PROVIDER : 'deepseek-official';
   const expectedModel = thirdPartyMode ? process.env.LLM_MODEL : 'deepseek-flash';
+  const expectedSearchModel = process.env.LLM_SEARCH_MODEL || 'deepseek-flash';
   const searchEnabled = !thirdPartyMode || Boolean(process.env.LLM_SEARCH_BASE_URL);
   assert.equal(ctx.fiber.state, 2, 'Cordis root did not reach the running state');
   assert.ok(tools && typeof tools.schemas === 'function', 'tools service is missing');
@@ -85,14 +86,17 @@ try {
   assert.equal(defaultSelection.model, expectedModel, 'default chat model did not follow the active credential mode');
   assert.equal(web?.searchProviders?.has('deepseek-official'), searchEnabled, 'native search provider registration does not match the active mode');
   let searchBaseUrlMatches;
-  if (expectedSearchBaseUrl && searchEnabled) {
+  if (searchEnabled) {
     const searchProvider = web.searchProviders.get('deepseek-official');
     assert.equal(typeof searchProvider?.resolveOptions, 'function', 'the native search provider options are unavailable');
     const searchOptions = searchProvider.resolveOptions();
-    assert.equal(searchOptions.baseURL, expectedSearchBaseUrl, 'native search endpoint did not resolve from deployment configuration');
     assert.equal(searchOptions.apiKeyEnv, thirdPartyMode ? 'LLM_API_KEY' : 'DEEPSEEK_API_KEY', 'search must use the active mode credential');
     assert.equal(searchOptions.apiKey, undefined, 'persisted literal search keys must be cleared');
-    searchBaseUrlMatches = true;
+    assert.equal(searchOptions.model, expectedSearchModel, 'native search model did not resolve independently from the chat model');
+    if (expectedSearchBaseUrl) {
+      assert.equal(searchOptions.baseURL, expectedSearchBaseUrl, 'native search endpoint did not resolve from deployment configuration');
+      searchBaseUrlMatches = true;
+    }
   }
   const persistedPatch = await readFile(`${profileRoot}/cordis.patch.yml`, 'utf8').catch(() => '');
   for (const fixtureKey of ['fixture-chat-key', 'fixture-official-key']) {
@@ -141,6 +145,7 @@ try {
     policySection: true,
     dangerousToolDenied: true,
     ...(searchBaseUrlMatches === undefined ? {} : { searchBaseUrlMatches }),
+    ...(searchEnabled ? { searchModel: expectedSearchModel } : {}),
   }));
   await shutdown.shutdown(0);
 } catch (error) {

@@ -65,6 +65,7 @@ services:
       LLM_API_BASE_URL: ${LLM_API_BASE_URL:-}
       LLM_API_PROTOCOL: ${LLM_API_PROTOCOL:-}
       LLM_SEARCH_BASE_URL: ${LLM_SEARCH_BASE_URL:-}
+      LLM_SEARCH_MODEL: ${LLM_SEARCH_MODEL:-}
       QQBOT_VISION_PROVIDER: ${QQBOT_VISION_PROVIDER:-}
       QQBOT_VISION_MODEL: ${QQBOT_VISION_MODEL:-}
       QQBOT_MEDIA_ENABLED: ${QQBOT_MEDIA_ENABLED:-true}
@@ -97,6 +98,8 @@ LLM_API_BASE_URL=
 LLM_API_PROTOCOL=
 # Optional in third-party mode. Blank disables only web_search.
 LLM_SEARCH_BASE_URL=
+# Optional native search model alias in either mode; blank defaults to deepseek-flash.
+LLM_SEARCH_MODEL=
 QQBOT_APPID=
 QQBOT_SECRET=
 ```
@@ -152,6 +155,7 @@ QQ 不限于官方 DeepSeek API。`dsh-qqbot` 按以下顺序确定模型路由�
 | `LLM_API_PROTOCOL` | `openai-responses` |
 | `LLM_API_KEY` | 你的网关 API 密钥 |
 | `LLM_SEARCH_BASE_URL` | 可选的 Anthropic Messages 原生搜索地址；留空时关闭第三方模式的搜索 |
+| `LLM_SEARCH_MODEL` | 可选的原生搜索模型名；两种密钥模式均适用，留空时为 `deepseek-flash` |
 
 将这些变量追加到 `.env`，并填写实际的模型名称和 API 密钥：
 
@@ -176,16 +180,19 @@ LLM_API_KEY=
 
 ## 网页搜索后端
 
-`web_search` 使用 DeepSeek 原生 Anthropic Messages 搜索工具，要求搜索服务支持 `web_search_20250305`，并返回 `web_search_tool_result`。搜索模型默认是 `deepseek-v4-flash`。官方模式使用 `DEEPSEEK_API_KEY` 和官方地址 `https://api.deepseek.com/anthropic/v1`。第三方模式只有在设置 `LLM_SEARCH_BASE_URL` 后才启用搜索；搜索请求发往该地址，并复用 `LLM_API_KEY`。该地址与聊天的 OpenAI 兼容地址相互独立。留空或省略 `LLM_SEARCH_BASE_URL` 只会关闭 `web_search`，聊天、视觉和 `web_fetch` 仍可用。
+`web_search` 使用 DeepSeek 原生 Anthropic Messages 搜索工具，要求搜索服务支持 `web_search_20250305`，并返回 `web_search_tool_result`。搜索模型默认是 `deepseek-flash`。官方模式使用 `DEEPSEEK_API_KEY` 和官方地址 `https://api.deepseek.com/anthropic/v1`。第三方模式只有在设置 `LLM_SEARCH_BASE_URL` 后才启用搜索；搜索请求发往该地址，并复用 `LLM_API_KEY`。该地址与聊天的 OpenAI 兼容地址相互独立。留空或省略 `LLM_SEARCH_BASE_URL` 只会关闭 `web_search`，聊天、视觉和 `web_fetch` 仍可用。
 
 第三方搜索示例：
 
 ```dotenv
 LLM_SEARCH_BASE_URL=https://gateway.example.com/anthropic/v1
+LLM_SEARCH_MODEL=your-search-model
 LLM_API_KEY=YOUR_GATEWAY_API_KEY
 ```
 
-`LLM_SEARCH_BASE_URL` 必须是 HTTP(S) URL，不能在 URL 中嵌入用户名或密码；它应指向 Anthropic Messages API 基础地址，原生客户端会在后面追加 `/messages`。聊天的 OpenAI Responses/Completions 地址不能用于此处。若搜索网关要求不同的模型名，可在 `web-search-deepseek` 原生配置中设置 `model`；它与聊天的 `LLM_MODEL` 无关，密钥仍由当前模式提供。搜索工具只接收关键词，不能指定任意 URL 抓取；搜索服务端点由部署者配置。阅读搜索来源正文时，仍由 `web_fetch` 执行现有的公网地址校验、HTML/XHTML 类型检查、响应大小限制和内存转换，不运行脚本或保存文件。图片 URL 请交给视觉工具处理。
+镜像最终覆盖层以 `LLM_SEARCH_MODEL`（或上述默认值）为准；若之前在持久化的 `web-search-deepseek` 插件配置中自定义了 `model`，请将该值迁移到此环境变量。
+
+`LLM_SEARCH_BASE_URL` 必须是 HTTP(S) URL，不能在 URL 中嵌入用户名或密码；它应指向 Anthropic Messages API 基础地址，原生客户端会在后面追加 `/messages`。聊天的 OpenAI Responses/Completions 地址不能用于此处。可通过 `LLM_SEARCH_MODEL` 为官方或第三方搜索指定模型别名；未设置或留空时使用 `deepseek-flash`。它独立于聊天的 `LLM_MODEL`，设置它本身不会启用第三方搜索；第三方模式仍须配置 `LLM_SEARCH_BASE_URL`。搜索工具只接收关键词，不能指定任意 URL 抓取；搜索服务端点由部署者配置。阅读搜索来源正文时，仍由 `web_fetch` 执行现有的公网地址校验、HTML/XHTML 类型检查、响应大小限制和内存转换，不运行脚本或保存文件。图片 URL 请交给视觉工具处理。
 
 ## 本地验证
 
@@ -217,7 +224,7 @@ tryao/qqbot-dsh:v0.1.0
 
 密钥只通过运行时环境变量提供；不会复制到镜像中。构建时不会打包宿主机的依赖目录；运行时无需挂载宿主机目录或 Docker socket，机器人的工作目录为 `/workspace`。
 
-此镜像将私聊和群聊准入交由 QQ 开放平台自身的白名单和权限设置管理，不会在容器中重复配置这些 OpenID。群聊消息必须 @提及机器人。镜像的强制边界由不可变传输层覆盖和聊天策略守卫实现：允许的专用能力只有当前消息或明确引用图片、公共 HTTPS 图片 URL 的视觉分析，以及通过 `web_search` 和 `web_fetch` 搜索和读取公共网页。网页搜索固定选择 `deepseek-official` provider ID；provider 的端点、模型和凭据仍可通过插件配置，以支持原生搜索 API 兼容的中转站。`web_search` 只接收关键词，不能让模型指定任意抓取 URL；搜索服务端点由部署者配置。`web_fetch` 仍只处理通过公网地址校验的 HTML/XHTML，不保存下载文件。镜像会禁用自动启动的 `agent-loop` 智能体，并强制使用原生工具呈现方式。只读沙箱、容器隔离和媒体大小限制属于纵深防御；`read-only` 本身不会禁止 Shell。网页读取器会固定已校验的连接并直接发送请求，不使用 HTTP 代理。引用缓存键会按聊天类型和对端隔离（私聊使用发送者，群聊使用群组）；无法识别对端的消息不会缓存，但显式引用仍可使用当前 QQ 消息元素回退机制。已配置的 LLM 提供者仍可使用模型端点代理设置。
+此镜像将私聊和群聊准入交由 QQ 开放平台自身的白名单和权限设置管理，不会在容器中重复配置这些 OpenID。群聊消息必须 @提及机器人。镜像的强制边界由不可变传输层覆盖和聊天策略守卫实现：允许的专用能力只有当前消息或明确引用图片、公共 HTTPS 图片 URL 的视觉分析，以及通过 `web_search` 和 `web_fetch` 搜索和读取公共网页。网页搜索固定选择 `deepseek-official` provider ID；搜索端点、模型和凭据由部署环境根据密钥模式确定，以支持原生搜索 API 兼容的中转站。`web_search` 只接收关键词，不能让模型指定任意抓取 URL；搜索服务端点由部署者配置。`web_fetch` 仍只处理通过公网地址校验的 HTML/XHTML，不保存下载文件。镜像会禁用自动启动的 `agent-loop` 智能体，并强制使用原生工具呈现方式。只读沙箱、容器隔离和媒体大小限制属于纵深防御；`read-only` 本身不会禁止 Shell。网页读取器会固定已校验的连接并直接发送请求，不使用 HTTP 代理。引用缓存键会按聊天类型和对端隔离（私聊使用发送者，群聊使用群组）；无法识别对端的消息不会缓存，但显式引用仍可使用当前 QQ 消息元素回退机制。已配置的 LLM 提供者仍可使用模型端点代理设置。
 
 用于读取公共网页和下载当前 QQ 图片的容器 DNS 必须返回目标的真实公网 IP。公网目标检查会拒绝 `198.18.0.0/15` 等 Fake-IP 响应；如果 Docker DNS 返回此类地址，请调整 Docker DNS 配置，不要关闭检查。这些请求均为直连，不使用模型端点代理。离线回归测试无法证明能够访问公共互联网、QQ 或付费多模态模型；请使用合适的测试凭据和服务策略，分别验证这些集成。
 

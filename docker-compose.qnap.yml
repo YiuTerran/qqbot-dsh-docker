@@ -21,6 +21,8 @@ services:
       # Optional independent DeepSeek-native Messages search endpoint. Empty
       # disables web_search in LLM_API_KEY mode.
       LLM_SEARCH_BASE_URL: ${LLM_SEARCH_BASE_URL:-}
+      # Optional model alias for native search; defaults to deepseek-flash.
+      LLM_SEARCH_MODEL: ${LLM_SEARCH_MODEL:-}
       QQBOT_VISION_PROVIDER: ${QQBOT_VISION_PROVIDER:-}
       QQBOT_VISION_MODEL: ${QQBOT_VISION_MODEL:-}
       QQBOT_MEDIA_ENABLED: ${QQBOT_MEDIA_ENABLED:-true}

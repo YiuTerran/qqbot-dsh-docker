@@ -97,6 +97,20 @@ run_profile_probe \
     --env LLM_MODEL=stale-model \
     --env LLM_API_BASE_URL=https://stale-chat.example.com/v1
 run_profile_probe \
+    "official route uses the default search model for an explicitly blank override" \
+    "$official_data_volume" \
+    "https://api.deepseek.com/anthropic/v1" \
+    --env DEEPSEEK_API_KEY=fixture-official-key \
+    --env LLM_MODEL=stale-chat-model \
+    --env LLM_SEARCH_MODEL=
+run_profile_probe \
+    "official route accepts a custom search model independently from chat" \
+    "$official_data_volume" \
+    "https://api.deepseek.com/anthropic/v1" \
+    --env DEEPSEEK_API_KEY=fixture-official-key \
+    --env LLM_MODEL=stale-chat-model \
+    --env LLM_SEARCH_MODEL=fixture-official-search-model
+run_profile_probe \
     "third-party route with native search endpoint" \
     "$search_env_data_volume" \
     "https://search-gateway.example.com/anthropic/v1" \
@@ -105,16 +119,18 @@ run_profile_probe \
     --env LLM_API_BASE_URL=https://chat-gateway.example.com/v1 \
     --env LLM_API_PROTOCOL=openai-responses \
     --env LLM_API_KEY=fixture-chat-key \
-    --env LLM_SEARCH_BASE_URL=https://search-gateway.example.com/anthropic/v1
+    --env LLM_SEARCH_BASE_URL=https://search-gateway.example.com/anthropic/v1 \
+    --env LLM_SEARCH_MODEL=fixture-third-party-search-model
 run_profile_probe \
-    "third-party route without search endpoint" \
+    "third-party custom search model alone does not enable search" \
     "$no_search_data_volume" \
     "" \
     --env LLM_PROVIDER=fixture-chat \
     --env LLM_MODEL=fixture-chat-model \
     --env LLM_API_BASE_URL=https://chat-gateway.example.com/v1 \
     --env LLM_API_PROTOCOL=openai-responses \
-    --env LLM_API_KEY=fixture-chat-key
+    --env LLM_API_KEY=fixture-chat-key \
+    --env LLM_SEARCH_MODEL=fixture-search-without-endpoint
 run_profile_probe \
     "official route after third-party config persists in same volume" \
     "$search_env_data_volume" \

@@ -70,6 +70,8 @@
 - id: web-search-deepseek
   disabled: !!js "Boolean(process.env.LLM_API_KEY && !process.env.LLM_SEARCH_BASE_URL)"
   config:
+    # Keep search model selection independent from the chat model in either mode.
+    model: !!js "process.env.LLM_SEARCH_MODEL || 'deepseek-flash'"
     # Clear any persisted literal key, then select only the active key-mode ref.
     apiKey: !!js "''"
     apiKeyEnv: !!js "process.env.LLM_API_KEY ? 'LLM_API_KEY' : 'DEEPSEEK_API_KEY'"
