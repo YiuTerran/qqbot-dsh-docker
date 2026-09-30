@@ -665,7 +665,7 @@ integration('ordinary native HTTP 400 errors use a friendly fixed notice and do 
     assert.equal(sent.length, 1);
     const providerErrorsUrl = process.env.QQBOT_PROVIDER_ERRORS_MODULE
         ? pathToFileURL(resolve(process.env.QQBOT_PROVIDER_ERRORS_MODULE)).href
-        : new URL('../defaults/qqbot-provider-errors.mjs', import.meta.url).href;
+        : new URL('./qqbot-provider-errors.mjs', recoveryUrl).href;
     const { formatProviderFailure } = await import(providerErrorsUrl);
     assert.equal(sent[0].text, formatProviderFailure(failure));
     assert.doesNotMatch(sent[0].text, /INVALID_REQUEST|Invalid request|sk-test-secret|private\.example|request-secret-id/u);

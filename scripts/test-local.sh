@@ -323,7 +323,7 @@ docker create \
         test "$(grep -A6 -F -- "- id: im-qqbot" "$dump" | grep -Fc "appSecret: __FROM_ENV__")" -eq 1
         node --test /tmp/test-chat-policy.mjs
         QQBOT_DICE_MODULE=/opt/qqbot-defaults/qqbot-dice.mjs node --test /tmp/test-dice.mjs
-        QQBOT_RECOVERY_MODULE=/opt/qqbot-defaults/qqbot-session-recovery.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-session-recovery.mjs
+        QQBOT_RECOVERY_MODULE=/opt/qqbot-defaults/qqbot-session-recovery.mjs QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-session-recovery.mjs
         QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-provider-errors.mjs
         node /tmp/test-profile-boot.mjs
     '
@@ -411,7 +411,7 @@ check_pre_dice_upgrade() {
             grep -Fq "Chat-only strict automatic session reset v1." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/session/session-manager.js
             node --check "$middleware"
             QQBOT_DICE_MODULE=/opt/qqbot-defaults/qqbot-dice.mjs node --test /tmp/test-dice.mjs
-            QQBOT_RECOVERY_MODULE=/opt/qqbot-defaults/qqbot-session-recovery.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-session-recovery.mjs
+            QQBOT_RECOVERY_MODULE=/opt/qqbot-defaults/qqbot-session-recovery.mjs QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-session-recovery.mjs
             QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-provider-errors.mjs
         '
 }
