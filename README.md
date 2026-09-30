@@ -111,27 +111,7 @@ docker compose logs -f qqbot
 Compose 会创建并使用命名卷 `dsh-qqbot-data` 和 `dsh-qqbot-workspace`。请勿添加端口映射、Docker socket、特权模式或主机网络；本镜像通过出站 WebSocket 连接 QQ，无需开放入站端口。入口脚本始终强制使用 `read-only`，但该设置本身不能保证 Shell 命令安全；纯聊天边界仍由禁用工具和运行时守卫实现。不要设置 `DSH_PERMISSION_MODE`。
 
 首次启动时会初始化 `/data`，后续启动会保留其中内容。QQ 插件的媒体清理器会将传输缓存直接存放在 `/data/qqbot-media`，因此复用同一个数据卷时，更换容器后这些缓存文件仍会保留。
-缓存仍采用 1 小时 TTL 并按小时清理；持久化不会延长保留时间，也不会保留图片授权。即使缓存文件仍在磁盘上，也只有通过现有检查的当前消息图片或明确引用的图片才可使用。`/home/node/.dsh-qqbot/media` 下的旧文件不会自动使用或迁移；请重新发送或明确引用图片，以便将其下载到持久缓存中。如果提供的凭据不完整，QQ 插件可能会引导完成首次凭据设置。本地测试会刻意避开交互式二维码流程。
-
-仅存在于旧容器可写层中的媒体不会自动复制；旧容器删除后也无法恢复。替换旧容器前，请将需要的缓存文件复制到主机备份目录：
-
-```sh
-mkdir -p ./qqbot-media-backup
-docker cp -a old-container:/home/node/.dsh-qqbot/media/. ./qqbot-media-backup/
-```
-
-使用现有的 `dsh-qqbot-data` 卷创建新容器，启动一次以初始化 `/data/qqbot-media`，然后停止容器再恢复文件。将下方的
-`YOUR_NEW_TAG` 替换为支持媒体持久化的新镜像标签；恢复时只复制新缓存中尚不存在的文件：
-
-```sh
-docker run --rm --network none \
-  --volume dsh-qqbot-data:/data \
-  --volume "$PWD/qqbot-media-backup:/backup:ro" \
-  --entrypoint sh tryao/qqbot-dsh:YOUR_NEW_TAG -ec \
-  'test -d /data/qqbot-media && test ! -L /data/qqbot-media && cp -an /backup/. /data/qqbot-media/ && chown node:node /data/qqbot-media'
-```
-
-恢复操作只会修改 `/data/qqbot-media`，不会替换 `/data/AGENTS.md` 或卷中的其他内容。恢复的文件仍受常规 TTL 清理和当前消息/明确引用授权检查约束。
+缓存仍采用 1 小时 TTL 并按小时清理；持久化不会延长保留时间，也不会保留图片授权。即使缓存文件仍在磁盘上，也只有通过现有检查的当前消息图片或明确引用的图片才可使用。
 
 为便于运维观察，镜像会输出三条不含秘密信息的 QQ 启动日志：凭据已解析、已请求连接网关，以及 `Bot ready!` 或 SDK 启动错误。如果 20 秒后仍未就绪，会输出警告，提示检查 DNS、TLS/代理出站连接或 QQ Bot 凭据与权限。设置 `QQBOT_STARTUP_WARN_MS` 可调整警告阈值；此操作不会终止或重启仍在重试的连接。
 
@@ -183,7 +163,9 @@ LLM_API_PROTOCOL=openai-responses
 LLM_API_KEY=
 ```
 
-`LLM_PROVIDER`、`LLM_MODEL`、`LLM_API_BASE_URL` 和 `LLM_API_KEY` 必须同时设置。`LLM_API_PROTOCOL` 为可选项，**仅支持以下两个值**：
+`LLM_PROVIDER`、`LLM_MODEL`、`LLM_API_BASE_URL` 和 `LLM_API_KEY` 必须同时设置。
+
+`LLM_API_PROTOCOL` 为可选项，**仅支持以下两个值**：
 
 - `openai-responses`：OpenAI Responses API；未设置或留空时的默认值。
 - `openai-completions`：OpenAI Chat Completions API（不是旧版文本 Completions API）；提供者仅支持 Chat Completions 时使用。
@@ -191,28 +173,6 @@ LLM_API_KEY=
 请按提供者支持的接口选择，容器不会自动探测协议；其他值会导致启动校验失败。该变量只控制第三方聊天和视觉接口，不控制 `LLM_SEARCH_BASE_URL` 对应的原生搜索协议。
 
 `LLM_PROVIDER` 只能包含小写字母、数字和连字符，且不能使用内置 ID `deepseek-official`。密钥绝不会写入 `/data`。修改路由值后，下次启动容器时会更新生成的路由。若要切回官方模式，移除 `LLM_API_KEY` 并设置 `DEEPSEEK_API_KEY`；若两者都未设置，诊断类命令仍可运行，但聊天和视觉没有凭据。
-
-对于 dsh Models 界面中类似的路由，相应的提供者配置如下；其中不包含密钥：
-
-```yaml
-- id: llm-pi-ai
-  config:
-    providers:
-      my-openai-responses:
-        displayName: My OpenAI Responses gateway
-        apiKeyEnv: LLM_API_KEY
-        api: openai-responses
-        baseURL: https://gateway.example.com/v1
-        models:
-          - id: your-model
-            name: your-model
-- id: agent-default-model
-  config:
-    provider: my-openai-responses
-    model: your-model
-```
-
-上面的 YAML 仅展示启动时生成的路由结构；请通过环境变量配置第三方默认路由，不要手动把密钥或路由覆盖写入持久化档案。入口会在 `LLM_API_KEY` 存在时生成无密钥值的提供者条目并选择为默认模型，安全覆盖层也会按当前密钥模式强制默认提供者。容器会将 dsh 旧版 `~/.dsh` 设置视图映射回持久化的 `/data` 卷，因此 QQ 插件与 dsh 读取的是同一份模型状态。QQ `/model` 仍可为会话选择其他已配置模型；单独桌面配置档案中的提供者不会自动供此容器使用。
 
 ## 网页搜索后端
 
