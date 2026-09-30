@@ -87,6 +87,8 @@ COPY defaults/cordis.safety.patch.yml /opt/qqbot-defaults/cordis.safety.patch.ym
 COPY defaults/qqbot-chat-policy.mjs /opt/qqbot-defaults/qqbot-chat-policy.mjs
 COPY defaults/qqbot-web-pages.mjs /opt/qqbot-defaults/qqbot-web-pages.mjs
 COPY defaults/qqbot-document-scope.mjs /opt/qqbot-defaults/qqbot-document-scope.mjs
+COPY defaults/qqbot-session-recovery.mjs /opt/qqbot-defaults/qqbot-session-recovery.mjs
+COPY defaults/qqbot-provider-errors.mjs /opt/qqbot-defaults/qqbot-provider-errors.mjs
 COPY defaults/qqbot-text-documents.mjs /opt/qqbot-defaults/qqbot-text-documents.mjs
 COPY defaults/qqbot-documents.mjs /opt/qqbot-defaults/qqbot-documents.mjs
 COPY defaults/qqbot-dice.mjs /opt/qqbot-defaults/qqbot-dice.mjs

@@ -7,6 +7,11 @@ import {
     getTurnRequestSignal,
     isBoundDocumentExecutionActive,
 } from './qqbot-document-scope.mjs';
+import {
+    getHistorySnapshotEpoch,
+    isHistoryStoreSuppressed,
+    markHistorySnapshot,
+} from './qqbot-session-recovery.mjs';
 
 export const DICE_TOOL_NAME = 'qqbot_roll_dice';
 
@@ -516,7 +521,24 @@ export function createDiceAwareHistoryBuffer(historyBuffer, options, createConte
         : undefined;
     const sourceStore = options.store;
     const store = {
-        async list(...args) { return sourceStore.list(...args); },
+        async list(...args) {
+            const ctx = storage.getStore();
+            const key = args[0];
+            const groupId = ctx?.message?.groupOpenid ?? ctx?.message?.senderId;
+            const expectedGroupKey = ctx?.message?.kind === 'group'
+                && typeof ctx?.bot?.appId === 'string'
+                && typeof groupId === 'string'
+                ? `${ctx.bot.appId}:${groupId}`
+                : undefined;
+            const tracksGroup = expectedGroupKey !== undefined && key === expectedGroupKey;
+            if (tracksGroup && isHistoryStoreSuppressed(sourceStore, key)) return [];
+            // Capture before awaiting the store. If a reset commits while list()
+            // is pending, the returned snapshot keeps the old generation.
+            const epoch = tracksGroup ? getHistorySnapshotEpoch(sourceStore, key) : undefined;
+            const history = await sourceStore.list(...args);
+            if (tracksGroup) markHistorySnapshot(history, sourceStore, key, epoch);
+            return history;
+        },
         async append(...args) {
             const ctx = storage.getStore();
             if (ctx) {

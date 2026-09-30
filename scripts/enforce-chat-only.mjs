@@ -8,6 +8,8 @@ if (manifest.version !== '0.5.0') throw new Error('Chat-only patches require dsh
 const policy = '/opt/qqbot-defaults/qqbot-chat-policy.mjs';
 const webPagesPolicy = '/opt/qqbot-defaults/qqbot-web-pages.mjs';
 const documentScopePolicy = '/opt/qqbot-defaults/qqbot-document-scope.mjs';
+const sessionRecoveryPolicy = '/opt/qqbot-defaults/qqbot-session-recovery.mjs';
+const providerErrorsPolicy = '/opt/qqbot-defaults/qqbot-provider-errors.mjs';
 const imageToolPolicyImport = `import { loadChatImageBytes } from '${policy}';`;
 const imageLoaderV3Marker = '// Chat-only scoped image loader v3.';
 const imageSchemaV3Marker = '// Chat-only image schema: scoped QQ media paths or public HTTPS image URLs v3.';
@@ -207,6 +209,415 @@ await patch('transport/inbound.js', '// Chat-only per-turn document scope v1.', 
     else throw new Error(`Chat-only patch: expected one whenIdle cleanup in ${file}`);
 
     return content;
+});
+
+await patch('transport/inbound.js', '// Chat-only group-history epoch guard v1.', (content, file) => {
+    const marker = '// Chat-only group-history epoch guard v1.';
+    const original = '    const agentBody = assembleAgentBody(msg, mwState, scope, logger);';
+    const guarded = [
+        `    ${marker}`,
+        '    const historySnapshot = getHistorySnapshot(mwState.history);',
+        '    if (historySnapshot && !isHistorySnapshotCurrent(mwState.history)) mwState.history = [];',
+        original,
+    ].join('\n');
+    if (content.includes(original)) return replaceOne(content, original, guarded, file);
+    if (content.includes(marker) && content.includes('getHistorySnapshot(mwState.history)')
+        && content.includes('isHistorySnapshotCurrent(mwState.history)')) return content;
+    throw new Error(`Chat-only patch: expected one matching location in ${file}`);
+});
+
+await patch('transport/inbound.js', '// Chat-only content-risk recovery context v1.', (content, file) => {
+    const recoveryImport = `import { finishContentRiskRecovery, getHistorySnapshot, isHistorySnapshotCurrent, registerRecoveryContext } from '${sessionRecoveryPolicy}';`;
+    if (!content.includes(recoveryImport)) content = `${recoveryImport}\n${content}`;
+
+    const marker = '// Chat-only content-risk recovery context v1.';
+    const registration = '        registerRecoveryContext(documentTurn, { manager, scope, peerId, appId: config.appId, record, agent: chatOnlyAgent, sessionId: record.sessionId, replyTarget, historySnapshot, logger });';
+    const turnBinding = '        documentTurn = getDocumentTurn(chatOnlyAgent);';
+    if (content.includes(marker)) {
+        if (content.split(marker).length !== 2 || content.split(registration).length !== 2)
+            throw new Error(`Chat-only patch: recovery context is duplicated or incomplete in ${file}`);
+    }
+    else if (content.includes(registration)) {
+        content = replaceOne(content, registration, `${marker}\n${registration}`, file);
+    }
+    else {
+        content = replaceOne(content, turnBinding, `${turnBinding}\n${marker}\n${registration}`, file);
+    }
+
+    const endTurn = '        if (documentTurn) endDocumentTurn(chatOnlyAgent, documentTurn);';
+    const finish = '        if (documentTurn) await finishContentRiskRecovery(documentTurn);';
+    if (!content.includes(finish)) content = replaceOne(content, endTurn, `${endTurn}\n${finish}`, file);
+
+    const importPosition = content.indexOf(recoveryImport);
+    const historyPosition = content.indexOf('// Chat-only group-history epoch guard v1.');
+    const registrationPosition = content.indexOf(registration);
+    const turnBindingPosition = content.indexOf(turnBinding);
+    const followupPosition = content.indexOf('    chatOnlyAgent.followup(message);');
+    const endTurnPosition = content.indexOf(endTurn);
+    const finishPosition = content.indexOf(finish);
+    if (content.split(recoveryImport).length !== 2
+        || content.split(marker).length !== 2
+        || content.split(registration).length !== 2
+        || content.split(finish).length !== 2
+        || historyPosition < 0 || historyPosition > content.indexOf('    const agentBody = assembleAgentBody(')
+        || importPosition < 0 || turnBindingPosition < 0 || registrationPosition <= turnBindingPosition
+        || followupPosition <= registrationPosition || finishPosition <= endTurnPosition) {
+        throw new Error(`Chat-only patch: content-risk recovery wiring is incomplete or misordered in ${file}`);
+    }
+    return content;
+});
+
+await patch('transport/outbound.js', '// Chat-only content-risk turn recovery v1.', (content, file) => {
+    const recoveryImport = `import { isContentRiskFailure, markContentRiskFailure, noteRecoveryTurnStart } from '${sessionRecoveryPolicy}';`;
+    if (!content.includes(recoveryImport)) content = `${recoveryImport}\n${content}`;
+
+    const marker = '// Chat-only content-risk turn recovery v1.';
+    const routeStart = [
+        '    route(session, raw) {',
+        '        const event = parseEvent(raw);',
+    ].join('\n');
+    const guardedRoute = [
+        '    route(session, raw) {',
+        `        ${marker}`,
+        "        if (raw?.type === 'turn/start') {",
+        '            const sessionId = session.header.id;',
+        '            const startRecord = this.manager.findBySessionId(sessionId);',
+        '            if (startRecord) noteRecoveryTurnStart({ record: startRecord, sessionId, turnId: raw.data?.turn });',
+        '            return;',
+        '        }',
+        '        const event = parseEvent(raw);',
+    ].join('\n');
+    if (content.includes(routeStart)) content = replaceOne(content, routeStart, guardedRoute, file);
+    else if (!content.includes(marker)) throw new Error(`Chat-only patch: expected the pinned route() in ${file}`);
+
+    const oldDispatch = '                this.onTurnEnd(session.header.id, record, event);';
+    const newDispatch = '                this.onTurnEnd(session.header.id, record, event, raw.data?.turn);';
+    if (content.includes(oldDispatch)) content = replaceOne(content, oldDispatch, newDispatch, file);
+    else if (!content.includes(newDispatch)) throw new Error(`Chat-only patch: expected turn/end dispatch in ${file}`);
+
+    const oldHandler = [
+        '    onTurnEnd(sessionId, record, event) {',
+        '        const buffer = this.buffers.get(sessionId);',
+        '        if (buffer !== undefined) {',
+        '            if (buffer.text.trim()) {',
+        '                void buffer.flush();',
+        '            }',
+        '            else {',
+        '                buffer.cancel();',
+        '            }',
+        '            this.buffers.delete(sessionId);',
+        '        }',
+        '        const failure = extractTurnError(event.reason);',
+        "        if (failure !== undefined && !SILENT_TURN_ERROR_CODES.has(failure.code)) {",
+        '            void this.send(record, `⚠️ 本轮异常结束\\n\\`${failure.code}\\`: ${failure.message}`, \'sendTurnEndError\');',
+        '        }',
+        '        this.logger.debug(`im-qqbot: turn/end sessionId=${sessionId}`);',
+        '    }',
+    ].join('\n');
+    const recoveryHandler = [
+        '    onTurnEnd(sessionId, record, event, turnId) {',
+        '        const buffer = this.buffers.get(sessionId);',
+        '        if (buffer !== undefined) {',
+        '            if (buffer.text.trim()) {',
+        '                void buffer.flush();',
+        '            }',
+        '            else {',
+        '                buffer.cancel();',
+        '            }',
+        '            this.buffers.delete(sessionId);',
+        '        }',
+        '        const failure = extractTurnError(event.reason);',
+        '        if (failure !== undefined) {',
+        '            if (isContentRiskFailure(failure)) {',
+        '                markContentRiskFailure({',
+        '                    record,',
+        '                    sessionId,',
+        '                    turnId,',
+        '                    failure,',
+        '                    notify: (text, replyTarget) => this.send({ ...record, replyTarget: replyTarget ?? record.replyTarget }, text, \'sendContentRiskRecovery\'),',
+        '                });',
+        '            }',
+        '            else if (!SILENT_TURN_ERROR_CODES.has(failure.code)) {',
+        '                void this.send(record, `⚠️ 本轮异常结束\\n\\`${failure.code}\\`: ${failure.message}`, \'sendTurnEndError\');',
+        '            }',
+        '        }',
+        '        this.logger.debug(`im-qqbot: turn/end sessionId=${sessionId}`);',
+        '    }',
+    ].join('\n');
+    if (content.includes(oldHandler)) content = replaceOne(content, oldHandler, recoveryHandler, file);
+    else if (!content.includes('onTurnEnd(sessionId, record, event, turnId)'))
+        throw new Error(`Chat-only patch: expected pinned onTurnEnd() in ${file}`);
+
+    const handlerPosition = content.indexOf('    onTurnEnd(sessionId, record, event, turnId) {');
+    const registrationPosition = content.indexOf('markContentRiskFailure({', handlerPosition);
+    if (content.split(recoveryImport).length !== 2
+        || content.split(marker).length !== 2
+        || !content.includes('raw.data?.turn')
+        || !content.includes("if (raw?.type === 'turn/start')")
+        || registrationPosition < handlerPosition) {
+        throw new Error(`Chat-only patch: content-risk turn recovery wiring is incomplete in ${file}`);
+    }
+    return content;
+});
+
+await patch('transport/outbound.js', '// Chat-only friendly provider errors v1.', (content, file) => {
+    const friendlyImport = `import { formatProviderFailure, formatToolFailure } from '${providerErrorsPolicy}';`;
+    if (!content.includes(friendlyImport)) content = `${friendlyImport}\n${content}`;
+    content = replaceOne(content,
+        "                this.onToolResult(record, event);",
+        "                this.onToolResult(record, event, raw);", file);
+    content = replaceOne(content,
+        '    onToolResult(record, event) {',
+        '    onToolResult(record, event, raw) {\n        // Chat-only friendly provider errors v1.', file);
+    const oldToolGate = [
+        '        if (event.error === undefined && !this.config.showToolResults)',
+        '            return;',
+    ].join('\n');
+    const safeToolGate = [
+        '        const resultBlocks = raw?.data?.message?.content;',
+        "        const failed = event.error !== undefined || (Array.isArray(resultBlocks) && resultBlocks.some((block) => block?.type === 'tool-result' && block.isError === true));",
+        '        if (failed) {',
+        "            void this.send(record, formatToolFailure(), 'sendToolResultError');",
+        '            return;',
+        '        }',
+        '        if (!this.config.showToolResults)',
+        '            return;',
+    ].join('\n');
+    content = replaceOne(content, oldToolGate, safeToolGate, file);
+    content = replaceOne(content,
+        '                void this.send(record, `⚠️ 本轮异常结束\\n\\`${failure.code}\\`: ${failure.message}`, \'sendTurnEndError\');',
+        "                void this.send(record, formatProviderFailure(failure), 'sendTurnEndError');", file);
+    return replaceOne(content,
+        '                this.logger.error(`im-qqbot: ${tag} failed: ${err instanceof Error ? err.message : String(err)}`);',
+        "                this.logger.error(`im-qqbot: ${tag} failed to send reply`);", file);
+});
+
+await patch('transport/inbound.js', '// Chat-only safe inbound errors v1.', (content, file) =>
+    replaceOne(content,
+        '        logger.warn(`whenIdle/followup rejected: ${err instanceof Error ? err.message : String(err)}`);',
+        "        // Chat-only safe inbound errors v1.\n        logger.warn('whenIdle/followup rejected');", file));
+
+await patch('transport/events.js', '// Chat-only structured provider failures v1.', (content, file) =>
+    replaceOne(content,
+        "        message: detail?.message ?? reason.message ?? 'unknown error',",
+        [
+            "        message: detail?.message ?? reason.message ?? 'unknown error',",
+            '        // Chat-only structured provider failures v1.',
+            '        status: detail?.status ?? reason.status,',
+            '        type: detail?.type ?? reason.type,',
+            '        error: detail?.error,',
+        ].join('\n'), file));
+
+await patch('model/prefs-store.js', '// Chat-only persistent model prefs v1.', (content, file) => {
+    const originalImports = [
+        "import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';",
+        "import { resolve, dirname } from 'node:path';",
+        "import { homedir } from 'node:os';",
+    ].join('\n');
+    const patchedImports = [
+        "import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';",
+        "import { randomUUID } from 'node:crypto';",
+        "import { resolve, dirname } from 'node:path';",
+        "import { homedir } from 'node:os';",
+    ].join('\n');
+    if (content.includes(originalImports)) content = replaceOne(content, originalImports, patchedImports, file);
+    else if (!content.includes(patchedImports)) throw new Error(`Chat-only patch: expected pinned PrefsStore imports in ${file}`);
+
+    const originalConstructor = [
+        '    constructor(debugLog) {',
+        "        this.prefsPath = resolve(homedir(), '.dsh-qqbot', 'model-prefs.json');",
+        '        this.debugLog = debugLog;',
+        '        this.load();',
+        '    }',
+    ].join('\n');
+    const patchedConstructor = [
+        '    constructor(debugLog) {',
+        '        // Chat-only persistent model prefs v1.',
+        "        this.prefsPath = '/data/qqbot-model-prefs.json';",
+        '        this.debugLog = debugLog;',
+        "        const legacyPath = resolve(homedir(), '.dsh-qqbot', 'model-prefs.json');",
+        '        let migrationTemp;',
+        '        try {',
+        '            if (!existsSync(this.prefsPath) && existsSync(legacyPath)) {',
+        '                mkdirSync(dirname(this.prefsPath), { recursive: true });',
+        '                migrationTemp = `${this.prefsPath}.${process.pid}.${randomUUID()}.tmp`;',
+        "                writeFileSync(migrationTemp, readFileSync(legacyPath), { flag: 'wx', mode: 0o600 });",
+        '                renameSync(migrationTemp, this.prefsPath);',
+        '                migrationTemp = undefined;',
+        '            }',
+        '        }',
+        '        catch (err) {',
+        '            if (migrationTemp) {',
+        '                try { unlinkSync(migrationTemp); } catch {}',
+        '            }',
+        '            this.debugLog?.(`migratePrefs failed: ${err instanceof Error ? err.message : String(err)}`);',
+        '        }',
+        '        this.load();',
+        '    }',
+    ].join('\n');
+    if (content.includes(originalConstructor)) content = replaceOne(content, originalConstructor, patchedConstructor, file);
+    else if (!content.includes('// Chat-only persistent model prefs v1.'))
+        throw new Error(`Chat-only patch: expected PrefsStore constructor in ${file}`);
+
+    const originalSetter = [
+        '    setSessionId(sessionKey, sessionId) {',
+        '        this.sessionIds.set(sessionKey, sessionId);',
+        '        this.write();',
+        '    }',
+    ].join('\n');
+    const patchedSetter = [
+        '    setSessionId(sessionKey, sessionId, options = {}) {',
+        '        const hadPrevious = this.sessionIds.has(sessionKey);',
+        '        const previous = this.sessionIds.get(sessionKey);',
+        '        this.sessionIds.set(sessionKey, sessionId);',
+        '        const written = this.write();',
+        '        if (options?.strict && !written) {',
+        '            if (hadPrevious) this.sessionIds.set(sessionKey, previous);',
+        '            else this.sessionIds.delete(sessionKey);',
+        "            throw new Error('Unable to persist automatic session reset.');",
+        '        }',
+        '        return written;',
+        '    }',
+    ].join('\n');
+    if (content.includes(originalSetter)) content = replaceOne(content, originalSetter, patchedSetter, file);
+    else if (!content.includes('setSessionId(sessionKey, sessionId, options = {})'))
+        throw new Error(`Chat-only patch: expected PrefsStore.setSessionId() in ${file}`);
+
+    const originalWrite = [
+        '    write() {',
+        '        try {',
+        '            mkdirSync(dirname(this.prefsPath), { recursive: true });',
+        '            const data = {',
+        '                overrides: Object.fromEntries(this.overrides.entries()),',
+        '                sessionIds: Object.fromEntries(this.sessionIds.entries()),',
+        '                presets: Object.fromEntries(this.presets.entries()),',
+        '            };',
+        "            writeFileSync(this.prefsPath, JSON.stringify(data, null, 2), 'utf8');",
+        '        }',
+        '        catch (err) {',
+        '            this.debugLog?.(`writePrefs failed: ${err instanceof Error ? err.message : String(err)}`);',
+        '        }',
+        '    }',
+    ].join('\n');
+    const patchedWrite = [
+        '    write() {',
+        '        let tempPath;',
+        '        try {',
+        '            mkdirSync(dirname(this.prefsPath), { recursive: true });',
+        '            const data = {',
+        '                overrides: Object.fromEntries(this.overrides.entries()),',
+        '                sessionIds: Object.fromEntries(this.sessionIds.entries()),',
+        '                presets: Object.fromEntries(this.presets.entries()),',
+        '            };',
+        '            tempPath = `${this.prefsPath}.${process.pid}.${randomUUID()}.tmp`;',
+        "            writeFileSync(tempPath, JSON.stringify(data, null, 2), { encoding: 'utf8', flag: 'wx', mode: 0o600 });",
+        '            renameSync(tempPath, this.prefsPath);',
+        '            return true;',
+        '        }',
+        '        catch (err) {',
+        '            if (tempPath) {',
+        '                try { unlinkSync(tempPath); } catch {}',
+        '            }',
+        '            this.debugLog?.(`writePrefs failed: ${err instanceof Error ? err.message : String(err)}`);',
+        '            return false;',
+        '        }',
+        '    }',
+    ].join('\n');
+    if (content.includes(originalWrite)) content = replaceOne(content, originalWrite, patchedWrite, file);
+    else if (!content.includes('return false;') || !content.includes('renameSync(tempPath, this.prefsPath);'))
+        throw new Error(`Chat-only patch: expected PrefsStore.write() in ${file}`);
+
+    if (content.split('// Chat-only persistent model prefs v1.').length !== 2
+        || !content.includes("this.prefsPath = '/data/qqbot-model-prefs.json';")
+        || !content.includes('options?.strict && !written')
+        || !content.includes('renameSync(tempPath, this.prefsPath);')) {
+        throw new Error(`Chat-only patch: persistent model prefs patch is incomplete in ${file}`);
+    }
+    return content;
+});
+
+await patch('model/model-resolver.js', '// Chat-only strict sessionId persistence v1.', (content, file) => {
+    const original = [
+        '    setSessionId(sessionKey, sessionId) {',
+        '        this.prefs.setSessionId(sessionKey, sessionId);',
+        '    }',
+    ].join('\n');
+    const replacement = [
+        '    // Chat-only strict sessionId persistence v1.',
+        '    setSessionId(sessionKey, sessionId, options) {',
+        '        return this.prefs.setSessionId(sessionKey, sessionId, options);',
+        '    }',
+    ].join('\n');
+    if (content.includes(original)) return replaceOne(content, original, replacement, file);
+    if (!content.includes('// Chat-only strict sessionId persistence v1.')
+        || !content.includes('this.prefs.setSessionId(sessionKey, sessionId, options);'))
+        throw new Error(`Chat-only patch: expected ModelResolver.setSessionId() in ${file}`);
+    return content;
+});
+
+await patch('session/session-manager.js', '// Chat-only strict automatic session reset v1.', (content, file) => {
+    const original = [
+        '    async remove(scope, peerId) {',
+        '        const key = this.sessionKey(scope, peerId);',
+        '        const record = this.sessions.get(key);',
+        '        this.modelResolver.setSessionId(key, randomUUID());',
+        '        if (!record)',
+        '            return;',
+        '        this.sessions.delete(key);',
+        "        record.agent.cancel({ kind: 'user' });",
+        '        await record.handle.dispose().catch(() => { });',
+        '        this.logger.info(`session removed: key=${key}`);',
+        '    }',
+    ].join('\n');
+    const replacement = [
+        '    // Chat-only strict automatic session reset v1.',
+        '    async remove(scope, peerId, recoveryOptions) {',
+        '        const key = this.sessionKey(scope, peerId);',
+        '        const record = this.sessions.get(key);',
+        '        if (recoveryOptions?.requirePersisted === true) {',
+        '            if (!record',
+        '                || record !== recoveryOptions.expectedRecord',
+        '                || record.agent !== recoveryOptions.expectedAgent',
+        '                || record.sessionId !== recoveryOptions.expectedSessionId) return false;',
+        '            this.modelResolver.setSessionId(key, randomUUID(), { strict: true });',
+        '            this.sessions.delete(key);',
+        '            try { recoveryOptions.onCommitted?.(record); } catch { }',
+        "            try { record.agent.cancel({ kind: 'user' }); } catch { this.logger.warn('automatic session reset cancellation failed'); }",
+        "            try { await record.handle.dispose(); } catch { this.logger.warn('automatic session reset disposal failed'); }",
+        '            this.logger.info(`session removed: key=${key}`);',
+        '            return true;',
+        '        }',
+        '        this.modelResolver.setSessionId(key, randomUUID());',
+        '        if (!record)',
+        '            return;',
+        '        this.sessions.delete(key);',
+        "        record.agent.cancel({ kind: 'user' });",
+        '        await record.handle.dispose().catch(() => { });',
+        '        this.logger.info(`session removed: key=${key}`);',
+        '    }',
+    ].join('\n');
+    if (content.includes(original)) content = replaceOne(content, original, replacement, file);
+    else if (!content.includes('// Chat-only strict automatic session reset v1.'))
+        throw new Error(`Chat-only patch: expected SessionManager.remove() in ${file}`);
+    if (content.split('// Chat-only strict automatic session reset v1.').length !== 2
+        || !content.includes('recoveryOptions.expectedRecord')
+        || !content.includes('this.modelResolver.setSessionId(key, randomUUID(), { strict: true });')
+        || !content.includes('recoveryOptions.onCommitted?.(record)')) {
+        throw new Error(`Chat-only patch: strict automatic session reset is incomplete in ${file}`);
+    }
+    return content;
+});
+
+await patch('session/session-manager.js', '// Chat-only committed reset disposal v1.', (content, file) => {
+    const safeDispose = "            try { await record.handle.dispose(); } catch { this.logger.warn('automatic session reset disposal failed'); }";
+    const oldDispose = '            await record.handle.dispose().catch(() => { });';
+    const strictStart = content.indexOf('        if (recoveryOptions?.requirePersisted === true) {');
+    const strictEnd = content.indexOf('            return true;', strictStart);
+    if (strictStart < 0 || strictEnd < strictStart) throw new Error(`Chat-only patch: missing strict remove branch in ${file}`);
+    let strictBranch = content.slice(strictStart, strictEnd);
+    if (strictBranch.includes(oldDispose)) strictBranch = replaceOne(strictBranch, oldDispose, safeDispose, file);
+    strictBranch = replaceOne(strictBranch, safeDispose, `            // Chat-only committed reset disposal v1.\n${safeDispose}`, file);
+    return content.slice(0, strictStart) + strictBranch + content.slice(strictEnd);
 });
 
 await patch('transport/inbound.js', '// Chat-only explicit-quote text trigger v1.', (content, file) =>
@@ -468,6 +879,135 @@ if (patchedVision.split(imageToolPolicyImport).length !== 2
     || patchedVision.includes('await fetch(image,')
     || patchedVision.includes('loadImageBytes(image, vision.maxBytes, exec.signal)')) {
     throw new Error('Chat-only patch: vision image loader v3 is incomplete or still contains an unrestricted loader');
+}
+
+// Validate the final staged text on every run, including volumes where a
+// marker already existed. This catches partial or manually altered patches
+// before any file is written.
+async function finalText(file) {
+    const filename = join(root, file);
+    return updates.get(filename) ?? await readFile(filename, 'utf8');
+}
+function assertOnce(source, marker, label) {
+    if (source.split(marker).length !== 2) throw new Error(`Chat-only patch: ${label} is missing or duplicated`);
+}
+
+const finalInbound = await finalText('transport/inbound.js');
+const recoveryInboundImport = `import { finishContentRiskRecovery, getHistorySnapshot, isHistorySnapshotCurrent, registerRecoveryContext } from '${sessionRecoveryPolicy}';`;
+const recoveryInboundMarker = '// Chat-only content-risk recovery context v1.';
+const recoveryInboundRegistration = 'registerRecoveryContext(documentTurn, { manager, scope, peerId, appId: config.appId, record, agent: chatOnlyAgent, sessionId: record.sessionId, replyTarget, historySnapshot, logger });';
+assertOnce(finalInbound, recoveryInboundImport, 'inbound recovery import');
+assertOnce(finalInbound, recoveryInboundMarker, 'inbound recovery marker');
+assertOnce(finalInbound, recoveryInboundRegistration, 'inbound recovery registration');
+assertOnce(finalInbound, 'if (documentTurn) await finishContentRiskRecovery(documentTurn);', 'inbound recovery completion');
+assertOnce(finalInbound, '// Chat-only group-history epoch guard v1.', 'group history epoch guard');
+assertOnce(finalInbound, 'if (historySnapshot && !isHistorySnapshotCurrent(mwState.history)) mwState.history = [];', 'stale history snapshot filter');
+assertOnce(finalInbound, 'await chatOnlyAgent.whenIdle();', 'inbound idle wait');
+assertOnce(finalInbound, 'clearCurrentImages(chatOnlyAgent, documentTurn);', 'inbound image cleanup');
+assertOnce(finalInbound, 'endDocumentTurn(chatOnlyAgent, documentTurn);', 'inbound document cleanup');
+assertOnce(finalInbound, 'await finishContentRiskRecovery(documentTurn);', 'inbound recovery cleanup');
+assertOnce(finalInbound, '// Chat-only safe inbound errors v1.', 'safe inbound errors marker');
+assertOnce(finalInbound, "logger.warn('whenIdle/followup rejected');", 'safe inbound exception log');
+if (finalInbound.includes('whenIdle/followup rejected: ${'))
+    throw new Error('Chat-only patch: inbound exception log exposes raw errors');
+const historyGuardPosition = finalInbound.indexOf('// Chat-only group-history epoch guard v1.');
+const historyFilterPosition = finalInbound.indexOf('if (historySnapshot && !isHistorySnapshotCurrent(mwState.history)) mwState.history = [];');
+const inboundIdlePosition = finalInbound.indexOf('await chatOnlyAgent.whenIdle();');
+const inboundImageClearPosition = finalInbound.indexOf('clearCurrentImages(chatOnlyAgent, documentTurn);');
+const inboundDocumentEndPosition = finalInbound.indexOf('endDocumentTurn(chatOnlyAgent, documentTurn);');
+const inboundRecoveryFinishPosition = finalInbound.indexOf('await finishContentRiskRecovery(documentTurn);');
+if (historyGuardPosition > finalInbound.indexOf('const agentBody = assembleAgentBody(')
+    || historyFilterPosition <= historyGuardPosition
+    || inboundImageClearPosition <= inboundIdlePosition
+    || inboundDocumentEndPosition <= inboundImageClearPosition
+    || inboundRecoveryFinishPosition <= inboundDocumentEndPosition
+    || finalInbound.indexOf(recoveryInboundRegistration) < finalInbound.indexOf('documentTurn = getDocumentTurn(chatOnlyAgent);')
+    || finalInbound.indexOf(recoveryInboundRegistration) > finalInbound.indexOf('chatOnlyAgent.followup(message);')
+    ) {
+    throw new Error('Chat-only patch: inbound recovery wiring is outside the safe turn lifecycle');
+}
+
+const finalOutbound = await finalText('transport/outbound.js');
+const finalEvents = await finalText('transport/events.js');
+assertOnce(finalEvents, '// Chat-only structured provider failures v1.', 'structured provider failure marker');
+assertOnce(finalEvents, 'status: detail?.status ?? reason.status,', 'provider status extraction');
+assertOnce(finalEvents, 'type: detail?.type ?? reason.type,', 'provider type extraction');
+assertOnce(finalEvents, 'error: detail?.error,', 'provider structured error extraction');
+const friendlyOutboundImport = `import { formatProviderFailure, formatToolFailure } from '${providerErrorsPolicy}';`;
+assertOnce(finalOutbound, friendlyOutboundImport, 'friendly errors import');
+assertOnce(finalOutbound, '// Chat-only friendly provider errors v1.', 'friendly errors marker');
+assertOnce(finalOutbound, 'this.onToolResult(record, event, raw);', 'raw tool result binding');
+assertOnce(finalOutbound, 'onToolResult(record, event, raw) {', 'safe tool result handler');
+assertOnce(finalOutbound, "void this.send(record, formatToolFailure(), 'sendToolResultError');", 'safe tool failure notice');
+assertOnce(finalOutbound, "void this.send(record, formatProviderFailure(failure), 'sendTurnEndError');", 'safe turn failure notice');
+assertOnce(finalOutbound, "block?.type === 'tool-result' && block.isError === true", 'block-only tool failure check');
+assertOnce(finalOutbound, 'this.logger.error(`im-qqbot: ${tag} failed to send reply`);', 'safe QQ send error log');
+if (finalOutbound.includes('${failure.code}') || finalOutbound.includes('${failure.message}')
+    || finalOutbound.includes('event.error === undefined && !this.config.showToolResults')) {
+    throw new Error('Chat-only patch: outbound errors still contain an unsafe raw error exit');
+}
+const recoveryOutboundImport = `import { isContentRiskFailure, markContentRiskFailure, noteRecoveryTurnStart } from '${sessionRecoveryPolicy}';`;
+assertOnce(finalOutbound, recoveryOutboundImport, 'outbound recovery import');
+assertOnce(finalOutbound, '// Chat-only content-risk turn recovery v1.', 'outbound recovery marker');
+assertOnce(finalOutbound, 'onTurnEnd(sessionId, record, event, turnId) {', 'outbound turn handler');
+assertOnce(finalOutbound, 'if (isContentRiskFailure(failure)) {', 'outbound content risk branch');
+assertOnce(finalOutbound, 'markContentRiskFailure({', 'outbound recovery registration');
+assertOnce(finalOutbound, "if (raw?.type === 'turn/start') {", 'native turn start binding');
+assertOnce(finalOutbound, 'this.onTurnEnd(session.header.id, record, event, raw.data?.turn);', 'native turn end binding');
+const contentRiskPosition = finalOutbound.indexOf('if (isContentRiskFailure(failure)) {');
+const normalFailurePosition = finalOutbound.indexOf('else if (!SILENT_TURN_ERROR_CODES.has(failure.code)) {', contentRiskPosition);
+const contentRiskBranch = finalOutbound.slice(contentRiskPosition, normalFailurePosition);
+if (normalFailurePosition < 0 || contentRiskBranch.includes('sendTurnEndError') || !contentRiskBranch.includes('markContentRiskFailure({')) {
+    throw new Error('Chat-only patch: recognized content-risk failures are not isolated from raw error replies');
+}
+
+const finalPrefs = await finalText('model/prefs-store.js');
+assertOnce(finalPrefs, '// Chat-only persistent model prefs v1.', 'persistent model prefs marker');
+if (!finalPrefs.includes("this.prefsPath = '/data/qqbot-model-prefs.json';")
+    || !finalPrefs.includes("const legacyPath = resolve(homedir(), '.dsh-qqbot', 'model-prefs.json');")
+    || !finalPrefs.includes('options?.strict && !written')
+    || !finalPrefs.includes("throw new Error('Unable to persist automatic session reset.');")
+    || !finalPrefs.includes('renameSync(tempPath, this.prefsPath);')
+    || !finalPrefs.includes('if (hadPrevious) this.sessionIds.set(sessionKey, previous);')) {
+    throw new Error('Chat-only patch: persistent model prefs migration/strict write is incomplete');
+}
+const finalResolver = await finalText('model/model-resolver.js');
+assertOnce(finalResolver, '// Chat-only strict sessionId persistence v1.', 'strict model resolver marker');
+if (!finalResolver.includes('return this.prefs.setSessionId(sessionKey, sessionId, options);'))
+    throw new Error('Chat-only patch: ModelResolver does not forward strict persistence options');
+
+const finalManager = await finalText('session/session-manager.js');
+assertOnce(finalManager, '// Chat-only strict automatic session reset v1.', 'strict session manager marker');
+const strictRemoveStart = finalManager.indexOf('async remove(scope, peerId, recoveryOptions) {');
+const strictBranchStart = finalManager.indexOf('if (recoveryOptions?.requirePersisted === true) {', strictRemoveStart);
+const durableResetPosition = finalManager.indexOf('this.modelResolver.setSessionId(key, randomUUID(), { strict: true });', strictBranchStart);
+const expectedRecordPosition = finalManager.indexOf('record !== recoveryOptions.expectedRecord', strictBranchStart);
+const expectedAgentPosition = finalManager.indexOf('record.agent !== recoveryOptions.expectedAgent', strictBranchStart);
+const expectedSessionPosition = finalManager.indexOf('record.sessionId !== recoveryOptions.expectedSessionId', strictBranchStart);
+const strictDeletePosition = finalManager.indexOf('this.sessions.delete(key);', durableResetPosition);
+const committedCallbackPosition = finalManager.indexOf('recoveryOptions.onCommitted?.(record)', durableResetPosition);
+const cancelPosition = finalManager.indexOf("record.agent.cancel({ kind: 'user' })", durableResetPosition);
+const disposePosition = finalManager.indexOf('await record.handle.dispose()', durableResetPosition);
+const strictSynchronousCommit = finalManager.slice(strictBranchStart, disposePosition);
+assertOnce(finalManager, 'async remove(scope, peerId, recoveryOptions) {', 'strict SessionManager.remove signature');
+assertOnce(finalManager, 'record !== recoveryOptions.expectedRecord', 'strict expected record guard');
+assertOnce(finalManager, 'record.agent !== recoveryOptions.expectedAgent', 'strict expected agent guard');
+assertOnce(finalManager, 'record.sessionId !== recoveryOptions.expectedSessionId', 'strict expected session guard');
+assertOnce(finalManager, "try { await record.handle.dispose(); } catch { this.logger.warn('automatic session reset disposal failed'); }", 'safe committed session disposal');
+assertOnce(finalManager, '// Chat-only committed reset disposal v1.', 'safe committed disposal marker');
+if (durableResetPosition < 0
+    || strictBranchStart < strictRemoveStart
+    || expectedRecordPosition < strictBranchStart || expectedRecordPosition > durableResetPosition
+    || expectedAgentPosition < strictBranchStart || expectedAgentPosition > durableResetPosition
+    || expectedSessionPosition < strictBranchStart || expectedSessionPosition > durableResetPosition
+    || strictDeletePosition <= durableResetPosition
+    || committedCallbackPosition <= durableResetPosition
+    || committedCallbackPosition <= strictDeletePosition
+    || cancelPosition <= committedCallbackPosition
+    || disposePosition <= cancelPosition
+    || strictSynchronousCommit.includes('await')
+    || !finalManager.includes('return false;')) {
+    throw new Error('Chat-only patch: strict session reset atomic commit ordering is incomplete');
 }
 
 for (const [file, content] of updates) await writeFile(file, content);

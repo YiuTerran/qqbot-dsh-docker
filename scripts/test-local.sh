@@ -5,6 +5,10 @@ IMAGE="${IMAGE:-dsh-qqbot:test-local}"
 repo_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 chat_policy_test="${repo_root}/scripts/test-chat-policy.mjs"
 dice_policy_test="${repo_root}/scripts/test-dice.mjs"
+recovery_policy_test="${repo_root}/scripts/test-session-recovery.mjs"
+provider_errors_test="${repo_root}/scripts/test-provider-errors.mjs"
+pre_recovery_fixture="${repo_root}/scripts/prepare-pre-recovery-fixture.mjs"
+persistent_reset_probe="${repo_root}/scripts/test-persistent-reset.mjs"
 suffix="$(date +%s)-$$"
 data_volume="dsh-qqbot-test-data-${suffix}"
 workspace_volume="dsh-qqbot-test-workspace-${suffix}"
@@ -16,6 +20,8 @@ media_guard_data_volume="dsh-qqbot-test-media-guard-data-${suffix}"
 search_env_data_volume="dsh-qqbot-test-search-env-data-${suffix}"
 official_data_volume="dsh-qqbot-test-official-data-${suffix}"
 no_search_data_volume="dsh-qqbot-test-no-search-data-${suffix}"
+partial_recovery_data_volume="dsh-qqbot-test-partial-recovery-data-${suffix}"
+recovery_v1_data_volume="dsh-qqbot-test-recovery-v1-data-${suffix}"
 container="dsh-qqbot-test-${suffix}"
 instructions_file="$(mktemp)"
 incompatible_log="$(mktemp)"
@@ -33,7 +39,7 @@ on_error() {
 cleanup() {
     log "Cleaning up temporary container, volumes, and instruction file"
     docker rm --force "$container" >/dev/null 2>&1 || true
-    docker volume rm "$data_volume" "$workspace_volume" "$override_data_volume" "$legacy_data_volume" "$pre_dice_data_volume" "$incompatible_data_volume" "$media_guard_data_volume" "$search_env_data_volume" "$official_data_volume" "$no_search_data_volume" >/dev/null 2>&1 || true
+    docker volume rm "$data_volume" "$workspace_volume" "$override_data_volume" "$legacy_data_volume" "$pre_dice_data_volume" "$incompatible_data_volume" "$media_guard_data_volume" "$search_env_data_volume" "$official_data_volume" "$no_search_data_volume" "$partial_recovery_data_volume" "$recovery_v1_data_volume" >/dev/null 2>&1 || true
     rm -f "$instructions_file"
     rm -f "$incompatible_log"
 }
@@ -52,6 +58,26 @@ fi
 
 if [[ ! -r "$dice_policy_test" ]]; then
     echo "missing dice policy regression script: $dice_policy_test" >&2
+    exit 66
+fi
+
+if [[ ! -r "$recovery_policy_test" ]]; then
+    echo "missing session recovery regression script: $recovery_policy_test" >&2
+    exit 66
+fi
+
+if [[ ! -r "$pre_recovery_fixture" ]]; then
+    echo "missing pre-recovery volume fixture script: $pre_recovery_fixture" >&2
+    exit 66
+fi
+
+if [[ ! -r "$provider_errors_test" ]]; then
+    echo "missing provider errors regression script: $provider_errors_test" >&2
+    exit 66
+fi
+
+if [[ ! -r "$persistent_reset_probe" ]]; then
+    echo "missing persistent reset probe: $persistent_reset_probe" >&2
     exit 66
 fi
 
@@ -79,6 +105,8 @@ docker volume create "$media_guard_data_volume" >/dev/null
 docker volume create "$search_env_data_volume" >/dev/null
 docker volume create "$official_data_volume" >/dev/null
 docker volume create "$no_search_data_volume" >/dev/null
+docker volume create "$partial_recovery_data_volume" >/dev/null
+docker volume create "$recovery_v1_data_volume" >/dev/null
 
 run_profile_probe() {
     local scenario="$1"
@@ -228,6 +256,8 @@ docker create \
     --volume "${workspace_volume}:/workspace" \
     --mount "type=bind,src=${chat_policy_test},dst=/tmp/test-chat-policy.mjs,readonly" \
     --mount "type=bind,src=${dice_policy_test},dst=/tmp/test-dice.mjs,readonly" \
+    --mount "type=bind,src=${recovery_policy_test},dst=/tmp/test-session-recovery.mjs,readonly" \
+    --mount "type=bind,src=${provider_errors_test},dst=/tmp/test-provider-errors.mjs,readonly" \
     --mount "type=bind,src=${repo_root}/scripts/test-profile-boot.mjs,dst=/tmp/test-profile-boot.mjs,readonly" \
     "$IMAGE" \
     sh -ec '
@@ -266,6 +296,14 @@ docker create \
         grep -Fq "bot.use(createDiceCommandMiddleware());" "$middleware_setup"
         grep -Fq "createDiceAwareHistoryBuffer(historyBuffer" "$middleware_setup"
         node --check "$middleware_setup"
+        node --check /opt/qqbot-defaults/qqbot-session-recovery.mjs
+        node --check /opt/qqbot-defaults/qqbot-provider-errors.mjs
+        node --check /opt/qqbot-defaults/qqbot-dice.mjs
+        node --check /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/transport/inbound.js
+        node --check /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/transport/outbound.js
+        node --check /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/model/prefs-store.js
+        node --check /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/model/model-resolver.js
+        node --check /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/session/session-manager.js
         dump=/tmp/qqbot-dump-config.yaml
         dsh --profile qqbot --patch /opt/qqbot-defaults/cordis.safety.patch.yml --dump-config >"$dump"
         grep -A2 -F -- "- id: tool-bash" "$dump" | grep -Fq "disabled: true"
@@ -285,6 +323,8 @@ docker create \
         test "$(grep -A6 -F -- "- id: im-qqbot" "$dump" | grep -Fc "appSecret: __FROM_ENV__")" -eq 1
         node --test /tmp/test-chat-policy.mjs
         QQBOT_DICE_MODULE=/opt/qqbot-defaults/qqbot-dice.mjs node --test /tmp/test-dice.mjs
+        QQBOT_RECOVERY_MODULE=/opt/qqbot-defaults/qqbot-session-recovery.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-session-recovery.mjs
+        QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-provider-errors.mjs
         node /tmp/test-profile-boot.mjs
     '
 
@@ -321,7 +361,7 @@ docker run --rm --network none --entrypoint sh --volume "${data_volume}:/data" "
     test -s /data/qqbot-media/cache-persistence-fixture.png
 '
 
-log "Checking dice middleware upgrade on a volume with existing document and quote policies"
+log "Preparing a pre-recovery volume with existing document and quote policies"
 docker run --rm --network none --entrypoint sh --volume "${pre_dice_data_volume}:/data" "$IMAGE" -ec '
     cp -a /opt/dsh-seed/. /data/
     : > /data/.initialized
@@ -342,10 +382,17 @@ docker run --rm --network none --entrypoint node --volume "${pre_dice_data_volum
     replaceExactlyOnce("    }, contentSanitizer));", "    }));", "history buffer closure");
     fs.writeFileSync(path, source);
 '
+docker run --rm --network none --entrypoint node \
+    --volume "${pre_dice_data_volume}:/data" \
+    --mount "type=bind,src=${pre_recovery_fixture},dst=/tmp/prepare-pre-recovery-fixture.mjs,readonly" \
+    "$IMAGE" /tmp/prepare-pre-recovery-fixture.mjs /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
 check_pre_dice_upgrade() {
     docker run --rm --network none \
         --volume "${pre_dice_data_volume}:/data" \
         --mount "type=bind,src=${repo_root}/scripts/test-dice.mjs,dst=/tmp/test-dice.mjs,readonly" \
+        --mount "type=bind,src=${recovery_policy_test},dst=/tmp/test-session-recovery.mjs,readonly" \
+        --mount "type=bind,src=${provider_errors_test},dst=/tmp/test-provider-errors.mjs,readonly" \
+        --mount "type=bind,src=${pre_recovery_fixture},dst=/tmp/prepare-pre-recovery-fixture.mjs,readonly" \
         "$IMAGE" sh -ec '
             test "$(cat /data/AGENTS.md)" = "pre-dice user instructions"
             middleware=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/gateway/middleware-setup.js
@@ -355,18 +402,87 @@ check_pre_dice_upgrade() {
             grep -Fq "bot.use(createDiceCommandMiddleware());" "$middleware"
             grep -Fq "createDiceAwareHistoryBuffer(historyBuffer, {" "$middleware"
             grep -Fq "Chat-only per-turn document scope v1." "$inbound"
+            grep -Fq "Chat-only content-risk recovery context v1." "$inbound"
+            grep -Fq "Chat-only group-history epoch guard v1." "$inbound"
+            grep -Fq "Chat-only content-risk turn recovery v1." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/transport/outbound.js
+            grep -Fq "Chat-only friendly provider errors v1." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/transport/outbound.js
+            grep -Fq "Chat-only persistent model prefs v1." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/model/prefs-store.js
+            grep -Fq "Chat-only strict sessionId persistence v1." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/model/model-resolver.js
+            grep -Fq "Chat-only strict automatic session reset v1." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/session/session-manager.js
             node --check "$middleware"
             QQBOT_DICE_MODULE=/opt/qqbot-defaults/qqbot-dice.mjs node --test /tmp/test-dice.mjs
+            QQBOT_RECOVERY_MODULE=/opt/qqbot-defaults/qqbot-session-recovery.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-session-recovery.mjs
+            QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-provider-errors.mjs
         '
 }
 check_pre_dice_upgrade
 check_pre_dice_upgrade
+
+log "Checking recovery-v1 upgrade and repeated startup"
+docker run --rm --network none --entrypoint sh --volume "${recovery_v1_data_volume}:/data" "$IMAGE" -ec '
+    cp -a /opt/dsh-seed/. /data/
+    : > /data/.initialized
+'
+docker run --rm --network none --entrypoint node --volume "${recovery_v1_data_volume}:/data" \
+    --mount "type=bind,src=${pre_recovery_fixture},dst=/tmp/prepare-pre-recovery-fixture.mjs,readonly" \
+    "$IMAGE" /tmp/prepare-pre-recovery-fixture.mjs /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist recovery-v1
+for recovery_boot in 1 2; do
+    docker run --rm --network none --volume "${recovery_v1_data_volume}:/data" "$IMAGE" sh -ec '
+        root=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
+        test "$(grep -Fc "Chat-only friendly provider errors v1." "$root/transport/outbound.js")" -eq 1
+        test "$(grep -Fc "Chat-only safe inbound errors v1." "$root/transport/inbound.js")" -eq 1
+        test "$(grep -Fc "Chat-only committed reset disposal v1." "$root/session/session-manager.js")" -eq 1
+        node --check "$root/transport/outbound.js"
+        node --check "$root/session/session-manager.js"
+    '
+done
+
+log "Checking default /data model preferences and reset ID survive fresh containers"
+for reset_probe in reset verify; do
+    docker run --rm --network none --volume "${data_volume}:/data" \
+        --mount "type=bind,src=${persistent_reset_probe},dst=/tmp/test-persistent-reset.mjs,readonly" \
+        "$IMAGE" node /tmp/test-persistent-reset.mjs "$reset_probe"
+done
+
+log "Checking partial strict recovery markers fail closed without mutating profile files"
+docker run --rm --network none --entrypoint sh --volume "${partial_recovery_data_volume}:/data" "$IMAGE" -ec '
+    cp -a /opt/dsh-seed/. /data/
+    : > /data/.initialized
+'
+docker run --rm --network none --entrypoint node --volume "${partial_recovery_data_volume}:/data" "$IMAGE" -e '
+    const fs = require("node:fs");
+    const root = "/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist";
+    const path = `${root}/session/session-manager.js`;
+    const source = fs.readFileSync(path, "utf8");
+    const needle = "            try { recoveryOptions.onCommitted?.(record); } catch { }";
+    if (source.split(needle).length !== 2) throw new Error("expected one strict committed callback");
+    fs.writeFileSync(path, source.replace(needle, ""));
+    const crypto = require("node:crypto");
+    const files = ["session/session-manager.js", "transport/inbound.js", "transport/outbound.js"];
+    fs.writeFileSync("/data/.partial-profile-hashes", JSON.stringify(files.map(file => [file, crypto.createHash("sha256").update(fs.readFileSync(`${root}/${file}`)).digest("hex")])));
+'
+if docker run --rm --network none --volume "${partial_recovery_data_volume}:/data" "$IMAGE" true >"$incompatible_log" 2>&1; then
+    echo "partial recovery policy unexpectedly started" >&2
+    exit 1
+fi
+grep -Fq "strict session reset atomic commit ordering is incomplete" "$incompatible_log"
+docker run --rm --network none --entrypoint node --volume "${partial_recovery_data_volume}:/data" "$IMAGE" -e '
+    const fs = require("node:fs");
+    const crypto = require("node:crypto");
+    const root = "/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist";
+    for (const [file, expected] of JSON.parse(fs.readFileSync("/data/.partial-profile-hashes", "utf8"))) {
+        if (crypto.createHash("sha256").update(fs.readFileSync(`${root}/${file}`)).digest("hex") !== expected) throw new Error("fail-closed startup modified adapter files");
+    }
+'
 
 log "Checking strict policy upgrade on an unpatched legacy profile volume"
 docker run --rm --network none --entrypoint sh --volume "${legacy_data_volume}:/data" "$IMAGE" -ec '
     cp -a /opt/dsh-seed/. /data/
     : > /data/.initialized
 '
+docker run --rm --network none --entrypoint node --volume "${legacy_data_volume}:/data" \
+    --mount "type=bind,src=${pre_recovery_fixture},dst=/tmp/prepare-pre-recovery-fixture.mjs,readonly" \
+    "$IMAGE" /tmp/prepare-pre-recovery-fixture.mjs /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
 docker run --rm --network none --entrypoint node --volume "${legacy_data_volume}:/data" "$IMAGE" -e '
     const fs = require("node:fs");
     const root = "/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist";
