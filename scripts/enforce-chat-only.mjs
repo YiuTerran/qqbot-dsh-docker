@@ -7,6 +7,9 @@ const manifest = JSON.parse(await readFile(join(root, '..', 'package.json'), 'ut
 if (manifest.version !== '0.5.0') throw new Error('Chat-only patches require dsh-qqbot 0.5.0; refusing an unverified adapter.');
 const policy = '/opt/qqbot-defaults/qqbot-chat-policy.mjs';
 const webPagesPolicy = '/opt/qqbot-defaults/qqbot-web-pages.mjs';
+const imageToolPolicyImport = `import { loadChatImageBytes } from '${policy}';`;
+const imageLoaderV3Marker = '// Chat-only scoped image loader v3.';
+const imageSchemaV3Marker = '// Chat-only image schema: scoped QQ media paths or public HTTPS image URLs v3.';
 
 function replaceOne(content, needle, replacement, file) {
     if (content.split(needle).length !== 2) {
@@ -192,7 +195,28 @@ await patch('media/vision-tool.js', '        timeoutMs: vision.timeoutMs,', (con
     replaceOne(content, '        name: DESCRIBE_IMAGE_TOOL_NAME,',
         '        name: DESCRIBE_IMAGE_TOOL_NAME,\n        timeoutMs: vision.timeoutMs,', file));
 
+const mediaRootMarker = '// Chat-only persistent media root v1.';
+await patch('media/media-cleaner.js', mediaRootMarker, (content, file) => {
+    content = replaceOne(content, "import { join, resolve } from 'node:path';\n",
+        "import { join } from 'node:path';\n", file);
+    content = replaceOne(content, "import { homedir } from 'node:os';\n", '', file);
+    return replaceOne(content,
+        "export const MEDIA_ROOT = resolve(homedir(), '.dsh-qqbot', 'media');",
+        `${mediaRootMarker}\nexport const MEDIA_ROOT = '/data/qqbot-media';`, file);
+});
+
+const mediaCleanerPath = join(root, 'media/media-cleaner.js');
+const patchedMediaCleaner = updates.get(mediaCleanerPath) ?? await readFile(mediaCleanerPath, 'utf8');
+if (patchedMediaCleaner.split(mediaRootMarker).length !== 2
+    || !patchedMediaCleaner.includes("export const MEDIA_ROOT = '/data/qqbot-media';")
+    || patchedMediaCleaner.includes("resolve(homedir(), '.dsh-qqbot', 'media')")
+    || patchedMediaCleaner.includes("import { homedir } from 'node:os';")
+    || patchedMediaCleaner.includes("import { join, resolve } from 'node:path';")) {
+    throw new Error('Chat-only patch: persistent media root is incomplete or still uses the home-directory path');
+}
+
 await patch('media/vision-tool.js', '// Chat-only image schema: current and explicitly quoted QQ attachments v2.', (content, file) => {
+    if (content.includes(imageSchemaV3Marker)) return content;
     const oldDescription = [
         "const DESCRIPTION = 'Inspect one image and return the text the user needs. The image is a local absolute path '",
         "    + '(downloaded by the QQ bot) or an http(s) URL. Use this when the user references an image, '",
@@ -235,5 +259,93 @@ await patch('media/vision-tool.js', '// Chat-only image schema: current and expl
     if (content.includes(previousParameter)) return replaceOne(content, previousParameter, newParameter, file);
     throw new Error(`Chat-only patch: expected one matching location in ${file}`);
 });
+
+await patch('media/vision-tool.js', imageSchemaV3Marker, (content, file) => {
+    const oldDescription = [
+        '// Chat-only image schema: current and explicitly quoted QQ attachments v2.',
+        "const DESCRIPTION = 'Inspect one image and return the text the user needs. The image must be an absolute path '",
+        "    + 'of an image attached to or explicitly quoted in the current QQ message. URLs and other files are forbidden. '",
+        "    + 'Use this when the user references an image, or when a task needs OCR, chart/diagram reading, screenshot or UI analysis, '",
+        "    + 'translation of image text, or photo understanding. Always pass an explicit `prompt` with a precise '",
+        "    + 'instruction (e.g. \"transcribe all text\", \"extract the table as CSV\", \"translate the text into Chinese\") '",
+        "    + 'instead of relying on the generic default.';",
+    ].join('\n');
+    const newDescription = [
+        imageSchemaV3Marker,
+        "const DESCRIPTION = 'Inspect one image and return the text the user needs. The image must be either an absolute path '",
+        "    + 'of an image attached to or explicitly quoted in the current QQ message and stored inside the QQ media directory, '",
+        "    + 'or a public HTTPS image URL. Other local paths, non-HTTPS URLs, and non-image files are forbidden. '",
+        "    + 'Use this when the user references an image, or when a task needs OCR, chart/diagram reading, screenshot or UI analysis, '",
+        "    + 'translation of image text, or photo understanding. Always pass an explicit `prompt` with a precise '",
+        "    + 'instruction (e.g. \"transcribe all text\", \"extract the table as CSV\", \"translate the text into Chinese\") '",
+        "    + 'instead of relying on the generic default.';",
+    ].join('\n');
+    content = replaceOne(content, oldDescription, newDescription, file);
+    content = replaceOne(content,
+        "                    description: 'Absolute path of an image attached to or explicitly quoted in the current QQ message. URLs and other files are forbidden.',",
+        "                    description: 'Absolute path of a current-message or explicitly quoted image inside the QQ media directory, or a public HTTPS image URL.',",
+        file);
+    return content;
+});
+
+await patch('media/vision-tool.js', imageLoaderV3Marker, (content, file) => {
+    const originalLoader = [
+        '/** 加载图片字节（本地路径 / http URL），校验大小 + 嗅探 MIME */',
+        'async function loadImageBytes(image, maxBytes, signal) {',
+        '    let data;',
+        '    if (/^https?:\\/\\//i.test(image)) {',
+        "        const resp = await fetch(image, { signal, redirect: 'error' });",
+        '        if (!resp.ok)',
+        '            throw new Error(`qqbot_describe_image: download failed (HTTP ${resp.status})`);',
+        '        const buf = Buffer.from(await resp.arrayBuffer());',
+        '        if (buf.length > maxBytes)',
+        '            throw new Error(`qqbot_describe_image: image too large (${buf.length} bytes)`);',
+        '        data = new Uint8Array(buf);',
+        '    }',
+        '    else {',
+        '        const info = await stat(image).catch(() => null);',
+        '        if (!info?.isFile())',
+        '            throw new Error(`qqbot_describe_image: image file not found: ${image}`);',
+        '        if (info.size > maxBytes)',
+        '            throw new Error(`qqbot_describe_image: image too large (${info.size} bytes)`);',
+        '        data = new Uint8Array(await readFile(image));',
+        '    }',
+        '    const mediaType = sniffImageMediaType(data);',
+        '    if (mediaType === null)',
+        "        throw new Error('qqbot_describe_image: unrecognized image format (png/jpeg/gif/webp only)');",
+        '    return { data, mediaType };',
+        '}',
+    ].join('\n');
+    const scopedLoader = [
+        imageLoaderV3Marker,
+        'async function loadImageBytes(image, maxBytes, exec) {',
+        '    const data = await loadChatImageBytes(image, maxBytes, exec);',
+        '    const mediaType = sniffImageMediaType(data);',
+        '    if (mediaType === null)',
+        "        throw new Error('qqbot_describe_image: unrecognized image format (png/jpeg/gif/webp only)');",
+        '    return { data, mediaType };',
+        '}',
+    ].join('\n');
+    content = replaceOne(content, 'import { readFile, stat } from \'node:fs/promises\';\n', '', file);
+    content = replaceOne(content, "import { existsSync, readFileSync, writeFileSync } from 'node:fs';\n",
+        `import { existsSync, readFileSync, writeFileSync } from 'node:fs';\n${imageToolPolicyImport}\n`, file);
+    content = replaceOne(content, originalLoader, scopedLoader, file);
+    content = replaceOne(content, 'loadImageBytes(image, vision.maxBytes, exec.signal)',
+        'loadImageBytes(image, vision.maxBytes, exec)', file);
+    return content;
+});
+
+const visionPath = join(root, 'media/vision-tool.js');
+const patchedVision = updates.get(visionPath) ?? await readFile(visionPath, 'utf8');
+if (patchedVision.split(imageToolPolicyImport).length !== 2
+    || patchedVision.split(imageLoaderV3Marker).length !== 2
+    || patchedVision.split(imageSchemaV3Marker).length !== 2
+    || !patchedVision.includes('const data = await loadChatImageBytes(image, maxBytes, exec);')
+    || !patchedVision.includes('loadImageBytes(image, vision.maxBytes, exec)')
+    || patchedVision.includes('await readFile(image)')
+    || patchedVision.includes('await fetch(image,')
+    || patchedVision.includes('loadImageBytes(image, vision.maxBytes, exec.signal)')) {
+    throw new Error('Chat-only patch: vision image loader v3 is incomplete or still contains an unrestricted loader');
+}
 
 for (const [file, content] of updates) await writeFile(file, content);

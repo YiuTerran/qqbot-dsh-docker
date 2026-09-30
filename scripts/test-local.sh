@@ -10,6 +10,7 @@ workspace_volume="dsh-qqbot-test-workspace-${suffix}"
 override_data_volume="dsh-qqbot-test-override-data-${suffix}"
 legacy_data_volume="dsh-qqbot-test-legacy-data-${suffix}"
 incompatible_data_volume="dsh-qqbot-test-incompatible-data-${suffix}"
+media_guard_data_volume="dsh-qqbot-test-media-guard-data-${suffix}"
 container="dsh-qqbot-test-${suffix}"
 instructions_file="$(mktemp)"
 incompatible_log="$(mktemp)"
@@ -27,7 +28,7 @@ on_error() {
 cleanup() {
     log "Cleaning up temporary container, volumes, and instruction file"
     docker rm --force "$container" >/dev/null 2>&1 || true
-    docker volume rm "$data_volume" "$workspace_volume" "$override_data_volume" "$legacy_data_volume" "$incompatible_data_volume" >/dev/null 2>&1 || true
+    docker volume rm "$data_volume" "$workspace_volume" "$override_data_volume" "$legacy_data_volume" "$incompatible_data_volume" "$media_guard_data_volume" >/dev/null 2>&1 || true
     rm -f "$instructions_file"
     rm -f "$incompatible_log"
 }
@@ -63,6 +64,33 @@ docker volume create "$workspace_volume" >/dev/null
 docker volume create "$override_data_volume" >/dev/null
 docker volume create "$legacy_data_volume" >/dev/null
 docker volume create "$incompatible_data_volume" >/dev/null
+docker volume create "$media_guard_data_volume" >/dev/null
+
+log "Checking entrypoint refuses conflicting persistent media paths"
+docker run --rm --network none \
+    --entrypoint sh \
+    --volume "${media_guard_data_volume}:/data" \
+    "$IMAGE" \
+    -ec '
+        mkdir -p /tmp/qqbot-media-target
+        printf sentinel > /tmp/qqbot-media-target/sentinel
+        ln -s /tmp/qqbot-media-target /data/qqbot-media
+        if /usr/local/bin/docker-entrypoint.sh sh -c true >/tmp/media-guard.log 2>&1; then
+            echo "entrypoint unexpectedly accepted a symlink at /data/qqbot-media" >&2
+            exit 1
+        fi
+        grep -Fq "Refusing unexpected media store at /data/qqbot-media" /tmp/media-guard.log
+        test "$(cat /tmp/qqbot-media-target/sentinel)" = sentinel
+        test "$(readlink /data/qqbot-media)" = /tmp/qqbot-media-target
+        rm /data/qqbot-media
+        printf sentinel > /data/qqbot-media
+        if /usr/local/bin/docker-entrypoint.sh sh -c true >/tmp/media-guard.log 2>&1; then
+            echo "entrypoint unexpectedly accepted a file at /data/qqbot-media" >&2
+            exit 1
+        fi
+        grep -Fq "Refusing unexpected media store at /data/qqbot-media" /tmp/media-guard.log
+        test "$(cat /data/qqbot-media)" = sentinel
+    '
 
 # A user-provided read-only AGENTS.md must work on a fresh /data volume. This
 # specifically catches accidental recursive chown/copy operations on the mount.
@@ -102,6 +130,14 @@ docker create \
         test -f /data/.initialized
         test -f /data/AGENTS.md
         grep -q "蓝色大肥鱼" /data/AGENTS.md
+        test -d /data/qqbot-media
+        test ! -L /data/qqbot-media
+        test -w /data/qqbot-media
+        node -e "const fs=require(\"node:fs\"); const p=\"/data/qqbot-media/cache-persistence-fixture.png\"; const b=Buffer.from(\"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/g3sAAAAASUVORK5CYII=\", \"base64\"); if(fs.existsSync(p)){if(!fs.readFileSync(p).equals(b)) throw new Error(\"media fixture changed\");} else fs.writeFileSync(p,b);"
+        media_cleaner=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/media-cleaner.js
+        grep -Fq "// Chat-only persistent media root v1." "$media_cleaner"
+        grep -Fq "export const MEDIA_ROOT = '\''/data/qqbot-media'\'';" "$media_cleaner"
+        node --check "$media_cleaner"
         test -w /workspace
         touch /workspace/.dsh-qqbot-test-writable
         command -v bwrap
@@ -151,15 +187,22 @@ docker run --rm \
         const fs = require("fs");
         if (!fs.readFileSync("/data/AGENTS.md", "utf8").includes("蓝色大肥鱼")) process.exit(1);
         if (!fs.existsSync("/workspace/.dsh-qqbot-test-writable")) process.exit(1);
+        const mediaPath = "/data/qqbot-media";
+        if (!fs.statSync(mediaPath).isDirectory()) throw new Error("persistent media root is not a directory");
+        const fixture = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/g3sAAAAASUVORK5CYII=", "base64");
+        if (!fs.readFileSync(`${mediaPath}/cache-persistence-fixture.png`).equals(fixture)) throw new Error("media fixture did not survive container recreation");
     '
 
-log "Restarting the same container and named volumes (must preserve /data and reapply policy)"
+log "Media cache survived recreation in a fresh container with the same named /data volume"
+log "Restarting the same container and named volumes (must preserve persistent data and media)"
 docker start --attach "$container"
 
-log "Checking persistent data marker after restart"
+log "Checking persistent data and media marker after restart"
 docker run --rm --network none --entrypoint sh --volume "${data_volume}:/data" "$IMAGE" -ec '
     test -f /data/.initialized
     test "$(cat /data/.persistence-check)" = persistent
+    test -d /data/qqbot-media
+    test -s /data/qqbot-media/cache-persistence-fixture.png
 '
 
 log "Checking strict policy upgrade on an unpatched legacy profile volume"
@@ -244,6 +287,84 @@ docker run --rm --network none --entrypoint node --volume "${legacy_data_volume}
         }
         fs.writeFileSync(path, text);
     }
+    const replaceExactlyOnce = (text, before, after, label) => {
+        const parts = text.split(before);
+        if (parts.length !== 2) throw new Error(`legacy fixture expected one ${label}`);
+        return parts[0] + after + parts[1];
+    };
+    const visionPath = `${root}/media/vision-tool.js`;
+    let vision = fs.readFileSync(visionPath, "utf8");
+    const visionImport = "import { existsSync, readFileSync, writeFileSync } from \x27node:fs\x27;\n";
+    vision = replaceExactlyOnce(vision, visionImport,
+        visionImport + "import { readFile, stat } from \x27node:fs/promises\x27;\n", "stock fs imports");
+    vision = replaceExactlyOnce(vision,
+        "import { loadChatImageBytes } from \x27/opt/qqbot-defaults/qqbot-chat-policy.mjs\x27;\n", "", "v3 helper import");
+    const v3Description = [
+        "// Chat-only image schema: scoped QQ media paths or public HTTPS image URLs v3.",
+        "const DESCRIPTION = \x27Inspect one image and return the text the user needs. The image must be either an absolute path \x27",
+        "    + \x27of an image attached to or explicitly quoted in the current QQ message and stored inside the QQ media directory, \x27",
+        "    + \x27or a public HTTPS image URL. Other local paths, non-HTTPS URLs, and non-image files are forbidden. \x27",
+        "    + \x27Use this when the user references an image, or when a task needs OCR, chart/diagram reading, screenshot or UI analysis, \x27",
+        "    + \x27translation of image text, or photo understanding. Always pass an explicit `prompt` with a precise \x27",
+        "    + \x27instruction (e.g. \"transcribe all text\", \"extract the table as CSV\", \"translate the text into Chinese\") \x27",
+        "    + \x27instead of relying on the generic default.\x27;",
+    ].join("\n");
+    const v2Description = [
+        "// Chat-only image schema: current and explicitly quoted QQ attachments v2.",
+        "const DESCRIPTION = \x27Inspect one image and return the text the user needs. The image must be an absolute path \x27",
+        "    + \x27of an image attached to or explicitly quoted in the current QQ message. URLs and other files are forbidden. \x27",
+        "    + \x27Use this when the user references an image, or when a task needs OCR, chart/diagram reading, screenshot or UI analysis, \x27",
+        "    + \x27translation of image text, or photo understanding. Always pass an explicit `prompt` with a precise \x27",
+        "    + \x27instruction (e.g. \"transcribe all text\", \"extract the table as CSV\", \"translate the text into Chinese\") \x27",
+        "    + \x27instead of relying on the generic default.\x27;",
+    ].join("\n");
+    vision = replaceExactlyOnce(vision, v3Description, v2Description, "v3 schema description");
+    vision = replaceExactlyOnce(vision,
+        "                    description: \x27Absolute path of a current-message or explicitly quoted image inside the QQ media directory, or a public HTTPS image URL.\x27,",
+        "                    description: \x27Absolute path of an image attached to or explicitly quoted in the current QQ message. URLs and other files are forbidden.\x27,",
+        "v3 image parameter description");
+    const v3Loader = [
+        "// Chat-only scoped image loader v3.",
+        "async function loadImageBytes(image, maxBytes, exec) {",
+        "    const data = await loadChatImageBytes(image, maxBytes, exec);",
+        "    const mediaType = sniffImageMediaType(data);",
+        "    if (mediaType === null)",
+        "        throw new Error(\x27qqbot_describe_image: unrecognized image format (png/jpeg/gif/webp only)\x27);",
+        "    return { data, mediaType };",
+        "}",
+    ].join("\n");
+    const stockLoader = [
+        "/** 加载图片字节（本地路径 / http URL），校验大小 + 嗅探 MIME */",
+        "async function loadImageBytes(image, maxBytes, signal) {",
+        "    let data;",
+        "    if (/^https?:\\/\\//i.test(image)) {",
+        "        const resp = await fetch(image, { signal, redirect: \x27error\x27 });",
+        "        if (!resp.ok)",
+        "            throw new Error(`qqbot_describe_image: download failed (HTTP ${resp.status})`);",
+        "        const buf = Buffer.from(await resp.arrayBuffer());",
+        "        if (buf.length > maxBytes)",
+        "            throw new Error(`qqbot_describe_image: image too large (${buf.length} bytes)`);",
+        "        data = new Uint8Array(buf);",
+        "    }",
+        "    else {",
+        "        const info = await stat(image).catch(() => null);",
+        "        if (!info?.isFile())",
+        "            throw new Error(`qqbot_describe_image: image file not found: ${image}`);",
+        "        if (info.size > maxBytes)",
+        "            throw new Error(`qqbot_describe_image: image too large (${info.size} bytes)`);",
+        "        data = new Uint8Array(await readFile(image));",
+        "    }",
+        "    const mediaType = sniffImageMediaType(data);",
+        "    if (mediaType === null)",
+        "        throw new Error(\x27qqbot_describe_image: unrecognized image format (png/jpeg/gif/webp only)\x27);",
+        "    return { data, mediaType };",
+        "}",
+    ].join("\n");
+    vision = replaceExactlyOnce(vision, v3Loader, stockLoader, "v3 image loader");
+    vision = replaceExactlyOnce(vision,
+        "loadImageBytes(image, vision.maxBytes, exec)",
+        "loadImageBytes(image, vision.maxBytes, exec.signal)", "v3 execute argument");
+    fs.writeFileSync(visionPath, vision);
     const middlewarePath = `${root}/middleware/attachment.js`;
     let middleware = fs.readFileSync(middlewarePath, "utf8");
     const quoteMarker = "            // Chat-only quoted-image downloads v2.\n";
@@ -255,6 +376,27 @@ docker run --rm --network none --entrypoint node --volume "${legacy_data_volume}
     else if (middleware.includes(patchedQuote)) {
         middleware = middleware.replace(patchedQuote, originalQuoteBlock);
         fs.writeFileSync(middlewarePath, middleware);
+    }
+    const mediaCleanerPath = `${root}/media/media-cleaner.js`;
+    let mediaCleaner = fs.readFileSync(mediaCleanerPath, "utf8");
+    mediaCleaner = replaceExactlyOnce(mediaCleaner,
+        "// Chat-only persistent media root v1.\nexport const MEDIA_ROOT = \x27/data/qqbot-media\x27;",
+        "export const MEDIA_ROOT = resolve(homedir(), \x27.dsh-qqbot\x27, \x27media\x27);",
+        "persistent media root");
+    mediaCleaner = replaceExactlyOnce(mediaCleaner,
+        "import { join } from \x27node:path\x27;\n",
+        "import { join, resolve } from \x27node:path\x27;\n",
+        "media cleaner path import");
+    mediaCleaner = replaceExactlyOnce(mediaCleaner,
+        "import { join, resolve } from \x27node:path\x27;\n",
+        "import { join, resolve } from \x27node:path\x27;\nimport { homedir } from \x27node:os\x27;\n",
+        "legacy media cleaner os import");
+    fs.writeFileSync(mediaCleanerPath, mediaCleaner);
+    if (!mediaCleaner.includes("export const MEDIA_ROOT = resolve(homedir(), \x27.dsh-qqbot\x27, \x27media\x27);")
+        || !mediaCleaner.includes("import { join, resolve } from \x27node:path\x27;")
+        || !mediaCleaner.includes("import { homedir } from \x27node:os\x27;")
+        || mediaCleaner.includes("Chat-only persistent media root v1.")) {
+        throw new Error("legacy fixture did not restore the original media root");
     }
     const legacyMarkers = [
         ["gateway/bootstrap.js", "installChatPolicy"],
@@ -268,10 +410,20 @@ docker run --rm --network none --entrypoint node --volume "${legacy_data_volume}
         ["transport/attachment.js", "downloadCurrentQQImage"],
         ["transport/attachment.js", "Chat-only current-image downloads v2."],
         ["middleware/attachment.js", "Chat-only quoted-image downloads v2."],
-        ["media/vision-tool.js", "timeoutMs: vision.timeoutMs"]
+        ["media/vision-tool.js", "timeoutMs: vision.timeoutMs"],
+        ["media/vision-tool.js", "loadChatImageBytes"],
+        ["media/vision-tool.js", "Chat-only scoped image loader v3."],
+        ["media/vision-tool.js", "scoped QQ media paths or public HTTPS image URLs v3."],
+        ["media/media-cleaner.js", "Chat-only persistent media root v1."]
     ];
     for (const [file, marker] of legacyMarkers) {
         if (fs.readFileSync(`${root}/${file}`, "utf8").includes(marker)) throw new Error(`legacy fixture still patched: ${file}`);
+    }
+    const restoredVision = fs.readFileSync(visionPath, "utf8");
+    if (!restoredVision.includes("async function loadImageBytes(image, maxBytes, signal)")
+        || !restoredVision.includes("loadImageBytes(image, vision.maxBytes, exec.signal)")
+        || !restoredVision.includes("Chat-only image schema: current and explicitly quoted QQ attachments v2.")) {
+        throw new Error("legacy fixture did not restore the original loader and v2 schema");
     }
 '
 docker run --rm \
@@ -288,7 +440,8 @@ docker run --rm \
         transport/inbound.js \
         transport/attachment.js \
         middleware/attachment.js \
-        media/vision-tool.js; do
+        media/vision-tool.js \
+        media/media-cleaner.js; do
         node --check "/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/$file"
     done
     grep -Fq "import { installChatPolicy } from '\''/opt/qqbot-defaults/qqbot-chat-policy.mjs'\'';" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/gateway/bootstrap.js
@@ -297,6 +450,11 @@ docker run --rm \
     grep -Fq "Chat-only current-image downloads v2." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/transport/attachment.js
     grep -Fq "Chat-only quoted-image downloads v2." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/middleware/attachment.js
     grep -Fq "timeoutMs: vision.timeoutMs" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/vision-tool.js
+    grep -Fq "import { loadChatImageBytes } from '\''/opt/qqbot-defaults/qqbot-chat-policy.mjs'\'';" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/vision-tool.js
+    grep -Fq "Chat-only scoped image loader v3." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/vision-tool.js
+    grep -Fq "loadImageBytes(image, vision.maxBytes, exec)" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/vision-tool.js
+    grep -Fq "// Chat-only persistent media root v1." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/media-cleaner.js
+    grep -Fq "export const MEDIA_ROOT = '\''/data/qqbot-media'\'';" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/media-cleaner.js
     node --test /tmp/test-chat-policy.mjs
 '
 

@@ -147,8 +147,8 @@ class CurrentQQImageProvider extends PublicHttpProvider {
     }
 }
 
-/** Download only an image attached to the current QQ message, into memory. */
-export async function downloadCurrentQQImage(url, maxBytes) {
+/** Download a bounded public HTTPS image into memory without writing it to disk. */
+export async function downloadCurrentQQImage(url, maxBytes, signal) {
     if (!Number.isFinite(maxBytes) || maxBytes <= 0) {
         throw new Error('QQ image size limit must be a positive finite number');
     }
@@ -163,6 +163,7 @@ export async function downloadCurrentQQImage(url, maxBytes) {
     if (parsed.username.length > 0 || parsed.password.length > 0) {
         throw new Error('Credentials in QQ image URLs are not allowed');
     }
+    if (signal?.aborted) throw signal.reason ?? new Error('QQ image download was aborted');
     const provider = new CurrentQQImageProvider(limit);
-    return provider.fetch({ url: parsed.href });
+    return provider.fetch({ url: parsed.href }, signal);
 }

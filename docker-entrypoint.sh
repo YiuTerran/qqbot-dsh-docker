@@ -35,6 +35,18 @@ if [ ! -e /data/AGENTS.md ]; then
     install -o node -g node -m 0644 /opt/qqbot-defaults/AGENTS.md /data/AGENTS.md
 fi
 
+# Store the QQ plugin's transport cache in the persistent data volume.
+media_store=/data/qqbot-media
+
+if [ -L "$media_store" ] || { [ -e "$media_store" ] && [ ! -d "$media_store" ]; }; then
+    echo "[entrypoint] Refusing unexpected media store at $media_store; it must be a real directory" >&2
+    exit 78
+fi
+if [ ! -e "$media_store" ]; then
+    mkdir "$media_store"
+fi
+chown node:node "$media_store"
+
 # Existing named volumes retain the originally seeded plugin. Apply the strict
 # chat policy before launch; diagnostics may degrade, but policy must not.
 qqbot_dist=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
