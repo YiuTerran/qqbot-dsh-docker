@@ -183,7 +183,8 @@ integration('native turn failures use fixed notices and do not leak raw API erro
         assert.equal(sent.length, before + 1);
         assert.equal(sent.at(-1).text, formatProviderFailure(failure));
         assertSafe(sent.at(-1).text);
-        assert.equal(sent.at(-1).target, record.replyTarget);
+        assert.deepEqual(sent.at(-1).target, record.replyTarget,
+            'the outbound target snapshot preserves the original reply destination');
     }
     assert.equal(resets, 0, 'friendly presentation must not broaden automatic reset criteria');
 });

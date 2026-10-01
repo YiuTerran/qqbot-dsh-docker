@@ -832,20 +832,19 @@ integration('timed-out native turn cancels its captured agent and drains documen
     assert.equal(getDocumentTurn(agent), undefined, 'no document authorization survives the complete A/B batch chain');
 });
 
-integration('native stream abort returns a promise that waits behind pending writer updates', async () => {
+integration('native stream abort returns a promise that waits behind pending writer updates', async (t) => {
     await prepareAdapterPeers();
     const { StreamingWriter } = await import(`${resolve(adapterDist)}/transport/streaming-writer.js`);
-    const updateStarted = deferred();
     const releaseUpdate = deferred();
     const operations = [];
+    const diagnostics = [];
     const writer = new StreamingWriter({
         bot: {
-            async openStream(target) {
+            openStream(target) {
                 operations.push(['open', target]);
                 return {
                     async update(text) {
                         operations.push(['update-start', text]);
-                        updateStarted.resolve();
                         await releaseUpdate.promise;
                         operations.push(['update-finish', text]);
                     },
@@ -854,11 +853,14 @@ integration('native stream abort returns a promise that waits behind pending wri
             },
         },
         target: { scope: 'c2c', targetId: 'peer-a', msgId: 'stream-origin' },
-        logger: { info() {}, debug() {}, warn() {}, error() {} },
+        logger: { info() {}, debug() {}, warn(message) { diagnostics.push(message); }, error(message) { diagnostics.push(message); } },
         throttleMs: 1,
     });
+    t.after(() => { releaseUpdate.resolve(); return writer.abort(); });
     writer.append('first chunk');
-    await updateStarted.promise;
+    await waitFor(() => operations.some(([name]) => name === 'update-start') || diagnostics.length > 0,
+        'the native stream update to start');
+    assert.deepEqual(diagnostics, [], 'the stream fixture respects the synchronous openStream contract');
     const aborting = writer.abort();
     assert.ok(aborting && typeof aborting.then === 'function', 'abort exposes the writer chain completion');
     let finished = false;
@@ -869,6 +871,7 @@ integration('native stream abort returns a promise that waits behind pending wri
     await aborting;
     assert.deepEqual(operations.map(([name]) => name), ['open', 'update-start', 'update-finish', 'complete'],
         'complete remains ordered after pending update delivery');
+    assert.deepEqual(diagnostics, [], 'stream update and abort complete without hidden failures');
 });
 
 integration('duplicate outbound flushes share one pending delivery and cancel waits for it', async () => {

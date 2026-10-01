@@ -176,8 +176,8 @@ async function readBoundedResponse(response, maxBytes, signal) {
 }
 
 /** Production transport: validate and pin public DNS answers for every hop. */
-function createPinnedRequest({ resolvePublic = resolvePublicHttpAddresses, fetchImpl = globalThis.fetch } = {}) {
-    if (typeof resolvePublic !== 'function' || typeof fetchImpl !== 'function') throw imageRouteError();
+function createPinnedRequest({ resolvePublic = resolvePublicHttpAddresses, fetchImpl } = {}) {
+    if (typeof resolvePublic !== 'function' || (fetchImpl !== undefined && typeof fetchImpl !== 'function')) throw imageRouteError();
     return async function request(options) {
         const initial = safePublicHttpsUrl(options?.url);
         const method = options?.method ?? 'GET';
@@ -196,7 +196,19 @@ function createPinnedRequest({ resolvePublic = resolvePublicHttpAddresses, fetch
             const addresses = await resolvePublic(current.hostname, signal);
             if (!Array.isArray(addresses) || addresses.length === 0) throw new Error('no-public-address');
             if (signal?.aborted) throw signal.reason ?? new Error('aborted');
-            const { Agent } = await import('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/undici/index.js');
+            // Keep fetch and its dispatcher on the same Undici handler protocol.
+            // Node's bundled fetch can use a different Undici version from dsh.
+            const { Agent, fetch: undiciFetch, FormData: UndiciFormData } = await import('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/undici/index.js');
+            let requestBody = options.body;
+            if (fetchImpl === undefined && requestBody instanceof globalThis.FormData) {
+                // Undici versions also differ in their FormData brand checks.
+                // Rebuild the native form so paired fetch serializes multipart.
+                requestBody = new UndiciFormData();
+                for (const [name, value] of options.body.entries()) {
+                    if (typeof value === 'string') requestBody.append(name, value);
+                    else requestBody.append(name, value, value.name);
+                }
+            }
             const dispatcher = new Agent({ autoSelectFamily: true, connect: { lookup: createPinnedLookup(addresses) } });
             let response;
             let body;
@@ -204,10 +216,10 @@ function createPinnedRequest({ resolvePublic = resolvePublicHttpAddresses, fetch
             try {
                 if (typeof options.assertActive === 'function' && options.assertActive() !== true) throw new Error('expired');
                 if (signal?.aborted) throw signal.reason ?? new Error('aborted');
-                response = await fetchImpl(current.href, {
+                response = await (fetchImpl ?? undiciFetch)(current.href, {
                     method,
                     headers: options.headers,
-                    body: options.body,
+                    body: requestBody,
                     signal,
                     redirect: 'manual',
                     dispatcher,
@@ -420,7 +432,7 @@ export function createImageService({ route, transport, resolvePublic, fetchImpl 
     route = validatedRoute;
     const requestImpl = transport
         ? (typeof transport === 'function' ? transport : transport.request?.bind(transport))
-        : createPinnedRequest({ resolvePublic: resolvePublic ?? resolvePublicHttpAddresses, fetchImpl: fetchImpl ?? globalThis.fetch });
+        : createPinnedRequest({ resolvePublic: resolvePublic ?? resolvePublicHttpAddresses, fetchImpl });
     if (typeof requestImpl !== 'function') throw imageRouteError();
     const request = async (options) => {
         if (options.signal?.aborted || (typeof options.assertActive === 'function' && options.assertActive() !== true)) {

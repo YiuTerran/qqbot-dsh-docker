@@ -1,9 +1,13 @@
 // Offline Phase 2 image transport, tool, quota, and sender regressions.
-// All provider and QQ SDK requests use deterministic injected adapters.
+// Provider and QQ SDK requests use injected adapters or a local trusted HTTPS fixture.
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { createServer } from 'node:https';
+import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { promisify } from 'node:util';
 import { deflateSync } from 'node:zlib';
 import { test } from 'node:test';
 
@@ -36,6 +40,7 @@ const { default: SystemPrompt } = await import(`${dshRoot}dsh-system-prompt/lib/
 const { default: ToolRuntime } = await import(`${dshRoot}dsh-tools/lib/index.js`);
 
 const png = createPngFixture();
+const execute = promisify(execFile);
 const jpeg = Buffer.from(
     '/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkI'
     + 'CQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/wAALCAABAAEBAREA/8QAFAABAAAAAAAA'
@@ -406,6 +411,75 @@ test('xAI image edits use JSON with an embedded data image and fixed one-image r
     assert.equal(payload.n, 1);
     assert.deepEqual(payload.image, { url: `data:image/png;base64,${png.toString('base64')}` },
         'the xAI edit image is embedded as a data URI');
+});
+
+test('production image transport pairs Undici fetch and Agent and verifies HTTPS certificates', async (t) => {
+    const fixtureDir = await mkdtemp(join(tmpdir(), 'qqbot-image-https-'));
+    t.after(() => rm(fixtureDir, { recursive: true, force: true }));
+    const keyPath = join(fixtureDir, 'key.pem');
+    const certPath = join(fixtureDir, 'cert.pem');
+    await execute('openssl', [
+        'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
+        '-keyout', keyPath, '-out', certPath, '-subj', '/CN=image-api.example.test',
+        '-addext', 'subjectAltName=DNS:image-api.example.test',
+        '-addext', 'basicConstraints=critical,CA:TRUE',
+    ], { timeout: 10_000 });
+    const requests = [];
+    const server = createServer({ key: await readFile(keyPath), cert: await readFile(certPath) }, async (request, response) => {
+        const chunks = [];
+        for await (const chunk of request) chunks.push(chunk);
+        requests.push({ method: request.method, url: request.url, headers: request.headers, body: Buffer.concat(chunks) });
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ data: [{ b64_json: png.toString('base64') }] }));
+    });
+    await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+    });
+    t.after(() => new Promise((resolve) => {
+        server.close(resolve);
+        server.closeAllConnections();
+    }));
+    const baseUrl = `https://image-api.example.test:${server.address().port}/v1`;
+    const childSource = `
+        import assert from 'node:assert/strict';
+        const { createImageService } = await import(process.argv[1]);
+        globalThis.fetch = () => { throw new Error('Node bundled fetch must not be used'); };
+        const imageBytes = Buffer.from(process.argv[3], 'base64');
+        const service = createImageService({
+            route: { apiKey: 'fixture-image-secret', model: 'fixture-image-model', protocol: 'openai-images', baseUrl: process.argv[2] },
+            resolvePublic: async (hostname) => {
+                assert.equal(hostname, 'image-api.example.test');
+                return [{ address: '127.0.0.1', family: 4 }];
+            },
+        });
+        if (process.argv[4] === 'untrusted') {
+            await assert.rejects(service.generate({ prompt: 'A lighthouse at night.' }), (error) =>
+                ['DEPTH_ZERO_SELF_SIGNED_CERT', 'SELF_SIGNED_CERT_IN_CHAIN'].includes(error.cause?.code));
+        }
+        else {
+            assert.deepEqual(await service.generate({ prompt: 'A lighthouse at night.' }), imageBytes);
+            assert.deepEqual(await service.generate({ prompt: 'Remove the sign.', imageBytes }), imageBytes);
+        }
+    `;
+    const childEnv = { ...process.env };
+    delete childEnv.NODE_EXTRA_CA_CERTS;
+    delete childEnv.NODE_TLS_REJECT_UNAUTHORIZED;
+    const childArgs = ['--input-type=module', '--eval', childSource, pathToFileURL(generationPath).href, baseUrl, png.toString('base64')];
+    await execute(process.execPath, [...childArgs, 'untrusted'], { env: childEnv, timeout: 10_000 });
+    assert.equal(requests.length, 0, 'an untrusted certificate is rejected before sending the request');
+    await execute(process.execPath, childArgs, { env: { ...childEnv, NODE_EXTRA_CA_CERTS: certPath }, timeout: 10_000 });
+    assert.deepEqual(requests.map(({ method, url }) => [method, url]), [
+        ['POST', '/v1/images/generations'], ['POST', '/v1/images/edits'],
+    ]);
+    for (const request of requests) assert.equal(request.headers.authorization, 'Bearer fixture-image-secret');
+    assert.deepEqual(JSON.parse(requests[0].body), { model: 'fixture-image-model', prompt: 'A lighthouse at night.', n: 1 });
+    assert.match(requests[1].headers['content-type'], /^multipart\/form-data; boundary=/u);
+    assert.ok(requests[1].body.includes(Buffer.from('name="image"; filename="input.png"')),
+        'multipart retains the selected image filename');
+    assert.ok(requests[1].body.includes(Buffer.from('fixture-image-model')));
+    assert.ok(requests[1].body.includes(png), 'the real multipart request contains the input image bytes');
+    assert.ok(requests[1].body.includes(Buffer.from('Remove the sign.')));
 });
 
 test('image response URLs are downloaded without credentials and reject unsafe hosts or redirects', async (t) => {

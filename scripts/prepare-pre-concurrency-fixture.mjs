@@ -41,6 +41,126 @@ if (thinkingOnly) {
     process.exit(0);
 }
 
+// Reverse the newer generation layers before reproducing the historical
+// concurrency layout. Thinking-only fixtures keep these current layers.
+await edit('transport/inbound.js', (source) => {
+    if (!source.includes('// Chat-only generation provenance v1.')) {
+        if (source.includes('generationTurn') || source.includes('getMergedGenerationRequests'))
+            throw new Error('pre-concurrency fixture found partial generation provenance');
+        return source;
+    }
+    source = replaceOnce(source,
+        "import { beginGenerationTurn, endGenerationTurn, renderGenerationRequestMetadata } from '/opt/qqbot-defaults/qqbot-generation-scope.mjs';\n",
+        '', 'generation scope import');
+    source = replaceOnce(source,
+        `import { getMergedGenerationRequests, enqueueMergeBatchSend } from '${helper}';\n`,
+        '', 'generation request import');
+    source = replaceOnce(source, '    let documentTurn;\n    let generationTurn;',
+        '    let documentTurn;', 'generation turn declaration');
+    source = replaceOnce(source, [
+        '        documentTurn = getDocumentTurn(chatOnlyAgent);',
+        '        // Chat-only generation provenance v1.',
+        '        generationTurn = beginGenerationTurn(',
+        '            chatOnlyAgent,',
+        '            getMergedGenerationRequests(ctx),',
+        '            [...(mwState.downloadedFiles ?? []), ...(mwState.downloadedQuoteFiles ?? []), ...(mwState.downloadedGenerationQuoteFiles ?? [])],',
+        '            {',
+        '                documentScope: documentTurn,',
+        '                signal: ctx.signal,',
+        '                isCurrentRecord,',
+        '                record,',
+        '                enqueueSend: (operation) => enqueueMergeBatchSend(record, operation),',
+        '            },',
+        '        );',
+        '        const generationMetadata = renderGenerationRequestMetadata(generationTurn);',
+    ].join('\n'), '        documentTurn = getDocumentTurn(chatOnlyAgent);', 'generation scope binding');
+    source = replaceOnce(source,
+        "        const requestBody = [documentBody, generationMetadata].filter(Boolean).join('\\n\\n');\n",
+        '', 'generation request body');
+    source = replaceOnce(source, "const content = [{ type: 'text', text: requestBody }];",
+        "const content = [{ type: 'text', text: documentBody }];", 'generation model content');
+    source = replaceOnce(source,
+        '        setCurrentImages(chatOnlyAgent, [...(mwState.downloadedFiles ?? []), ...(mwState.downloadedQuoteFiles ?? []), ...(mwState.downloadedGenerationQuoteFiles ?? [])], documentTurn);',
+        '        setCurrentImages(chatOnlyAgent, [...(mwState.downloadedFiles ?? []), ...(mwState.downloadedQuoteFiles ?? [])], documentTurn);',
+        'generation image grants');
+    return replaceOnce(source, [
+        '                // Chat-only generation cleanup v1.',
+        '                if (generationTurn) await endGenerationTurn(chatOnlyAgent, generationTurn);',
+        '                if (documentTurn) await finishContentRiskRecovery(documentTurn);',
+    ].join('\n'), '                if (documentTurn) await finishContentRiskRecovery(documentTurn);', 'generation cleanup');
+});
+
+await edit('transport/outbound.js', (source) => {
+    if (!source.includes('// Chat-only generation outbound v1.')) {
+        if (source.includes('enqueueMergeBatchSend'))
+            throw new Error('pre-concurrency fixture found partial generation outbound routing');
+        return source;
+    }
+    source = replaceOnce(source,
+        `import { captureMergeBatchReply, enqueueMergeBatchSend, noteMergeBatchTurnStart } from '${helper}';`,
+        `import { captureMergeBatchReply, noteMergeBatchTurnStart, trackMergeBatchSend } from '${helper}';`,
+        'generation outbound import');
+    for (const indent of ['            ', '                ']) {
+        source = replaceOnce(source, `\n${indent}enqueueMergeBatchSend(originRecord, () => buffer.flush());`,
+            `\n${indent}trackMergeBatchSend(originRecord, buffer.flush());`, 'generation outbound flush at indent ' + indent.length);
+    }
+    source = replaceOnce(source, 'enqueueMergeBatchSend(originRecord, () => buffer.cancel());',
+        'trackMergeBatchSend(originRecord, buffer.cancel());', 'generation outbound cancel');
+    const sends = [
+        "this.send(record, fullText, 'sendMarkdown')",
+        "this.send(record, formatToolFailure(), 'sendToolResultError')",
+        "this.send(record, text, 'sendToolResult')",
+        "this.send(record, formatProviderFailure(failure), 'sendTurnEndError')",
+        "this.send({ ...record, replyTarget: replyTarget ?? record.replyTarget }, text, 'sendContentRiskRecovery')",
+    ];
+    for (const send of sends) {
+        source = replaceOnce(source, `enqueueMergeBatchSend(originRecord, () => ${send})`,
+            `trackMergeBatchSend(originRecord, ${send})`, 'generation outbound send ' + send);
+    }
+    return replaceOnce(source, [
+        '        // Chat-only generation outbound v1.',
+        "        if (call.name === 'qqbot_generate_image' || call.name === 'qqbot_create_markdown') return;",
+        '        if (!this.config.showToolResults)',
+        '            return;',
+    ].join('\n'), '        if (!this.config.showToolResults)\n            return;', 'generation tool-result gate');
+});
+
+await edit('middleware/attachment.js', (source) => {
+    if (!source.includes('// Chat-only generation quote image downloads v1.')) {
+        if (source.includes('downloadedGenerationQuoteFiles') || source.includes('generationQuoteAttachments'))
+            throw new Error('pre-concurrency fixture found partial generation quote downloads');
+        return source;
+    }
+    const oldQuoteAssignment = '                ctx.state.downloadedQuoteFiles = downloadedQuote;';
+    return replaceOnce(source, [
+        oldQuoteAssignment,
+        '                // Chat-only generation quote image downloads v1.',
+        '                const generationQuoteAttachments = ctx.state.qqbotGenerationQuoteAttachments ?? [];',
+        "                const generationImageQuotes = generationQuoteAttachments.filter((a) => a.url && ['image/png', 'image/jpeg', 'image', 'application/octet-stream', ''].includes((a.content_type ?? a.contentType ?? '').toLowerCase()));",
+        '                const rawGenerationQuote = generationImageQuotes.map((a) => ({',
+        "                    content_type: a.content_type ?? a.contentType ?? '',",
+        "                    filename: a.filename ?? '',",
+        '                    size: a.size ?? 0,',
+        '                    url: a.url,',
+        '                }));',
+        '                ctx.state.downloadedGenerationQuoteFiles = rawGenerationQuote.length > 0',
+        '                    ? await downloadMediaAttachments(rawGenerationQuote, config.media, logger)',
+        '                    : [];',
+    ].join('\n'), oldQuoteAssignment, 'generation quote downloads');
+});
+
+await edit('transport/attachment.js', (source) => {
+    if (!source.includes('// Chat-only generation attachment provenance v1.')) {
+        if (source.includes('sourceUrl: normalizeUrl(att.url)'))
+            throw new Error('pre-concurrency fixture found partial generation attachment provenance');
+        return source;
+    }
+    return replaceOnce(source, [
+        '        // Chat-only generation attachment provenance v1.',
+        '        results.push({ filename: att.filename, contentType, localPath, sourceUrl: normalizeUrl(att.url) });',
+    ].join('\n'), '        results.push({ filename: att.filename, contentType, localPath });', 'generation attachment provenance');
+});
+
 await edit('gateway/bootstrap.js', (source) => {
     source = replaceOnce(source, '    // Chat-only merge batch reply adapter v1.\n', '', 'bootstrap sender marker');
     return replaceOnce(source, '    setupMiddlewares(bot, config, manager, logger, sender);',
