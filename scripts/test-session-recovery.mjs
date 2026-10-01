@@ -555,9 +555,8 @@ integration('real queued group history drops a pre-reset snapshot but keeps curr
     });
     await queuedBReached;
     const queuedHistory = queuedBContext.state.history;
-    assert.ok(queuedHistory.some(({ content }) => content === 'old buffered history'));
-    assert.equal(queuedHistory.some(({ content }) => content === 'B current text'), false,
-        'the SDK buffer exposes history captured before recording current B');
+    assert.deepEqual(queuedHistory, [],
+        'group model input excludes persisted history before recording current B');
 
     const sent = [];
     const bot = { appId, async sendMarkdown(target, text) { sent.push({ target, text }); } };

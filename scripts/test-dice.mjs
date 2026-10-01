@@ -21,6 +21,7 @@ const {
     normalizeDiceCommandContent,
     isDiceCommandCandidate,
     createDiceCommandMiddleware,
+    createDiceAwareHistoryBuffer,
 } = diceModule;
 const {
     beginDocumentTurn,
@@ -71,6 +72,50 @@ function diceCommandContext({ kind = 'group', senderId, groupOpenid, content = '
     };
     return { context, sends };
 }
+
+test('group history reads are empty while private history reads and current appends remain available', async () => {
+    const listCalls = [];
+    const appendCalls = [];
+    const sourceStore = {
+        async list(...args) {
+            listCalls.push(args);
+            return [{ senderId: 'private-old', content: 'private history' }];
+        },
+        async append(...args) {
+            appendCalls.push(args);
+        },
+    };
+    const fakeHistoryBuffer = ({ store }) => async (ctx, next) => {
+        const key = ctx.message.kind === 'group'
+            ? `test-app:${ctx.message.groupOpenid}`
+            : `private:${ctx.message.senderId}`;
+        ctx.state.history = await store.list(key, 10);
+        await store.append(key, { content: ctx.message.content }, 10);
+        return next();
+    };
+    const wrapped = createDiceAwareHistoryBuffer(fakeHistoryBuffer, { store: sourceStore });
+    const group = {
+        bot: { appId: 'test-app' },
+        message: { kind: 'group', groupOpenid: 'group-a', senderId: 'member-a', content: 'current group text' },
+        state: {},
+    };
+    const privateChat = {
+        bot: { appId: 'test-app' },
+        message: { kind: 'c2c', senderId: 'peer-a', content: 'current private text' },
+        state: {},
+    };
+    await wrapped(group, async () => {});
+    await wrapped(privateChat, async () => {});
+
+    assert.deepEqual(group.state.history, [], 'group input excludes persisted history');
+    assert.deepEqual(privateChat.state.history, [{ senderId: 'private-old', content: 'private history' }],
+        'private input keeps persisted history');
+    assert.deepEqual(listCalls, [['private:peer-a', 10]], 'only private history reaches the source store');
+    assert.deepEqual(appendCalls, [
+        ['test-app:group-a', { content: 'current group text' }, 10],
+        ['private:peer-a', { content: 'current private text' }, 10],
+    ], 'current messages continue to be recorded for both scopes');
+});
 
 test('parses d20, mixed dice and modifiers, and canonicalizes ASCII spacing and case', () => {
     assert.deepEqual(parseDiceExpression('d20'), {

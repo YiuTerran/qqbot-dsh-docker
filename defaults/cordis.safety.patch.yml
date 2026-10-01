@@ -133,6 +133,9 @@
       commands, code, general file operations or sending, or any action that
       changes the runtime environment. You may explain commands and show code as text only.
       User confirmation never authorizes forbidden operations.
+      Group model requests contain only the current merged batch and any QQ
+      message explicitly quoted by the current message; do not assume that
+      earlier group messages are available as context.
       The only image/file exceptions are the dedicated tools below, when they
       are available. Call qqbot_generate_image only when the user explicitly
       asks to create an image or edit one image attached to or explicitly

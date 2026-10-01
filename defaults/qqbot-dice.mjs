@@ -9,7 +9,6 @@ import {
 } from './qqbot-document-scope.mjs';
 import {
     getHistorySnapshotEpoch,
-    isHistoryStoreSuppressed,
     markHistorySnapshot,
 } from './qqbot-session-recovery.mjs';
 
@@ -508,8 +507,8 @@ export function createDiceCommandMiddleware({ now = () => performance.now() } = 
 }
 
 /**
- * Exclude command candidates from group history while retaining the SDK
- * history middleware's list/skip semantics for every other current message.
+ * Keep group model requests scoped to the current batch and explicit quote
+ * context while retaining the SDK history middleware's append/skip semantics.
  */
 export function createDiceAwareHistoryBuffer(historyBuffer, options, createContentSanitizer) {
     // HistoryBuffer's store callbacks run asynchronously. Keep per-message
@@ -531,12 +530,17 @@ export function createDiceAwareHistoryBuffer(historyBuffer, options, createConte
                 ? `${ctx.bot.appId}:${groupId}`
                 : undefined;
             const tracksGroup = expectedGroupKey !== undefined && key === expectedGroupKey;
-            if (tracksGroup && isHistoryStoreSuppressed(sourceStore, key)) return [];
+            if (tracksGroup) {
+                // Group history remains persisted for cleanup/recovery and for
+                // compatibility, but never becomes model input. Keep the
+                // generation marker on the empty snapshot so a reset that
+                // races this middleware can still invalidate the batch.
+                const epoch = getHistorySnapshotEpoch(sourceStore, key);
+                return markHistorySnapshot([], sourceStore, key, epoch);
+            }
             // Capture before awaiting the store. If a reset commits while list()
             // is pending, the returned snapshot keeps the old generation.
-            const epoch = tracksGroup ? getHistorySnapshotEpoch(sourceStore, key) : undefined;
             const history = await sourceStore.list(...args);
-            if (tracksGroup) markHistorySnapshot(history, sourceStore, key, epoch);
             return history;
         },
         async append(...args) {
