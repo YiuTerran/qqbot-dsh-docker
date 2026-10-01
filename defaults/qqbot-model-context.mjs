@@ -49,6 +49,16 @@ export function projectGroupModelMessages(agent, boundaryMessages) {
     }
     const session = guard.session;
     const current = [];
+    const retainedInstructions = [];
+    let latestInstructionBaselineSeq = null;
+    for (const seq of session.surface.nodes) {
+        const event = session.eventAt(seq);
+        if (event?.type === 'user/message' && event.data?.role === 'user'
+            && event.data.source?.kind === 'agent-instructions'
+            && event.data.source.form === 'instructions' && event.data.source.baseline === true) {
+            latestInstructionBaselineSeq = seq;
+        }
+    }
     let latestSystem = null;
     let index = 0;
     let droppedOldEventCount = 0;
@@ -84,6 +94,11 @@ export function projectGroupModelMessages(agent, boundaryMessages) {
         index += 1;
         if (event.type === 'system/message') {
             if (message.content.some((block) => block.type !== 'text' || block.text.trim() !== '')) latestSystem = message;
+        } else if (event.type === 'user/message' && message.role === 'user'
+            && message.source?.kind === 'agent-instructions' && message.source.form === 'instructions'
+            && latestInstructionBaselineSeq !== null) {
+            if (seq >= latestInstructionBaselineSeq) retainedInstructions.push(message);
+            else droppedOldEventCount += 1;
         } else if (seq < guard.floor) {
             droppedOldEventCount += 1;
         } else if (message.source?.kind === 'compact-checkpoint') {
@@ -98,9 +113,11 @@ export function projectGroupModelMessages(agent, boundaryMessages) {
         logContextProjection({ agent, state: 'rejected', reason: 'projection-mismatch', input: boundaryMessages });
         throw new Error('Group model context projection has unmatched messages.');
     }
-    const output = latestSystem ? [latestSystem, ...current] : current;
+    const output = latestSystem ? [latestSystem, ...retainedInstructions, ...current]
+        : [...retainedInstructions, ...current];
     logContextProjection({ agent, state: 'applied', reason: 'group', input: boundaryMessages, output, current,
         retainedSystemCount: latestSystem ? 1 : 0,
+        retainedInstructionCount: retainedInstructions.length,
         droppedOldEventCount, droppedOldLineageCount, droppedCheckpointCount });
     return output;
 }

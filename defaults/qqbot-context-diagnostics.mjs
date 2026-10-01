@@ -73,12 +73,45 @@ function messageSummary(message) {
     };
 }
 
-function elementSummary(elements) {
+function elementSummary(elements, refMsgIdx) {
     const items = Array.isArray(elements) ? elements : [];
     return {
         count: items.length,
-        shown: items.slice(0, MAX_ITEMS).map((item) => textSummary(item?.content)),
+        shown: items.slice(0, MAX_ITEMS).map((item) => ({
+            ...textSummary(item?.content),
+            hasIndex: typeof item?.msg_idx === 'string' && item.msg_idx.length > 0,
+            matchesRef: typeof refMsgIdx === 'string' && refMsgIdx.length > 0 && item?.msg_idx === refMsgIdx,
+            attachmentCount: count(item?.attachments),
+        })),
         omitted: Math.max(0, items.length - MAX_ITEMS),
+    };
+}
+
+function protocolSummary(message) {
+    const scene = message?.messageScene ?? message?.raw?.message_scene;
+    const type = message?.msgType ?? message?.raw?.message_type;
+    const ext = Array.isArray(scene?.ext) ? scene.ext : [];
+    const ref = message?.refMsgIdx;
+    const firstIndexed = (Array.isArray(message?.msgElements) ? message.msgElements : [])
+        .findIndex((item) => typeof item?.msg_idx === 'string' && item.msg_idx.length > 0);
+    const sceneRef = typeof ref === 'string' && ref.length > 0 && ext.some((item) => typeof item === 'string' && item.includes('=')
+        && item.slice(0, item.indexOf('=')).trim() === 'ref_msg_idx'
+        && item.slice(item.indexOf('=') + 1).trim() === ref);
+    return {
+        messageType: Number.isSafeInteger(type) && type >= 0 && type <= 65535 ? type : null,
+        sceneSource: fingerprint(scene?.source),
+        sceneExtCount: ext.length,
+        sceneExtKeys: ext.slice(0, MAX_ITEMS).map((item) => {
+            if (typeof item !== 'string' || !item.includes('=')) return 'unstructured';
+            return choice(item.slice(0, item.indexOf('=')).trim(),
+                ['ref_msg_idx', 'msg_idx', 'voice_wav_url', 'asr_refer_text']);
+        }),
+        sceneExtOmitted: Math.max(0, ext.length - MAX_ITEMS),
+        hasRefIndex: typeof ref === 'string' && ref.length > 0,
+        firstIndexedElement: firstIndexed,
+        refDerivation: type === 103 && firstIndexed >= 0
+            && message.msgElements[firstIndexed].msg_idx === ref ? 'type_103_element'
+            : sceneRef ? 'scene_ext' : ref ? 'normalized_only' : 'none',
     };
 }
 
@@ -110,8 +143,9 @@ export function logContextInbound(ctx, mergedRequests, assembledBody) {
             scope: choice(message?.kind, ['group', 'c2c'], 'unknown'),
             currentOnly: process.env.QQBOT_GROUP_CURRENT_ONLY !== 'false',
             current: textSummary(message?.content),
-            msgElements: elementSummary(message?.msgElements),
-            rawMsgElements: elementSummary(rawElements),
+            protocol: protocolSummary(message),
+            msgElements: elementSummary(message?.msgElements, message?.refMsgIdx),
+            rawMsgElements: elementSummary(rawElements, message?.refMsgIdx),
             explicitQuote: Boolean(message?.refMsgIdx || quote?.refKey || quote?.entry),
             quote: {
                 source: choice(quote?.source, ['msg_elements', 'store', 'none'], 'unknown'),
@@ -169,6 +203,8 @@ export function logContextProjection(details) {
             inputRoles: roleCounts(input),
             outputRoles: roleCounts(output),
             retainedSystemCount: Number.isSafeInteger(details?.retainedSystemCount) ? details.retainedSystemCount : 0,
+            retainedInstructionCount: Number.isSafeInteger(details?.retainedInstructionCount)
+                ? details.retainedInstructionCount : 0,
             droppedOldEventCount: Number.isSafeInteger(details?.droppedOldEventCount) ? details.droppedOldEventCount : 0,
             droppedOldLineageCount: Number.isSafeInteger(details?.droppedOldLineageCount) ? details.droppedOldLineageCount : 0,
             droppedCheckpointCount: Number.isSafeInteger(details?.droppedCheckpointCount) ? details.droppedCheckpointCount : 0,

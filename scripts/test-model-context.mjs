@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { mkdir, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
@@ -62,7 +63,9 @@ test('real QQ inbound and AgentLoop stream receive only the current group batch'
         else originalInfo(...args);
     };
     const runtime = new Context();
+    const instructionHome = await mkdtemp(join(tmpdir(), 'qqbot-instructions-'));
     try {
+        await writeFile(join(instructionHome, 'AGENTS.md'), 'You are the blue fish persona.');
         for (const name of ['dsh-session-projection', 'dsh-session', 'dsh-agent',
             'dsh-system-prompt', 'dsh-llm', 'dsh-tools', 'dsh-agent-loop']) {
             const { default: Plugin } = await import(`${runtimeRoot}/${name}/lib/index.js`);
@@ -70,6 +73,10 @@ test('real QQ inbound and AgentLoop stream receive only the current group batch'
                 : name === 'dsh-agent-loop' ? { agents: [], maxParallelToolCalls: 10 } : {};
             await runtime.plugin(Plugin, config);
         }
+        const { default: LocalFileSystem } = await import(`${runtimeRoot}/dsh-fs-local/lib/index.js`);
+        const instructionPlugin = await import(`${runtimeRoot}/dsh-agent-instructions/lib/index.js`);
+        await runtime.plugin(LocalFileSystem, { cwd: '/workspace' });
+        await runtime.plugin(instructionPlugin, { dshHome: instructionHome, maxBytes: 65536 });
         const requests = [];
         runtime.llm.prepareCall = async (config) => ({ config, stream: async function* (request) {
             requests.push(request);
@@ -103,6 +110,7 @@ test('real QQ inbound and AgentLoop stream receive only the current group batch'
         agent.followup(createUserMessage({ content: [{ type: 'text', text: 'Old group question' }], source: { kind: 'user' } }));
         await agent.whenIdle();
         assert.equal(requests.length, 1);
+        assert.match(JSON.stringify(requests[0].messages), /blue fish persona/);
         for (const [index, content] of ['First batch', 'Second batch'].entries()) {
             await handleInbound({
                 message: { kind: 'group', groupOpenid: 'test-group', senderId: 'member',
@@ -124,11 +132,14 @@ test('real QQ inbound and AgentLoop stream receive only the current group batch'
         const second = JSON.stringify(requests[2].messages);
         const afterTool = JSON.stringify(requests[3].messages);
         assert.match(first, /First batch/);
+        assert.match(first, /blue fish persona/);
         assert.doesNotMatch(first, /Old group question|answer-1/);
         assert.match(second, /Second batch/);
+        assert.match(second, /blue fish persona/);
         assert.match(second, /Explicit quote text/);
         assert.doesNotMatch(second, /Old group question|First batch|answer-1|answer-2/);
         assert.match(afterTool, /Second batch/);
+        assert.match(afterTool, /blue fish persona/);
         assert.match(afterTool, /Explicit quote text/);
         assert.match(afterTool, /current-tool-result/);
         assert.doesNotMatch(afterTool, /Old group question|First batch|answer-1|answer-2/);
@@ -197,6 +208,7 @@ test('real QQ inbound and AgentLoop stream receive only the current group batch'
             assert.ok(projection.messages.every((entry) => /^[0-9a-f]{20}$/u.test(entry.hmac)));
         }
         assert.ok(projections[0].droppedOldEventCount >= 2);
+        assert.ok(projections.every((entry) => entry.retainedInstructionCount === 1));
         assert.equal(projections[2].currentRoles.tool, 1);
         assert.equal(bounds[0].sessionHmac, bounds[2].sessionHmac, 'the same group has one process-local session fingerprint');
         assert.notEqual(bounds[0].sessionHmac, bounds[3].sessionHmac, 'private and group sessions have different fingerprints');
@@ -210,6 +222,7 @@ test('real QQ inbound and AgentLoop stream receive only the current group batch'
         if (previousDebug === undefined) delete process.env.QQBOT_CONTEXT_DEBUG;
         else process.env.QQBOT_CONTEXT_DEBUG = previousDebug;
         await runtime.fiber.dispose();
+        await rm(instructionHome, { recursive: true, force: true });
     }
 });
 
@@ -230,8 +243,11 @@ test('diagnostics bound merged and quote-source records and return immediately w
             + '\n--- 第2条 ---\n[消息内容] SENSITIVE_SECOND_ITEM';
         logContextInbound({ message: {
             kind: 'group', content: source, refMsgIdx: 'SENSITIVE_REF',
-            msgElements: Array.from({ length: 18 }, () => ({ content: source })),
-            raw: { msg_elements: [{ content: source }, { content: source }] },
+            msgElements: Array.from({ length: 18 }, (_, index) => ({ content: source,
+                ...(index === 1 ? { msg_idx: 'SENSITIVE_REF', attachments: [{}] } : {}) })),
+            raw: { message_type: 103, message_scene: { source: 'SENSITIVE_SCENE_SOURCE',
+                ext: ['ref_msg_idx=SENSITIVE_REF', 'voice_wav_url=https://private.example/SENSITIVE_AUDIO'] },
+            msg_elements: [{ content: source }, { content: source, msg_idx: 'SENSITIVE_REF' }] },
         }, state: { history: Array.from({ length: 3 }, () => ({})),
             quote: { source: 'store', text: quoteText } } },
         Array.from({ length: 20 }, () => ({ text: source })),
@@ -244,6 +260,15 @@ test('diagnostics bound merged and quote-source records and return immediately w
         assert.equal(entry.msgElements.count, 18);
         assert.equal(entry.msgElements.shown.length, 16);
         assert.equal(entry.msgElements.omitted, 2);
+        assert.equal(entry.protocol.messageType, 103);
+        assert.equal(entry.protocol.firstIndexedElement, 1);
+        assert.equal(entry.protocol.refDerivation, 'type_103_element');
+        assert.deepEqual(entry.protocol.sceneExtKeys, ['ref_msg_idx', 'voice_wav_url']);
+        assert.equal(entry.protocol.sceneExtCount, 2);
+        assert.equal(entry.msgElements.shown[0].hasIndex, false);
+        assert.equal(entry.msgElements.shown[1].hasIndex, true);
+        assert.equal(entry.msgElements.shown[1].matchesRef, true);
+        assert.equal(entry.msgElements.shown[1].attachmentCount, 1);
         assert.equal(entry.rawMsgElements.count, 2);
         assert.equal(entry.historyCount, 3);
         assert.equal(entry.explicitQuote, true);
@@ -256,6 +281,19 @@ test('diagnostics bound merged and quote-source records and return immediately w
         assert.equal(entry.assembledBody.qqNumbered, 2);
         assert.equal(entry.current.hmac, entry.mergedRequests[0].hmac, 'same in-process text has a stable keyed digest');
         assert.doesNotMatch(lines[0], /SENSITIVE_|private\.example/u);
+        logContextInbound({ message: { kind: 'group', content: 'scene ref',
+            refMsgIdx: 'SENSITIVE_SCENE_REF', msgType: 100,
+            messageScene: { source: 'SENSITIVE_SCENE_SOURCE', ext: ['ref_msg_idx=SENSITIVE_SCENE_REF'] },
+            msgElements: [{ content: 'body' }] } }, [], 'scene ref');
+        logContextInbound({ message: { kind: 'group', content: 'no ref', msgType: 100,
+            messageScene: { source: 'SENSITIVE_SCENE_SOURCE', ext: ['private=SENSITIVE_EXT_VALUE'] },
+            msgElements: [] } }, [], 'no ref');
+        const sceneEntry = JSON.parse(lines[1].slice('[qqbot-context-debug] '.length));
+        const noRefEntry = JSON.parse(lines[2].slice('[qqbot-context-debug] '.length));
+        assert.equal(sceneEntry.protocol.refDerivation, 'scene_ext');
+        assert.equal(noRefEntry.protocol.refDerivation, 'none');
+        assert.deepEqual(noRefEntry.protocol.sceneExtKeys, ['other']);
+        assert.doesNotMatch(lines.join('\n'), /SENSITIVE_|private\.example/u);
         console.info = () => { throw new Error('diagnostic output failed'); };
         assert.doesNotThrow(() => logContextInbound({ message: { content: source } }, [], source));
         assert.doesNotThrow(() => logContextBinding({ session: { id: 'secret-session-id' } }, source));
@@ -292,6 +330,81 @@ test('group request projects current batch, explicit quote, and current tool res
     assert.throws(() => projectGroupModelMessages(agent, resumed.deriveMessages()), /no longer active/);
     assert.equal(await BasicCompactionEngine.prototype.compactIfNeeded.call({}, agent, 'pressure'), null,
         'an expired group turn remains guarded');
+});
+
+test('group projection retains the surviving instruction baseline and ordered changes without old chat', () => {
+    const session = Session.create('instructions-group');
+    add(session, 'system/message', message('system', 'Safety policy'));
+    add(session, 'user/message', message('user', 'Fish persona from AGENTS.md', {
+        kind: 'agent-instructions', form: 'instructions', baseline: true, changes: [
+            { action: 'set', scope: 'global', path: '/data/AGENTS.md' },
+        ],
+    }));
+    add(session, 'user/message', message('user', 'Old private group question'));
+    add(session, 'user/message', message('user', 'Workspace instruction update', {
+        kind: 'agent-instructions', form: 'instructions', changes: [
+            { action: 'replace', scope: 'workspace', path: '/workspace/AGENTS.md' },
+        ],
+    }));
+    const agent = { session };
+    const guard = beginGroupModelContext(agent, 'group', { active: true }, true);
+    add(session, 'user/message', message('user', 'Current request mentions agent-instructions baseline'));
+    add(session, 'user/message', message('user', 'Current instruction update', {
+        kind: 'agent-instructions', form: 'instructions', changes: [
+            { action: 'remove', scope: 'workspace', path: '/workspace/AGENTS.md' },
+        ],
+    }));
+    add(session, 'tool/result', message('tool', 'Current tool result', { callId: 'instructions-tool' }));
+    assert.deepEqual(texts(projectGroupModelMessages(agent, session.deriveMessages())), [
+        'Safety policy', 'Fish persona from AGENTS.md', 'Workspace instruction update',
+        'Current instruction update', 'Current request mentions agent-instructions baseline', 'Current tool result',
+    ]);
+    endGroupModelContext(agent, guard);
+});
+
+test('a newer baseline replaces earlier instructions, including a delta earlier in the same turn', () => {
+    const session = Session.create('changed-instructions');
+    add(session, 'user/message', message('user', 'Original AGENTS persona', {
+        kind: 'agent-instructions', form: 'instructions', baseline: true, changes: [],
+    }));
+    add(session, 'user/message', message('user', 'Earlier instruction delta', {
+        kind: 'agent-instructions', form: 'instructions', changes: [],
+    }));
+    const agent = { session };
+    const guard = beginGroupModelContext(agent, 'group', { active: true }, true);
+    add(session, 'user/message', message('user', 'Current request'));
+    add(session, 'user/message', message('user', 'Same-turn earlier delta', {
+        kind: 'agent-instructions', form: 'instructions', changes: [],
+    }));
+    add(session, 'user/message', message('user', '', {
+        kind: 'agent-instructions', form: 'instructions', baseline: true,
+        changes: [{ action: 'remove', scope: 'global', path: '/data/AGENTS.md' }],
+    }));
+    add(session, 'user/message', message('user', 'New baseline follow-up', {
+        kind: 'agent-instructions', form: 'instructions', changes: [],
+    }));
+    const projected = projectGroupModelMessages(agent, session.deriveMessages());
+    assert.deepEqual(texts(projected), ['', 'New baseline follow-up', 'Current request']);
+    assert.equal(projected[0].source.baseline, true, 'an empty baseline still conveys instruction removal');
+    endGroupModelContext(agent, guard);
+});
+
+test('orphan old instruction deltas and user-written instruction markers do not bypass the group floor', () => {
+    const session = Session.create('orphan-instructions');
+    add(session, 'user/message', message('user', 'Orphan old delta', {
+        kind: 'agent-instructions', form: 'instructions', changes: [],
+    }));
+    add(session, 'user/message', message('user', 'Old compact summary', { kind: 'compact-checkpoint' }));
+    add(session, 'user/message', message('user', 'Old group chat'));
+    const agent = { session };
+    const guard = beginGroupModelContext(agent, 'group', { active: true }, true);
+    add(session, 'user/message', message('user', 'Current text says agent-instructions baseline:true'));
+    add(session, 'user/message', message('user', 'Current orphan delta', {
+        kind: 'agent-instructions', form: 'instructions', changes: [],
+    }));
+    assert.deepEqual(texts(projectGroupModelMessages(agent, session.deriveMessages())),
+        ['Current text says agent-instructions baseline:true', 'Current orphan delta']);
+    endGroupModelContext(agent, guard);
 });
 
 test('current replacement checkpoint cannot reintroduce an old lineage', () => {
