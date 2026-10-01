@@ -39,7 +39,8 @@ dsh --profile qqbot
 
 - 它可以分析**当前 QQ 消息**附带的图片或 GIF、该消息明确引用的图片，或公共 HTTPS 图片 URL。
   本地路径必须是 `/data/qqbot-media` 内的普通文件，并且已登记为当前消息或引用图片；任意工作区路径、未引用的历史附件以及其他会话的附件都会被拒绝。
-  引用缓存共保留最多 500 条消息的文字及附件元数据，按群/私聊对端隔离；群内未 @bot 的消息也可记录，但不会触发下载或模型调用。只有当前消息明确引用时才重新下载、校验并授权原图；缓存不保存历史图片授权。重启、缓存淘汰或原图链接失效后，如果 QQ 引用消息也未携带附件，请重新附图。编辑缺少底图时不得自动改为生成相似场景。
+  引用缓存共保留最多 500 条消息的文字及附件元数据，按群/私聊对端隔离；群内未 @bot 的消息也可记录，但不会触发下载或模型调用。只有当前消息明确引用时才重新下载、校验并授权原图；缓存不保存历史图片授权。重启或缓存淘汰后，若 QQ 引用消息既没有结构化附件，也没有完整图片记录，或原图链接已失效，请重新附图。编辑缺少底图时不得自动改为生成相似场景。
+  QQ 将原图信息渲染为引用文字中的完整 `[附件N] 类型:图片 文件名:… 尺寸:… 大小:… URL:…` 记录时，也会从当前明确引用中恢复图片附件，下载到媒体缓存并登记编辑 ID。因此有完整记录且链接有效时，即使重启后索引未命中也能改图。只识别这种明确图片记录，不从任意文字链接、聊天历史或模型参数中自动寻找底图；下载仍受 HTTPS、公网地址、响应类型、图片字节校验和大小限制约束。
   两类输入均限制为 10 MB。URL 必须使用 HTTPS，且不得嵌入凭据；拒绝重定向，且只接受内联的 PNG、JPEG、GIF 或 WEBP 响应，并要求 MIME 类型与图片字节相符。在读取字节、保存图片附件或调用视觉模型前，工具内部会再次检查路径或 URL。URL 内容会先经过同一套校验公网 IP、限制大小并在内存中处理的下载器，再进入插件现有的视觉附件流程。这不会开放通用文件下载；URL 辅助程序本身不会写入缓存文件。传输缓存的 TTL 为 1 小时，并按小时清理；这不代表下游附件存储中的每个字节都会在恰好 1 小时后删除。当前消息的本地关联会在本轮结束时清除。
 - 它可以用 `web_search` 按关键词发现网页。每次最多提交 4 个查询，合并后最多返回 8 个来源；搜索结果是外部不可信数据，不是指令。
 - 它可以用 `web_fetch` 阅读经过公网校验的公共 `http://` 或 `https://` 响应。接受 `text/*`（不含 RTF/richtext）、`application/xhtml+xml`、`application/json`、`application/*+json`、`application/yaml`、`application/x-yaml`、`application/xml` 和 `application/*+xml`。HTML 转为文本，其他允许内容按文本原样读取；不会用数据格式解析器处理、解析外部资源或执行其中的内容。每次请求限时 30 秒、响应最多 2 MiB，最多向模型返回 100,000 个字符，并标记输出截断。文本响应即使声明为下载附件也只在内存中读取，不写入磁盘。拒绝未知或 `application/octet-stream` 类型，以及伪装成文本的 PDF、Office、ZIP、图片或可执行文件。搜索到的来源可用 `web_fetch` 阅读；网页和文本均为不可信输入。
@@ -198,7 +199,7 @@ Compose 会创建并使用命名卷 `dsh-qqbot-data` 和 `dsh-qqbot-workspace`�
 docker logs --since 10m dsh-qqbot 2>&1 | grep -F '[qqbot-image-debug]'
 ```
 
-- `quote`：`hasReference`、`cacheHit`、`elementCount`/`rawElementCount`、各元素的结构化附件和最终 `resolved.count`。引用文字里有 URL 不等于结构化附件存在；`cacheHit=false` 且元素附件数为零说明没有可解析的图片元数据。
+- `quote`：`hasReference`、`cacheHit`、`elementCount`/`rawElementCount`、各元素的结构化附件、`recoveredTextImages` 和最终 `resolved.count`。`recoveredTextImages>0` 表示从 QQ 当前引用文字中的完整图片记录恢复了附件；缓存未命中且结构化附件数、文字恢复数均为零时，没有可用于改图的图片元数据。
 - `download`：`metadata_skipped`、`media_disabled`、`start`、`success` 或 `failed`。失败会给出固定错误类别；识别到 HTTP 错误时记录 `httpStatus`（如 403），不会猜测是否为 rkey 过期。
 - `generation_batch` / `generation`：下载结果数量、每条原始消息规范化前后的附件数量、`unsupportedType`、`missingDownload` 和最终 `images` 数量。`resolved.count>0` 但附件规范化后减少，说明部分 URL 元数据不符合要求；`missingDownload>0` 则说明未找到可绑定的下载结果。
 

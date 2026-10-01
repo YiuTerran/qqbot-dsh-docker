@@ -14,6 +14,7 @@ import { createScopedQuoteRef, installChatPolicy, setCurrentImages, clearCurrent
 import { WebPageProvider, PublicHttpProvider, downloadCurrentQQImage } from '/opt/qqbot-defaults/qqbot-web-pages.mjs';
 import { beginDocumentTurn, endDocumentTurn, getDocumentTurn, isDocumentTurnActive, isTurnUrlAllowed, runInDocumentExecution, recordSuccessfulSearchSources, authorizeTurnProviderUrl, runWithProviderAuthorization, assertProviderRequestUrl } from '/opt/qqbot-defaults/qqbot-document-scope.mjs';
 import { readChatDocument } from '/opt/qqbot-defaults/qqbot-documents.mjs';
+import { recoverQuotedImageAttachments } from '/opt/qqbot-defaults/qqbot-quote-images.mjs';
 import { beginGenerationTurn, endGenerationTurn, getGenerationTurn, generationRequestMetadata } from '/opt/qqbot-defaults/qqbot-generation-scope.mjs';
 import { resolveTextDocumentType, decodeTextDocumentBytes, isBinaryDocumentBytes } from '/opt/qqbot-defaults/qqbot-text-documents.mjs';
 
@@ -1287,6 +1288,34 @@ test('group image quotes recover cached original attachments through the product
     assert.equal(foreign.state.quote.source, 'none');
     assert.equal(followups.at(-1).metadata[0].images.length, 0, 'another group cannot retrieve cached image metadata');
     assert.ok(downloads.length >= 4);
+});
+
+test('QQ rendered image records recover only complete HTTPS images from the current explicit quote', () => {
+    const line = '[附件1] 类型:图片 文件名:1C47BBDC01DE64EB392F69D17F459B8D.jpg 尺寸:1920x1080 大小:160.7KB URL:https://example.com/river.jpg?rkey=quoted-secret';
+    const quote = { source: 'msg_elements', refKey: 'current-ref', rawContent: `[消息类型] 引用消息\n${line}` };
+    const [image] = recoverQuotedImageAttachments(quote, 'current-ref');
+    assert.equal(image.contentType, 'image');
+    assert.equal(image.filename, '1C47BBDC01DE64EB392F69D17F459B8D.jpg');
+    assert.equal(image.url, 'https://example.com/river.jpg?rkey=quoted-secret');
+    assert.equal(image.size, Math.round(160.7 * 1024));
+    assert.ok(Object.isFrozen(image));
+    for (const [q, ref] of [[quote, undefined], [quote, 'another-ref'], [{ ...quote, source: 'store' }, 'current-ref'],
+        [{ ...quote, rawContent: undefined, text: line }, 'current-ref']]) {
+        assert.deepEqual(recoverQuotedImageAttachments(q, ref), [], 'history, cached text, and mismatched references cannot authorize URLs');
+    }
+    for (const invalid of [
+        line.replace('类型:图片', '类型:文件'),
+        line.replace('https://example.com', 'http://example.com'),
+        line.replace('https://example.com', 'https://user:pass@example.com'),
+        line.replace('https://example.com', 'file:///data'),
+        line.replace('URL:', '链接:'),
+        'Read this image: https://example.com/river.jpg',
+        line.replace(' 尺寸:1920x1080', ''),
+        line + ' additional words',
+    ]) assert.deepEqual(recoverQuotedImageAttachments({ ...quote, rawContent: invalid }, 'current-ref'), []);
+    assert.equal(recoverQuotedImageAttachments({ ...quote, rawContent: `${line}\n${line}` }, 'current-ref').length, 1);
+    const many = Array.from({ length: 20 }, (_, i) => line.replace('[附件1]', `[附件${i + 1}]`).replace('river.jpg?', `river-${i}.jpg?`));
+    assert.equal(recoverQuotedImageAttachments({ ...quote, rawContent: many.join('\n') }, 'current-ref').length, 16);
 });
 
 test('image diagnostics distinguish quote metadata, download failures, and grant binding without revealing source data', async (t) => {

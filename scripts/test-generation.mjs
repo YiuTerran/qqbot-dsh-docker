@@ -851,7 +851,7 @@ test('registered native image tool uses same-source attachment bytes, user quota
     endDocumentTurn(agent, documentScope);
 });
 
-test('cached group quote passes the original image bytes through inbound and the native editing tool', async (t) => {
+for (const quoteMode of ['store', 'rendered-text']) test(`group quote (${quoteMode}) passes the original image bytes through inbound and the native editing tool`, async (t) => {
     const adapter = '/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/';
     const { setupMiddlewares } = await import(`${adapter}gateway/middleware-setup.js`);
     const { handleInbound } = await import(`${adapter}transport/inbound.js`);
@@ -880,7 +880,7 @@ test('cached group quote passes the original image bytes through inbound and the
     const agent = {
         followup() {
             calls++;
-            if (calls === 1) return;
+            if (quoteMode === 'store' && calls === 1) return;
             const [request] = generationRequestMetadata(getGenerationTurn(agent));
             assert.equal(request.images.length, 1, 'the actual quote download produces an imageAttachmentId');
             pending = nativeCall(ctx, GENERATE_IMAGE_TOOL, {
@@ -932,10 +932,16 @@ test('cached group quote passes the original image bytes through inbound and the
             t.after(() => rm(file.localPath, { force: true }));
         }
     };
-    await run({ messageId: 'native-original', msgIdx: 'native-original-ref', content: `<@!${config.appId}> 看图`,
-        attachments: [{ content_type: 'image/png', filename: 'original.png', url: 'https://example.com/native-original.png' }] });
-    await run({ messageId: 'ROBOT1.0.AB+/cd==', refMsgIdx: 'native-original-ref', content: `<@!${config.appId}> 在江里加一条蓝色鲸鱼` });
-    assert.equal(calls, 2);
+    if (quoteMode === 'store') {
+        await run({ messageId: 'native-original', msgIdx: 'native-original-ref', content: `<@!${config.appId}> 看图`,
+            attachments: [{ content_type: 'image/png', filename: 'original.png', url: 'https://example.com/native-original.png' }] });
+    }
+    await run({ messageId: 'ROBOT1.0.AB+/cd==', refMsgIdx: 'native-original-ref', content: `<@!${config.appId}> 在江里加一条蓝色鲸鱼`,
+        ...(quoteMode === 'rendered-text' ? { msgElements: [{
+            content: '[消息类型] 引用消息\n[附件1] 类型:图片 文件名:original.png 尺寸:1920x1080 大小:160.7KB URL:https://example.com/native-original.png',
+        }] } : {}),
+    });
+    assert.equal(calls, quoteMode === 'store' ? 2 : 1);
     assert.equal(providerCalls.length, 1);
     assert.equal(requestUrl(providerCalls[0]), 'https://image-api.example.test/v1/images/edits', 'the request uses editing, not new generation');
     assert.deepEqual(Buffer.from(await providerCalls[0].body.get('image').arrayBuffer()), png,

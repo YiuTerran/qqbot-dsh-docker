@@ -59,6 +59,7 @@ export function logQuoteDiagnostics(ctx, cachedEntry) {
         elementCount: elements.length, elements: summarizeElements(elements),
         rawElementCount: rawElements.length, rawElements: summarizeElements(rawElements),
         source: ['store', 'msg_elements', 'none'].includes(ctx.state?.quote?.source) ? ctx.state.quote.source : 'none',
+        recoveredTextImages: count(ctx.state?.quote?.qqbotTextImageCount),
         resolved: attachments(ctx.state?.quote?.attachments),
     });
 }
