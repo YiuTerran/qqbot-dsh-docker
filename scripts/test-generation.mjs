@@ -602,6 +602,49 @@ test('QQ sender uses only the fixed upload/message routes, original reply target
     assert.equal(harness.requests[1].headers.Authorization, 'QQBot fixture-access-token');
 });
 
+test('QQ sender preserves visible punctuation in opaque msgId for image and Markdown file replies', async () => {
+    const harness = makeSdkHarness();
+    const msgId = 'ROBOT1.0.AB+/cd==';
+    harness.request.replyTarget.msgId = msgId;
+
+    assert.deepEqual(await harness.sender.sendImage(harness.request, png, new AbortController().signal), { sent: true });
+    assert.deepEqual(await harness.sender.sendMarkdownFile(
+        harness.request, Buffer.from('# Whale edit result\n', 'utf8'), 'result.md', new AbortController().signal,
+    ), { sent: true });
+
+    const messageRequests = harness.requests.filter(({ url }) => new URL(url).pathname.endsWith('/messages'));
+    assert.equal(messageRequests.length, 2);
+    assert.deepEqual(messageRequests.map(({ url }) => new URL(url).pathname), [
+        '/v2/groups/group-original/messages', '/v2/groups/group-original/messages',
+    ], 'only targetId is used to construct the URL path');
+    assert.deepEqual(messageRequests.map(({ body }) => JSON.parse(body).msg_id), [msgId, msgId],
+        'image and Markdown reply bodies carry the original msgId unchanged');
+    assert.ok(harness.requests.every(({ url }) => !new URL(url).pathname.includes(msgId)));
+    assert.deepEqual(harness.limiterEvents.filter(([kind]) => kind === 'record'), [
+        ['record', msgId], ['record', msgId],
+    ]);
+});
+
+test('QQ sender rejects malformed msgIds before upload or message delivery', async () => {
+    const invalidMsgIds = [
+        '',
+        null,
+        42,
+        'message with spaces',
+        'message\nwith-control',
+        `x${'x'.repeat(256)}`,
+        '消息',
+    ];
+    for (const msgId of invalidMsgIds) {
+        const harness = makeSdkHarness();
+        harness.request.replyTarget.msgId = msgId;
+        assert.deepEqual(await harness.sender.sendImage(harness.request, png, new AbortController().signal), {
+            sent: false, reason: 'expired',
+        }, `invalid msgId ${String(msgId)} fails closed`);
+        assert.deepEqual(harness.requests, [], 'invalid msgIds cannot reach QQ upload or message routes');
+    }
+});
+
 test('QQ sender serializes attachment delivery with an ordinary reply on the same per-request queue', async () => {
     const harness = makeSdkHarness();
     const resultPromise = harness.sender.sendImage(harness.request, png, new AbortController().signal);
@@ -758,8 +801,9 @@ test('registered native image tool uses same-source attachment bytes, user quota
     t.after(() => clearCurrentImages(agent, documentScope));
     const first = makeGenerationRequest('owner-first', 'group-first', 'message-first');
     const sourceUrl = 'https://cdn.example.test/quoted/same-name.png';
+    const punctuationId = 'ROBOT1.0.AB+/cd==';
     const second = {
-        ...makeGenerationRequest('owner-second', 'group-second', 'message-second'),
+        ...makeGenerationRequest('owner-second', 'group-second', punctuationId),
         quotedAttachments: [{ url: sourceUrl, filename: 'same-name.png', content_type: 'image/png' }],
     };
     const scope = beginGenerationTurn(agent, [first, second], [{ sourceUrl, localPath: localImage, contentType: 'image/png' }], {
@@ -783,7 +827,7 @@ test('registered native image tool uses same-source attachment bytes, user quota
         'the second original user owns the reservation; a merged first user is not charged');
     assert.equal(imageSends.length, 1);
     assert.equal(imageSends[0].request.ownerId, 'owner-second');
-    assert.deepEqual(imageSends[0].request.replyTarget, { scope: 'group', targetId: 'group-second', msgId: 'message-second' });
+    assert.deepEqual(imageSends[0].request.replyTarget, { scope: 'group', targetId: 'group-second', msgId: punctuationId });
     assert.equal(imageSends[0].request.isActive('image'), true);
 
     const repeat = await nativeCall(ctx, GENERATE_IMAGE_TOOL,

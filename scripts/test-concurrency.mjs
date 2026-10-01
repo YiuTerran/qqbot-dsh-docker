@@ -745,6 +745,146 @@ integration('native group inbound/outbound handlers hold the shared-group lock t
         'the queued B request receives no second idle notice and a late native event from A is discarded');
 });
 
+integration('native inbound carries real SDK quote image grants into generation metadata and revokes them after the turn', async () => {
+    await prepareAdapterPeers();
+    const adapter = `${resolve(adapterDist)}/`;
+    const defaultsUrl = concurrencyUrl.startsWith('file:')
+        ? concurrencyUrl
+        : pathToFileURL(resolve(concurrencyUrl)).href;
+    const policyUrl = new URL('./qqbot-chat-policy.mjs', defaultsUrl);
+    const generationScopeUrl = new URL('./qqbot-generation-scope.mjs', defaultsUrl);
+    const qqbotNode = '/data/profiles/qqbot/node_modules/@tencent-connect/qqbot-nodejs/dist/';
+    const [
+        { handleInbound },
+        { createMiddlewareContext, runMiddlewareChain },
+        { quoteRef },
+        { createScopedQuoteRef },
+        { getGenerationTurn, getGenerationImageAttachment, generationRequestMetadata },
+    ] = await Promise.all([
+        import(`${adapter}transport/inbound.js`),
+        import(`${qqbotNode}middleware/types.js`),
+        import(`${qqbotNode}middleware/quote-ref.js`),
+        import(policyUrl.href),
+        import(generationScopeUrl.href),
+    ]);
+
+    const sourceUrl = 'https://cdn.example.test/river.jpg';
+    const localPath = '/data/qqbot-media/river.jpg';
+    const warnings = [];
+    const logger = { info() {}, debug() {}, warn(message) { warnings.push(message); }, error() {} };
+    const bot = { async sendMarkdown() {} };
+    const followups = [];
+    let record;
+    const agent = {
+        followup(body) {
+            const scope = getGenerationTurn(agent);
+            const requests = generationRequestMetadata(scope);
+            const request = scope && [...scope.requests.values()][0];
+            const image = request?.images[0];
+            const grant = image
+                ? getGenerationImageAttachment(scope, request.requestId, image.imageAttachmentId)
+                : undefined;
+            const bodyText = typeof body === 'string' ? body
+                : Array.isArray(body?.content)
+                    ? body.content.filter((part) => part?.type === 'text').map((part) => part.text ?? '').join('\n')
+                    : JSON.stringify(body);
+            followups.push({ body, bodyText, scope, requestId: request?.requestId, imageAttachmentId: image?.imageAttachmentId, grant,
+                requestReplyTarget: request?.replyTarget, metadata: requests });
+        },
+        async whenIdle() {},
+    };
+    const manager = {
+        getSessionRecord(scope, peerId) {
+            return record?.scope === scope && record.peerId === peerId ? record : undefined;
+        },
+        findBySessionId(sessionId) { return record?.sessionId === sessionId ? record : undefined; },
+        async getOrCreate(scope, peerId, senderId, replyTarget) {
+            if (!record) record = {
+                scope, peerId, senderId, sessionId: 'quoted-generation-session', agent,
+                replyTarget, handle: { async dispose() {} },
+            };
+            record.replyTarget = replyTarget;
+            return record;
+        },
+    };
+    const config = { appId: 'test-app', textChunkLimit: 2000, streaming: false, showToolResults: false, historyLimit: 10 };
+    const scopedQuoteRef = createScopedQuoteRef(quoteRef);
+    const guard = createMergeConcurrencyGuard({ maxQueue: 2, maxProcessingMs: 0 });
+    const targets = [
+        { kind: 'group', peerField: 'groupOpenid', peerId: 'group-a', scope: 'group' },
+        { kind: 'c2c', peerField: undefined, peerId: 'peer-a', scope: 'c2c' },
+    ];
+
+    for (const target of targets) {
+        record = undefined;
+        const messageId = 'ROBOT1.0.AB+/cd==';
+        const rawMessage = {
+            kind: target.kind,
+            ...(target.peerField ? { [target.peerField]: target.peerId } : {}),
+            senderId: target.kind === 'c2c' ? target.peerId : 'member-a',
+            messageId,
+            msgIdx: `current-${target.scope}`,
+            refMsgIdx: `quoted-${target.scope}`,
+            content: '请基于引用图片改图',
+            msgElements: [{
+                content: '江景',
+                attachments: [{ content_type: 'image/jpeg', filename: 'river.jpg', url: sourceUrl }],
+            }],
+            attachments: [],
+            replyTarget: { scope: target.scope, targetId: target.peerId, msgId: messageId },
+        };
+        const ctx = createMiddlewareContext({ bot, message: rawMessage, log: logger });
+        if (target.scope === 'group') ctx.state.mention = { wasMentioned: true };
+        const fixtureDownload = async (middlewareCtx, next) => {
+            middlewareCtx.state.downloadedQuoteFiles = [{ sourceUrl, localPath, contentType: 'image' }];
+            await next();
+        };
+        const guarded = (middlewareCtx, next) => guard(middlewareCtx, next);
+        const inbound = (middlewareCtx, next) => handleInbound(middlewareCtx, manager, config, logger);
+        await runMiddlewareChain([scopedQuoteRef, guarded, fixtureDownload, inbound], ctx);
+
+        assert.equal(ctx.state.quote?.source, 'msg_elements', 'the SDK quote middleware resolves the explicit image quote');
+        assert.equal(ctx.state.quote?.attachments?.[0]?.url, sourceUrl);
+        assert.equal(ctx.state.quote?.attachments?.[0]?.filename, 'river.jpg');
+        assert.equal(followups.length, targets.indexOf(target) + 1, 'the real inbound handler reaches the fake agent exactly once');
+        const captured = followups.at(-1);
+        assert.ok(captured.scope, 'generation scope is active while agent.followup receives the model body');
+        assert.ok(captured.requestId, 'model input has an opaque request ID for this original QQ message');
+        assert.ok(captured.imageAttachmentId, 'model input has an opaque image attachment ID for the quoted image');
+        assert.equal(captured.grant?.requestId, captured.requestId);
+        assert.equal(captured.grant?.imageAttachmentId, captured.imageAttachmentId);
+        assert.equal(captured.grant?.quoted, true, 'the image grant is marked as quoted');
+        assert.equal(captured.grant?.sourceUrl, sourceUrl, 'the successful fixture download is bound to the quoted source URL');
+        assert.equal(captured.grant?.localPath, localPath, 'the image grant binds the fixture download path');
+        assert.deepEqual(captured.requestReplyTarget,
+            { scope: target.scope, targetId: target.peerId, msgId: messageId },
+            'the grant request stays bound to the original punctuation-bearing message and reply target');
+        assert.equal(record.replyTarget.msgId, messageId, 'the inbound session record keeps the original reply target');
+        assert.equal(captured.metadata[0]?.requestId, captured.requestId);
+        assert.deepEqual(captured.metadata[0]?.images, [{
+            imageAttachmentId: captured.imageAttachmentId,
+            filename: 'river.jpg',
+            quoted: true,
+        }], 'the model input contains only the opaque image grant metadata');
+        const metadataStart = captured.bodyText.indexOf('[Untrusted QQ generation request IDs;');
+        assert.notEqual(metadataStart, -1, 'the rendered model body includes scoped generation request metadata');
+        const generationMetadata = captured.bodyText.slice(metadataStart);
+        assert.ok(!generationMetadata.includes(sourceUrl), 'generation metadata does not expose the source URL');
+        assert.ok(!generationMetadata.includes(localPath), 'generation metadata does not expose the local media path');
+        const metadataJsonStart = generationMetadata.indexOf('\n');
+        assert.notEqual(metadataJsonStart, -1, 'generation metadata separates its header from the JSON payload');
+        assert.deepEqual(JSON.parse(generationMetadata.slice(metadataJsonStart + 1)), captured.metadata,
+            'the actual followup body carries the active requestId and imageAttachmentId metadata');
+        assert.deepEqual(warnings, [], 'the real inbound handler did not swallow an error while processing the quote');
+
+        assert.equal(getGenerationTurn(agent), undefined, 'the active grant is removed when handleInbound completes');
+        assert.equal(captured.scope.active, false, 'the completed scope is revoked');
+        assert.equal(getGenerationImageAttachment(captured.scope, captured.requestId, captured.imageAttachmentId), undefined,
+            'the previous image grant cannot be used after the inbound turn');
+        assert.equal(captured.scope.requests.size, 0, 'request IDs are cleared when the turn is revoked');
+    }
+});
+
 integration('timed-out native turn cancels its captured agent and drains document grants before the next message', async () => {
     await prepareAdapterPeers();
     const adapter = `${resolve(adapterDist)}/`;

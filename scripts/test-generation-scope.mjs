@@ -98,6 +98,42 @@ test('generation metadata binds each merged original request and quoted image to
     assert.match(promptMetadata, /matching original user request explicitly asks/u);
 });
 
+test('quoted image grants survive a QQ message ID with visible punctuation, while malformed IDs fail closed', async (t) => {
+    const agent = {};
+    const msgId = 'ROBOT1.0.AB+/cd==';
+    const scope = beginGenerationTurn(agent, [originalRequest({
+        ownerId: 'user-a', groupId: 'group-a', msgId,
+        text: 'Add a whale to the quoted image.',
+        quotedAttachments: [image(imageB, 'quoted.jpg', 'image/jpeg')],
+    })], [downloaded(imageB)], { documentScope: activeDocumentScope() });
+    t.after(() => endGenerationTurn(agent, scope));
+
+    const { request, metadata } = metadataFor(scope, 'user-a');
+    assert.equal(request.replyTarget.msgId, msgId, 'the original opaque QQ message ID is preserved byte for byte');
+    assert.equal(metadata.images.length, 1);
+    assert.equal(metadata.images[0].quoted, true);
+    assert.ok(metadata.images[0].imageAttachmentId, 'the explicitly quoted image receives an opaque grant');
+    assert.ok(getGenerationImageAttachment(scope, request.requestId, metadata.images[0].imageAttachmentId));
+
+    const invalidMsgIds = [
+        '',
+        null,
+        42,
+        'message with spaces',
+        'message\nwith-control',
+        `x${'x'.repeat(256)}`,
+        '消息',
+    ];
+    for (const invalidMsgId of invalidMsgIds) {
+        const invalidScope = beginGenerationTurn(agent, [originalRequest({
+            ownerId: 'user-a', groupId: 'group-a', msgId: invalidMsgId,
+            quotedAttachments: [image(imageB, 'quoted.jpg', 'image/jpeg')],
+        })], [downloaded(imageB)], { documentScope: activeDocumentScope() });
+        assert.equal(generationRequestMetadata(invalidScope).length, 0, `invalid msgId ${String(invalidMsgId)} is rejected`);
+        await endGenerationTurn(agent, invalidScope);
+    }
+});
+
 test('only matching public PNG/JPEG downloads become image grants', async (t) => {
     const agent = {};
     const scope = beginGenerationTurn(agent, [originalRequest({

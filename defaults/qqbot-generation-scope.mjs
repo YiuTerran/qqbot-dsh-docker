@@ -18,7 +18,8 @@ function snapshotReplyTarget(target) {
     const { scope, targetId, msgId } = target;
     if (!['group', 'c2c'].includes(scope) || typeof targetId !== 'string'
         || !/^[A-Za-z0-9_-]{1,128}$/u.test(targetId)) return undefined;
-    if (typeof msgId !== 'string' || !/^[A-Za-z0-9_-]{1,256}$/u.test(msgId)) return undefined;
+    // QQ msgId is opaque and may contain punctuation; it is a JSON reply field, never a URL path segment.
+    if (typeof msgId !== 'string' || !/^[\x21-\x7e]{1,256}$/u.test(msgId)) return undefined;
     return Object.freeze({ scope, targetId, msgId });
 }
 

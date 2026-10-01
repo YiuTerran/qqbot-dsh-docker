@@ -19,9 +19,10 @@ function senderError(code = 'failed') {
 
 function validTarget(request) {
     const target = request?.replyTarget;
+    // QQ msgId is opaque and may contain punctuation; it is a JSON reply field, never a URL path segment.
     if (!target || !SCOPE_VALUES.includes(target.scope) ||
         typeof target.targetId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/u.test(target.targetId) ||
-        typeof target.msgId !== 'string' || !/^[A-Za-z0-9_-]{1,256}$/u.test(target.msgId)) {
+        typeof target.msgId !== 'string' || !/^[\x21-\x7e]{1,256}$/u.test(target.msgId)) {
         return undefined;
     }
     return Object.freeze({ scope: target.scope, targetId: target.targetId, msgId: target.msgId });
