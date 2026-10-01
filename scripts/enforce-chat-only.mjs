@@ -108,6 +108,26 @@ await patch('gateway/middleware-setup.js', '// Chat-only serialized merge guard 
     return content;
 });
 
+await patch('gateway/middleware-setup.js', '// Chat-only idle group thinking notice v1.', (content, file) => {
+    const oldImport = `import { createMergeConcurrencyGuard, sendMergeQueueFullNotice } from '${concurrencyPolicy}';`;
+    const nextImport = `import { createMergeConcurrencyGuard, sendMergeQueueFullNotice, sendMergeThinkingNotice } from '${concurrencyPolicy}';`;
+    if (content.includes('sendMergeThinkingNotice') || content.includes('onStart:')) {
+        throw new Error(`Chat-only patch: partial idle thinking notice in ${file}`);
+    }
+    content = replaceOne(content, oldImport, nextImport, file);
+    return replaceOne(content, [
+        '        maxProcessingMs: config.processingTimeoutMs,',
+        '        onDrop: async (droppedCtx) => {',
+    ].join('\n'), [
+        '        maxProcessingMs: config.processingTimeoutMs,',
+        '        // Chat-only idle group thinking notice v1.',
+        '        onStart: async (startedCtx) => {',
+        '            await sendMergeThinkingNotice(sender, startedCtx);',
+        '        },',
+        '        onDrop: async (droppedCtx) => {',
+    ].join('\n'), file);
+});
+
 await patch('gateway/middleware-setup.js', `import {createScopedQuoteRef} from '${policy}';`, (content, file) => {
     const scopedImport = `import {createScopedQuoteRef} from '${policy}';`;
     content = `${scopedImport}\n${content}`;
@@ -189,16 +209,51 @@ if (patchedMiddlewareSetup.split(diceMiddlewareMarker).length !== 2
     || slashPosition <= diceCommandPosition || attachmentPosition <= slashPosition) {
     throw new Error('Chat-only patch: dice command/history middleware is incomplete or ordered outside the guarded chain');
 }
-const mergeGuardImport = `import { createMergeConcurrencyGuard, sendMergeQueueFullNotice } from '${concurrencyPolicy}';`;
+const mergeGuardImport = `import { createMergeConcurrencyGuard, sendMergeQueueFullNotice, sendMergeThinkingNotice } from '${concurrencyPolicy}';`;
+const oldMergeGuardImport = `import { createMergeConcurrencyGuard, sendMergeQueueFullNotice } from '${concurrencyPolicy}';`;
 const mergeGuardPosition = patchedMiddlewareSetup.indexOf('// Chat-only serialized merge guard v1.');
+const thinkingNoticePosition = patchedMiddlewareSetup.indexOf('// Chat-only idle group thinking notice v1.');
+const onStartPosition = patchedMiddlewareSetup.indexOf('onStart: async (startedCtx) => {');
+const thinkingSendPosition = patchedMiddlewareSetup.indexOf('await sendMergeThinkingNotice(sender, startedCtx);');
+const onDropPosition = patchedMiddlewareSetup.indexOf('onDrop: async (droppedCtx) => {');
+const canonicalMergeGuard = [
+    '    // Chat-only serialized merge guard v1.',
+    '    bot.use(createMergeConcurrencyGuard({',
+    '        maxQueue: config.maxQueue ?? 20,',
+    '        maxProcessingMs: config.processingTimeoutMs,',
+    '        // Chat-only idle group thinking notice v1.',
+    '        onStart: async (startedCtx) => {',
+    '            await sendMergeThinkingNotice(sender, startedCtx);',
+    '        },',
+    '        onDrop: async (droppedCtx) => {',
+    '            try {',
+    '                await sendMergeQueueFullNotice(sender, droppedCtx);',
+    '            }',
+    '            catch {',
+    "                logger.warn('[concurrency:merge] busy notice failed');",
+    '            }',
+    '        },',
+    '    }));',
+].join('\n');
+const mergeGuardEndPosition = patchedMiddlewareSetup.indexOf(canonicalMergeGuard) + canonicalMergeGuard.length;
 const answerPosition = patchedMiddlewareSetup.indexOf('bot.use(questionAnswer(manager));');
 const typingPosition = patchedMiddlewareSetup.indexOf('bot.use(typingIndicator());');
 if (patchedMiddlewareSetup.split(mergeGuardImport).length !== 2
+    || patchedMiddlewareSetup.split(oldMergeGuardImport).length !== 1
     || patchedMiddlewareSetup.split('// Chat-only serialized merge guard v1.').length !== 2
+    || patchedMiddlewareSetup.split('// Chat-only idle group thinking notice v1.').length !== 2
+    || patchedMiddlewareSetup.split('onStart: async (startedCtx) => {').length !== 2
+    || patchedMiddlewareSetup.split('await sendMergeThinkingNotice(sender, startedCtx);').length !== 2
+    || patchedMiddlewareSetup.split(canonicalMergeGuard).length !== 2
     || !patchedMiddlewareSetup.includes('maxQueue: config.maxQueue ?? 20,')
     || !patchedMiddlewareSetup.includes('onDrop: async (droppedCtx) => {')
     || !patchedMiddlewareSetup.includes('await sendMergeQueueFullNotice(sender, droppedCtx);')
-    || answerPosition < 0 || mergeGuardPosition <= answerPosition || typingPosition <= mergeGuardPosition
+    || accessPosition < 0 || mentionPosition <= accessPosition || rateLimitPosition <= mentionPosition
+    || diceCommandPosition <= rateLimitPosition || slashPosition <= diceCommandPosition
+    || answerPosition <= slashPosition || mergeGuardPosition <= answerPosition
+    || thinkingNoticePosition <= mergeGuardPosition || onStartPosition <= thinkingNoticePosition
+    || thinkingSendPosition <= onStartPosition || onDropPosition <= thinkingSendPosition
+    || attachmentPosition <= mergeGuardEndPosition || typingPosition <= mergeGuardEndPosition
     || !patchedMiddlewareSetup.includes('setupMiddlewares(bot, config, manager, logger, sender)')) {
     throw new Error('Chat-only patch: serialized merge middleware, overflow notice, or ordering is incomplete');
 }

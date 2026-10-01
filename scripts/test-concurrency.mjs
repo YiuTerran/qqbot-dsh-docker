@@ -14,6 +14,7 @@ const {
     formatQueueFullNotice,
     noteMergeBatchTurnStart,
     sendMergeQueueFullNotice,
+    sendMergeThinkingNotice,
     trackMergeBatchSend,
 } = await import(concurrencyUrl);
 const adapterDist = process.env.QQBOT_ADAPTER_DIST;
@@ -148,6 +149,165 @@ test('different group keys continue processing independently', async () => {
     gateA.resolve();
     gateB.resolve();
     await Promise.all([runA, runB]);
+});
+
+test('onStart receives only idle group owners; private and pre-aborted contexts skip it', async () => {
+    const gateA = deferred();
+    const gateB = deferred();
+    const notices = [];
+    const starts = [];
+    const guard = createMergeConcurrencyGuard({
+        maxProcessingMs: 0,
+        onStart(ctx) { notices.push(ctx.message.replyTarget.targetId); },
+    });
+    const downstream = async (ctx) => {
+        starts.push(ctx.message.replyTarget.targetId);
+        if (ctx.message.replyTarget.targetId === 'group-a') await gateA.promise;
+        if (ctx.message.replyTarget.targetId === 'group-b') await gateB.promise;
+    };
+    const runA = submit(guard, context(message('group-a', 'A', { targetId: 'group-a' })), downstream);
+    const runB = submit(guard, context(message('group-b', 'B', { targetId: 'group-b' })), downstream);
+    const runPrivate = submit(guard, context(message('private', 'P', { scope: 'c2c', targetId: 'private-peer' })), downstream);
+    const preAborted = context(message('pre-aborted', 'X', { targetId: 'group-x' }));
+    preAborted.abort('already cancelled');
+    await submit(guard, preAborted, downstream);
+    await waitFor(() => starts.length === 3, 'both groups and the private request to reach downstream');
+    assert.deepEqual(notices.sort(), ['group-a', 'group-b'], 'only group contexts that own an idle target run onStart');
+    assert.deepEqual(starts.sort(), ['group-a', 'group-b', 'private-peer'], 'private work remains unaffected');
+    gateA.resolve();
+    gateB.resolve();
+    await Promise.all([runA, runB, runPrivate]);
+});
+
+test('thinking notice snapshots the group reply target and sends the exact fixed text without a mention', async () => {
+    const sendGate = deferred();
+    const sent = [];
+    const ctx = context(message('thinking-id', 'user prompt', { targetId: 'original-group' }));
+    const sending = sendMergeThinkingNotice({
+        async sendMarkdown(target, text) {
+            sent.push({ target, text });
+            await sendGate.promise;
+        },
+    }, ctx);
+    ctx.message.replyTarget = { scope: 'group', targetId: 'mutated-group', msgId: 'mutated-id' };
+    await waitFor(() => sent.length === 1, 'the fixed thinking notice to be sent');
+    assert.deepEqual(sent[0], {
+        target: { scope: 'group', targetId: 'original-group', msgId: 'thinking-id' },
+        text: '收到啦，主人，本鱼正在思考中…',
+    });
+    assert.equal(sent[0].text.includes('qqbot-at-user'), false);
+    assert.equal(sent[0].text.includes('user prompt'), false);
+    sendGate.resolve();
+    await sending;
+
+    const ignored = [];
+    await sendMergeThinkingNotice({ async sendMarkdown(...args) { ignored.push(args); } },
+        context(message('private-thinking', 'private prompt', { scope: 'c2c', targetId: 'private-peer' })));
+    await sendMergeThinkingNotice({ async sendMarkdown(...args) { ignored.push(args); } }, {
+        message: { kind: 'group', replyTarget: { scope: 'c2c', targetId: 'private-peer' } },
+    });
+    await sendMergeThinkingNotice({ async sendMarkdown(...args) { ignored.push(args); } }, {
+        message: { kind: 'group' },
+    });
+    await sendMergeThinkingNotice({ async sendMarkdown(...args) { ignored.push(args); } }, {
+        message: { kind: 'group', replyTarget: { scope: 'group', targetId: '' } },
+    });
+    assert.deepEqual(ignored, [], 'private messages and missing, invalid, or non-group targets never receive this notice');
+});
+
+test('idle group prompt runs once before the first entry, not for buffered batches, and again after idle', async () => {
+    const firstNoticeGate = deferred();
+    const firstDownstreamGate = deferred();
+    const mergedDownstreamGate = deferred();
+    const notices = [];
+    const starts = [];
+    const guard = createMergeConcurrencyGuard({
+        maxQueue: 5,
+        maxProcessingMs: 0,
+        async onStart(ctx) {
+            notices.push(ctx.message.messageId);
+            if (ctx.message.messageId === 'a') await firstNoticeGate.promise;
+        },
+    });
+    const downstream = async (ctx) => {
+        starts.push(ctx.message.content);
+        if (ctx.message.content === 'A') await firstDownstreamGate.promise;
+        if (ctx.message.content === 'B\nC') await mergedDownstreamGate.promise;
+    };
+
+    const runA = submit(guard, context(message('a', 'A')), downstream);
+    await waitFor(() => notices.length === 1, 'A notice to start');
+    const runB = submit(guard, context(message('b', 'B')), downstream);
+    const runC = submit(guard, context(message('c', 'C')), downstream);
+    await pause(20);
+    assert.deepEqual(starts, [], 'queued messages cannot enter downstream before the idle owner notice settles');
+    firstNoticeGate.resolve();
+    await waitFor(() => starts.includes('A'), 'A downstream work to start');
+    firstDownstreamGate.resolve();
+    await waitFor(() => starts.includes('B\nC'), 'the merged B+C downstream work to start');
+    const runD = submit(guard, context(message('d', 'D')), downstream);
+    await pause(20);
+    assert.deepEqual(starts, ['A', 'B\nC'], 'D waits behind the merged downstream work');
+    assert.deepEqual(notices, ['a'], 'buffered B+C and waiting D do not send another notice');
+    mergedDownstreamGate.resolve();
+    await waitFor(() => starts.includes('D'), 'D downstream work to start');
+    await Promise.all([runA, runB, runC, runD]);
+
+    const runE = submit(guard, context(message('e', 'E')), downstream);
+    await runE;
+    assert.deepEqual(starts, ['A', 'B\nC', 'D', 'E']);
+    assert.deepEqual(notices, ['a', 'e'], 'a later idle owner gets a fresh notice');
+});
+
+test('a failed thinking notice logs one fixed warning and still enters downstream once', async () => {
+    const warnings = [];
+    let attempts = 0;
+    const starts = [];
+    const ctx = context(message('failed-notice', 'prompt'));
+    ctx.log.warn = (value) => warnings.push(value);
+    const guard = createMergeConcurrencyGuard({
+        maxProcessingMs: 0,
+        async onStart() { attempts++; throw new Error('private transport detail'); },
+    });
+    await submit(guard, ctx, async () => { starts.push(ctx.message.messageId); });
+    assert.equal(attempts, 1, 'a failed thinking notice is never retried');
+    assert.deepEqual(warnings, ['[concurrency:merge] thinking notice failed']);
+    assert.deepEqual(starts, ['failed-notice'], 'notice failure does not suppress the admitted message');
+});
+
+test('cancellation and processing timeout during a pending thinking notice hold the key and skip that entry', async () => {
+    for (const mode of ['cancel', 'timeout']) {
+        const noticeGate = deferred();
+        const starts = [];
+        const notices = [];
+        let owner;
+        const guard = createMergeConcurrencyGuard({
+            maxQueue: 2,
+            maxProcessingMs: mode === 'timeout' ? 25 : 0,
+            onStart(ctx) {
+                notices.push(ctx.message.messageId);
+                if (ctx.message.messageId === 'owner') {
+                    owner = ctx;
+                    return noticeGate.promise;
+                }
+            },
+        });
+        const runOwner = submit(guard, context(message('owner', 'A')), async (ctx) => starts.push(ctx.message.messageId));
+        await waitFor(() => owner, `${mode} owner notice to start`);
+        const runQueued = submit(guard, context(message('queued', 'B')), async (ctx) => starts.push(ctx.message.messageId));
+        if (mode === 'cancel') owner.abort('cancel during prompt');
+        else await waitFor(() => owner.signal.aborted, 'processing timeout to abort the pending notice owner');
+        await pause(20);
+        assert.deepEqual(starts, [], 'the lock stays held while the pending notice send has not settled');
+        noticeGate.resolve();
+        await Promise.all([runOwner, runQueued]);
+        assert.deepEqual(starts, ['queued'], 'the aborted first entry skips downstream and the queued entry proceeds');
+        assert.deepEqual(notices, ['owner'], 'the queued survivor is not treated as a new idle owner');
+    }
+});
+
+test('onStart rejects non-functions', () => {
+    assert.throws(() => createMergeConcurrencyGuard({ onStart: true }), /onStart must be a function/u);
 });
 
 test('downstream rejection releases the owner only after its finally path, then drains the buffered batch', async () => {
@@ -296,8 +456,10 @@ test('processing timeout aborts the active context but does not release the key 
 
 test('queue limit counts waiting requests, reports one drop, and retains the default capacity of twenty', async () => {
     const dropped = [];
+    const notices = [];
     const guard = createMergeConcurrencyGuard({
         maxProcessingMs: 0,
+        onStart(ctx) { notices.push(ctx.message.messageId); },
         onDrop(ctx) { dropped.push(ctx); },
     });
     const releaseA = deferred();
@@ -315,6 +477,7 @@ test('queue limit counts waiting requests, reports one drop, and retains the def
     await submit(guard, refused, downstream);
     assert.deepEqual(dropped, [refused], 'only the first request past the waiting capacity is dropped');
     assert.equal(refused.stopped.length, 1, 'a refused message is stopped at admission');
+    assert.deepEqual(notices, ['a'], 'waiting and overflow messages do not receive idle-owner notices');
     assert.deepEqual(starts, ['A'], 'overflow does not call downstream or the model path');
     releaseA.resolve();
     await Promise.all(runs);
@@ -437,10 +600,11 @@ integration('native group inbound/outbound handlers hold the shared-group lock t
     let outbound;
     let turn = 0;
     let seq = 1;
+    const thinkingNotice = '收到啦，主人，本鱼正在思考中…';
     const bot = {
         async sendMarkdown(target, text) {
             sent.push({ target, text });
-            if (target.msgId === 'message-a') {
+            if (target.msgId === 'message-a' && text !== thinkingNotice) {
                 sendStarted.resolve();
                 await releaseFirstSend.promise;
             }
@@ -490,7 +654,11 @@ integration('native group inbound/outbound handlers hold the shared-group lock t
     outbound = createOutboundHandler(manager, bot, {
         appId: 'test-app', textChunkLimit: 2000, streaming: false, showToolResults: false,
     }, { info() {}, debug() {}, warn() {}, error() {} }, {});
-    const guard = createMergeConcurrencyGuard({ maxQueue: 10, maxProcessingMs: 0 });
+    const guard = createMergeConcurrencyGuard({
+        maxQueue: 10,
+        maxProcessingMs: 0,
+        onStart: (startedCtx) => sendMergeThinkingNotice(bot, startedCtx),
+    });
     const config = { appId: 'test-app', textChunkLimit: 2000, streaming: false, showToolResults: false, historyLimit: 10 };
     const logger = { info() {}, debug() {}, warn() {}, error() {} };
     const inbound = (id, content) => {
@@ -506,20 +674,24 @@ integration('native group inbound/outbound handlers hold the shared-group lock t
 
     const runA = inbound('message-a', 'question A');
     await sendStarted.promise;
-    assert.deepEqual(sent[0].target, { scope: 'group', targetId: 'group-a', msgId: 'message-a' });
+    assert.deepEqual(sent.slice(0, 2), [
+        { target: { scope: 'group', targetId: 'group-a', msgId: 'message-a' }, text: thinkingNotice },
+        { target: { scope: 'group', targetId: 'group-a', msgId: 'message-a' }, text: 'reply-1' },
+    ], 'the idle group notice settles against the inbound target before model work replies');
     const runB = inbound('message-b', 'question B');
     await pause(20);
     assert.equal(followups.length, 1, 'the next native inbound handler stays queued until A finishes sending');
-    assert.equal(sent.length, 1);
+    assert.equal(sent.length, 2, 'the queued group receives no thinking notice while A owns the target');
     releaseFirstSend.resolve();
     await Promise.all([runA, runB]);
     assert.equal(followups.length, 2);
     assert.deepEqual(sent.map(({ target }) => target), [
         { scope: 'group', targetId: 'group-a', msgId: 'message-a' },
+        { scope: 'group', targetId: 'group-a', msgId: 'message-a' },
         { scope: 'group', targetId: 'group-a', msgId: 'message-b' },
-    ], 'native responses use the originating message reply target for each serialized batch');
-    assert.deepEqual(sent.map(({ text }) => text), ['reply-1', 'reply-2'],
-        'a late native event from A is discarded while B owns the shared record');
+    ], 'notices and native responses use the originating message target for each serialized batch');
+    assert.deepEqual(sent.map(({ text }) => text), [thinkingNotice, 'reply-1', 'reply-2'],
+        'the queued B request receives no second idle notice and a late native event from A is discarded');
 });
 
 integration('timed-out native turn cancels its captured agent and drains document grants before the next message', async () => {
@@ -713,9 +885,12 @@ integration('production middleware wires configured overflow to the existing sen
     const waitingRun = submit(guard, waiting, async () => { modelCalls++; });
     await submit(guard, refused, async () => { modelCalls++; });
     assert.deepEqual(notices, [{
+        target: { scope: 'group', targetId: 'shared-group', msgId: 'busy-owner' },
+        text: '收到啦，主人，本鱼正在思考中…',
+    }, {
         target: { scope: 'group', targetId: 'shared-group', msgId: 'busy-refused' },
         text: '<qqbot-at-user id="refused-member" /> 主人，本鱼太忙啦，请等一会儿再来找本鱼吧。',
-    }], 'the production sender receives a single notice addressed to the refused message');
+    }], 'only the idle owner and refused request receive notices, each at its own message target');
     assert.equal(modelCalls, 1, 'the full-queue request never enters attachment/model middleware');
     ownerGate.resolve();
     await Promise.all([ownerRun, waitingRun]);
@@ -728,9 +903,12 @@ integration('a failed busy notice logs one fixed warning and never retries or en
     const layers = [];
     const warnings = [];
     let sendAttempts = 0;
+    let busyAttempts = 0;
     const sender = {
-        async sendMarkdown() {
+        async sendMarkdown(_target, text) {
             sendAttempts++;
+            if (text === '收到啦，主人，本鱼正在思考中…') return;
+            busyAttempts++;
             throw new Error('private send transport details');
         },
     };
@@ -752,11 +930,13 @@ integration('a failed busy notice logs one fixed warning and never retries or en
     await waitFor(() => modelCalls === 1, 'owner model path to start');
     const waiterRun = submit(guard, waiter, async () => { modelCalls++; });
     await assert.doesNotReject(submit(guard, refused, async () => { modelCalls++; }));
-    assert.equal(sendAttempts, 1, 'the overflow notice is attempted once even if the sender rejects');
+    assert.equal(sendAttempts, 2, 'the owner acknowledgement and one overflow notice are each attempted once');
+    assert.equal(busyAttempts, 1, 'the refused request gets one busy notice attempt');
     assert.deepEqual(warnings, ['[concurrency:merge] busy notice failed'], 'only one fixed diagnostic is recorded');
     assert.equal(modelCalls, 1, 'a failed busy notice does not submit the dropped message to the model');
     gate.resolve();
     await Promise.all([ownerRun, waiterRun]);
     assert.equal(modelCalls, 2);
-    assert.equal(sendAttempts, 1, 'the dropped message is never retried');
+    assert.equal(sendAttempts, 2, 'neither notice is retried after the send path settles');
+    assert.equal(busyAttempts, 1);
 });

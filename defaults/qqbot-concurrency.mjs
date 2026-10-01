@@ -1,5 +1,6 @@
 const DEFAULT_MAX_QUEUE = 20;
 const BUSY_NOTICE = '主人，本鱼太忙啦，请等一会儿再来找本鱼吧。';
+const THINKING_NOTICE = '收到啦，主人，本鱼正在思考中…';
 const OPEN_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
 
 const activeBatches = new WeakMap();
@@ -26,6 +27,15 @@ export async function sendMergeQueueFullNotice(sender, ctx) {
     await adapter.sendMarkdown(replyTarget, formatQueueFullNotice(ctx?.message));
 }
 
+/** Send one fixed, unmentioned acknowledgement for an admitted group message. */
+export async function sendMergeThinkingNotice(sender, ctx) {
+    const replyTarget = snapshotReplyTarget(ctx?.message?.replyTarget ?? ctx?.replyTarget);
+    if (ctx?.message?.kind !== 'group' || replyTarget?.scope !== 'group') return;
+    const adapter = sender && typeof sender.sendMarkdown === 'function' ? sender : ctx?.bot;
+    if (!adapter || typeof adapter.sendMarkdown !== 'function') return;
+    await adapter.sendMarkdown(replyTarget, THINKING_NOTICE);
+}
+
 /** Build the fixed busy response. Only an SDK senderId can populate the QQ mention tag. */
 export function formatQueueFullNotice(message) {
     const senderId = message?.senderId;
@@ -43,9 +53,11 @@ export function createMergeConcurrencyGuard(options = {}) {
     const maxQueue = options.maxQueue ?? DEFAULT_MAX_QUEUE;
     const maxProcessingMs = options.maxProcessingMs ?? 0;
     const onDrop = options.onDrop;
+    const onStart = options.onStart;
     if (!Number.isSafeInteger(maxQueue) || maxQueue < 0) throw new TypeError('maxQueue must be a non-negative integer');
     if (!Number.isFinite(maxProcessingMs) || maxProcessingMs < 0) throw new TypeError('maxProcessingMs must be non-negative');
     if (onDrop !== undefined && typeof onDrop !== 'function') throw new TypeError('onDrop must be a function');
+    if (onStart !== undefined && typeof onStart !== 'function') throw new TypeError('onStart must be a function');
 
     const locks = new Map();
 
@@ -67,7 +79,7 @@ export function createMergeConcurrencyGuard(options = {}) {
         return first;
     }
 
-    async function runEntry(entry) {
+    async function runEntry(entry, isIdleOwner = false) {
         if (entry.ctx?.signal?.aborted) return { skipped: true };
         let timer;
         if (maxProcessingMs > 0) {
@@ -84,6 +96,17 @@ export function createMergeConcurrencyGuard(options = {}) {
             timer.unref?.();
         }
         try {
+            const target = snapshotReplyTarget(entry.ctx?.message?.replyTarget ?? entry.ctx?.replyTarget);
+            if (isIdleOwner && onStart && entry.ctx?.message?.kind === 'group' && target?.scope === 'group') {
+                try {
+                    await onStart(entry.ctx);
+                }
+                catch {
+                    try { entry.ctx.log?.warn?.('[concurrency:merge] thinking notice failed'); }
+                    catch { /* logging must not disrupt the owner */ }
+                }
+                if (entry.ctx?.signal?.aborted) return { skipped: true };
+            }
             await entry.next();
         }
         catch (error) {
@@ -107,7 +130,7 @@ export function createMergeConcurrencyGuard(options = {}) {
 
     async function drainOwner(firstEntry, state) {
         state.activeCtx = firstEntry.ctx;
-        const firstResult = await runEntry(firstEntry);
+        const firstResult = await runEntry(firstEntry, true);
         while (state.mergeBuffer.length > 0) {
             const entries = state.mergeBuffer.splice(0);
             const available = entries.filter((entry) => {

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 const root = process.argv[2];
 if (!root) throw new Error('usage: prepare-pre-concurrency-fixture.mjs <dsh-qqbot-dist-directory>');
 const helper = '/opt/qqbot-defaults/qqbot-concurrency.mjs';
+const thinkingOnly = process.argv[3] === 'thinking-only';
 
 function replaceOnce(source, before, after, label) {
     const parts = source.split(before);
@@ -14,6 +15,30 @@ function replaceOnce(source, before, after, label) {
 async function edit(file, operation) {
     const path = join(root, file);
     await writeFile(path, operation(await readFile(path, 'utf8')));
+}
+
+await edit('gateway/middleware-setup.js', (source) => {
+    const currentImport = `import { createMergeConcurrencyGuard, sendMergeQueueFullNotice, sendMergeThinkingNotice } from '${helper}';`;
+    const oldImport = `import { createMergeConcurrencyGuard, sendMergeQueueFullNotice } from '${helper}';`;
+    const thinkingBlock = [
+        '        // Chat-only idle group thinking notice v1.',
+        '        onStart: async (startedCtx) => {',
+        '            await sendMergeThinkingNotice(sender, startedCtx);',
+        '        },',
+    ].join('\n') + '\n';
+    if (source.includes('// Chat-only idle group thinking notice v1.')) {
+        source = replaceOnce(source, thinkingBlock, '', 'idle thinking notice block');
+        source = replaceOnce(source, currentImport, oldImport, 'thinking notice import');
+    }
+    else if (source.includes('sendMergeThinkingNotice') || source.includes('onStart:')) {
+        throw new Error('pre-concurrency fixture found a partial idle thinking notice');
+    }
+    return source;
+});
+
+if (thinkingOnly) {
+    process.stdout.write('Prepared pre-thinking adapter volume fixture.\n');
+    process.exit(0);
 }
 
 await edit('gateway/bootstrap.js', (source) => {

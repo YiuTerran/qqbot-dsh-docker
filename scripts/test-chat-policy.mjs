@@ -44,6 +44,7 @@ const { getHistoryStore, historyGroupKey } = await import(`${adapter}features/hi
 const qqbotNode = '/data/profiles/qqbot/node_modules/@tencent-connect/qqbot-nodejs/dist/';
 const { quoteRef } = await import(`${qqbotNode}middleware/quote-ref.js`);
 const logger = { info() {}, warn() {}, debug() {}, error() {} };
+const THINKING_NOTICE = '收到啦，主人，本鱼正在思考中…';
 const png = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489', 'hex');
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
@@ -293,8 +294,11 @@ test('the patched QQ middleware chain handles only the current guarded .r messag
     assert.equal(layers.length, 15, 'the real patched gateway chain is installed');
     assert.match(layers[6].toString(), /rate-limit/, 'the SDK rate limiter precedes direct dice handling');
     assert.match(layers[7].toString(), /isDiceCommandCandidate/, 'direct command handling follows rate limiting');
+    const mergeGuardIndex = layers.findIndex((middleware) => middleware.name === 'mergeConcurrencyGuard');
+    assert.ok(mergeGuardIndex > 8, 'slash command handling remains upstream of the idle group notice gate');
     let terminalCalls = 0;
     const sends = [];
+    const thinkingSends = () => sends.filter(({ text }) => text === THINKING_NOTICE);
     const ctxFor = ({ groupOpenid = allowedGroup, content, messageId, attachments = [], refMsgIdx, msgElements }) => {
         const ctx = {
             message: {
@@ -342,6 +346,7 @@ test('the patched QQ middleware chain handles only the current guarded .r messag
     assert.equal(historyStore.list(allowedHistoryKey, 16).length, 0, 'current dice commands never enter persisted group history');
     assert.equal(managerCalls, 0, 'recognized direct commands never reach question/agent handling');
     assert.equal(terminalCalls, 0, 'recognized direct commands short-circuit before downstream message handling');
+    assert.equal(thinkingSends().length, 0, 'direct dice commands exit before the idle group notice gate');
 
     const duplicateId = 'dice-deduplicated';
     await run({ content: `<@${appId}> .r d1`, messageId: duplicateId });
@@ -349,17 +354,21 @@ test('the patched QQ middleware chain handles only the current guarded .r messag
     const duplicate = await run({ content: `<@${appId}> .r d1`, messageId: duplicateId });
     assert.equal(duplicate.stopReason, 'deduplication');
     assert.equal(sends.length, sendsAfterFirstDelivery, 'message deduplication runs before direct dice');
+    assert.equal(thinkingSends().length, 0, 'a duplicate delivery never receives a thinking notice');
 
     const blocked = await run({ groupOpenid: deniedGroup, content: `<@${appId}> .r d1`, messageId: 'dice-access-blocked' });
     assert.match(blocked.stopReason, /^access:/);
     assert.equal(historyStore.list(deniedHistoryKey, 16).length, 0, 'blocked groups stop before history and dice');
+    assert.equal(thinkingSends().length, 0, 'an access-denied group never receives a thinking notice');
 
     const unmentioned = await run({ content: '.r d1', messageId: 'dice-unmentioned' });
     assert.match(unmentioned.stopReason, /^mention-gate:/);
     assert.equal(sends.length, sendsAfterFirstDelivery, 'an unmentioned group command does not roll');
+    assert.equal(thinkingSends().length, 0, 'an unmentioned direct command never receives a thinking notice');
     assert.deepEqual(historyStore.list(allowedHistoryKey, 16), [],
         'current dice candidates are excluded from history even when the mention gate blocks execution');
 
+    const sendsBeforeOrdinary = sends.length;
     const regular = await run({
         content: `<@${appId}> .read document context contains .r d20`,
         messageId: 'ordinary-read',
@@ -370,8 +379,29 @@ test('the patched QQ middleware chain handles only the current guarded .r messag
     assert.equal(regular.state.quote?.text, 'Quoted text: .r d20', 'quoted dice text remains quote context, not a current command');
     assert.ok(historyStore.list(allowedHistoryKey, 16).some(({ content }) => content.includes('.read document context contains .r d20')));
     assert.equal(managerCalls, 1, 'the ordinary message reaches downstream question handling');
+    assert.deepEqual(thinkingSends(), [{
+        type: 'markdown',
+        target: { scope: 'group', targetId: allowedGroup, msgId: 'ordinary-read' },
+        text: THINKING_NOTICE,
+    }], 'an admitted ordinary group message receives one fixed notice addressed to its own target');
+    assert.equal(sends.length, sendsBeforeOrdinary + 1,
+        'the ordinary group adds only its thinking acknowledgement before downstream model handling');
+    assert.deepEqual(regular.message.replyTarget, { scope: 'group', targetId: allowedGroup, msgId: 'ordinary-read' });
+    assert.equal(historyStore.list(allowedHistoryKey, 16).some(({ content }) => content.includes(THINKING_NOTICE)), false,
+        'the fixed notice is not appended to group model history');
 
-    const sendsBeforeOrdinary = sends.length;
+    const ordinaryDuplicate = await run({
+        content: `<@${appId}> .read document context contains .r d20`,
+        messageId: 'ordinary-read',
+        refMsgIdx: 'quote-containing-dice-command',
+        msgElements: [{ content: 'Quoted text: .r d20' }],
+    });
+    assert.equal(ordinaryDuplicate.stopReason, 'deduplication');
+    assert.equal(thinkingSends().length, 1, 'a duplicate ordinary group delivery does not receive another notice');
+    assert.equal(managerCalls, 1, 'a duplicate ordinary group delivery never re-enters question handling');
+    assert.equal(sends.length, sendsBeforeOrdinary + 1, 'duplicate delivery does not add another direct send');
+
+    const sendsBeforeParallel = sends.length;
     await Promise.all([
         run({ content: `<@${appId}> .r d1`, messageId: 'parallel-current-dice' }),
         run({ groupOpenid: parallelGroup, content: `<@${appId}> ordinary context`, messageId: 'parallel-ordinary' }),
@@ -380,7 +410,10 @@ test('the patched QQ middleware chain handles only the current guarded .r messag
         'parallel current dice remains excluded while prior normal history is retained');
     assert.deepEqual(historyStore.list(parallelHistoryKey, 16).map(({ content }) => content), ['<@123456> ordinary context'],
         'an overlapping normal peer still receives its own history append');
-    assert.equal(sends.length, sendsBeforeOrdinary + 1, 'only the current .r message replies; normal text remains a chat turn');
+    assert.equal(sends.length, sendsBeforeParallel + 2,
+        'the current .r message replies and the admitted ordinary group gets one thinking notice');
+    assert.equal(thinkingSends().length, 2, 'the direct dice peer gets no notice while the ordinary group peer gets one');
+    assert.deepEqual(thinkingSends().at(-1).target, { scope: 'group', targetId: parallelGroup, msgId: 'parallel-ordinary' });
 });
 
 test('a failed direct dice reply sends one fallback and duplicate delivery never rerolls', async (t) => {
@@ -424,6 +457,8 @@ test('a failed direct dice reply sends one fallback and duplicate delivery never
     await runMiddlewareChain(layers, ctx);
     assert.equal(randomCalls, 1, 'the result is generated once before the transport failure');
     assert.deepEqual(sends.map(({ type }) => type), ['markdown', 'text'], 'the outer error handler makes one fallback send attempt');
+    assert.equal(sends.some(({ content, text }) => content === THINKING_NOTICE || text === THINKING_NOTICE), false,
+        'a direct dice command that exits upstream receives no thinking notice');
     await runMiddlewareChain(layers, ctx);
     assert.equal(randomCalls, 1, 'duplicate delivery after send failure is suppressed before any retry roll');
     assert.equal(sends.length, 2);
@@ -455,6 +490,7 @@ test('the real QQ middleware enforces ten dice attempts per sender and leaves or
             questionChannel: { tryAnswer() { managerCalls++; return false; } },
         });
         const sends = [];
+        const thinkingSends = () => sends.filter(({ text }) => text === THINKING_NOTICE);
         const ctxFor = (messageId, content) => {
             const ctx = {
                 message: {
@@ -480,25 +516,34 @@ test('the real QQ middleware enforces ten dice attempts per sender and leaves or
             assert.equal(ctx.stopReason, 'qqbot-dice-command');
         }
         assert.equal(sends.length, 10, 'the first ten unique .r messages receive results');
+        assert.equal(thinkingSends().length, 0, 'direct dice commands bypass the idle group notice gate');
         assert.equal(randomCalls, 10);
 
         const limited = ctxFor('sender-window-10', `<@${appId}> .r d1`);
         await runMiddlewareChain(layers, limited);
         assert.equal(limited.stopReason, 'qqbot-dice-rate-limit');
         assert.equal(sends.length, 10, 'the eleventh candidate is silently short-circuited');
+        assert.equal(thinkingSends().length, 0, 'rate-limited direct dice receives no thinking notice');
         assert.equal(randomCalls, 10, 'a rate hit never reaches the random source');
 
         const normal = ctxFor('ordinary-after-limit', `<@${appId}> hello normally`);
         await runMiddlewareChain(layers, normal);
         assert.equal(normal.stopped, undefined, 'the dice-only limit does not block a regular chat message');
         assert.equal(managerCalls, 1, 'regular chat still reaches the downstream message handler');
+        assert.deepEqual(thinkingSends(), [{
+            type: 'markdown',
+            target: { scope: 'group', targetId: groupOpenid, msgId: 'ordinary-after-limit' },
+            text: THINKING_NOTICE,
+        }], 'a regular group message gets one notice while remaining outside the dice rate limit');
         assert.equal(randomCalls, 10);
 
         fakeNow += 10_001;
         const afterWindow = ctxFor('sender-window-expired', `<@${appId}> .r d1`);
         await runMiddlewareChain(layers, afterWindow);
         assert.equal(afterWindow.stopReason, 'qqbot-dice-command');
-        assert.equal(sends.length, 11);
+        assert.equal(sends.filter(({ text }) => text !== THINKING_NOTICE).length, 11,
+            'the rate window admits an eleventh direct dice reply');
+        assert.equal(thinkingSends().length, 1, 'the later direct dice reply adds no thinking notice');
         assert.equal(randomCalls, 11, 'the sender can roll again after the window expires');
     }
     finally {

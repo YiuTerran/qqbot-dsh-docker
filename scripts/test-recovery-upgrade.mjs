@@ -52,7 +52,11 @@ async function assertCurrentPatch(root) {
             'setupMiddlewares(bot, config, manager, logger, sender);',
         ],
         'gateway/middleware-setup.js': [
+            "import { createMergeConcurrencyGuard, sendMergeQueueFullNotice, sendMergeThinkingNotice } from '/opt/qqbot-defaults/qqbot-concurrency.mjs';",
             '// Chat-only serialized merge guard v1.',
+            '// Chat-only idle group thinking notice v1.',
+            'onStart: async (startedCtx) => {',
+            'await sendMergeThinkingNotice(sender, startedCtx);',
             'maxQueue: config.maxQueue ?? 20,',
             'await sendMergeQueueFullNotice(sender, droppedCtx);',
         ],
@@ -97,10 +101,11 @@ async function assertCurrentPatch(root) {
     }
 }
 
-for (const version of ['pre-concurrency', 'pre-recovery', 'recovery-v1']) {
+for (const version of ['pre-thinking', 'pre-concurrency', 'pre-recovery', 'recovery-v1']) {
     integration(`${version} adapter upgrades completely and a second patch pass changes no file hashes`, async (t) => {
         const root = await isolatedAdapter(t);
-        if (version === 'pre-concurrency') await run(concurrencyFixture, [root]);
+        if (version === 'pre-thinking') await run(concurrencyFixture, [root, 'thinking-only']);
+        else if (version === 'pre-concurrency') await run(concurrencyFixture, [root]);
         else await run(fixture, [root, ...(version === 'recovery-v1' ? ['recovery-v1'] : [])]);
         const before = await hashes(root);
         await run(enforcer, [root]);
@@ -139,6 +144,38 @@ integration('a partial overflow guard fails strict validation without changing a
     await assert.rejects(run(enforcer, [root]), (error) => {
         assert.notEqual(error.code, 0);
         assert.match(error.stderr, /serialized merge middleware, overflow notice, or ordering is incomplete/u);
+        return true;
+    });
+    assert.deepEqual(await hashes(root), before, 'strict rejection performs zero adapter writes');
+});
+
+integration('a marked but altered thinking hook fails strict validation without changing any dist file', async (t) => {
+    const root = await isolatedAdapter(t);
+    const middlewarePath = join(root, 'gateway/middleware-setup.js');
+    const middleware = await readFile(middlewarePath, 'utf8');
+    const hook = '            await sendMergeThinkingNotice(sender, startedCtx);';
+    assert.equal(middleware.split(hook).length, 2, 'fixture begins with exactly one thinking hook call');
+    await writeFile(middlewarePath, middleware.replace(hook, '            // await sendMergeThinkingNotice(sender, startedCtx);'));
+    const before = await hashes(root);
+    await assert.rejects(run(enforcer, [root]), (error) => {
+        assert.notEqual(error.code, 0);
+        assert.match(error.stderr, /serialized merge middleware, overflow notice, or ordering is incomplete/u);
+        return true;
+    });
+    assert.deepEqual(await hashes(root), before, 'strict rejection performs zero adapter writes');
+});
+
+integration('a markerless partial thinking hook fails closed without changing any dist file', async (t) => {
+    const root = await isolatedAdapter(t);
+    const middlewarePath = join(root, 'gateway/middleware-setup.js');
+    const middleware = await readFile(middlewarePath, 'utf8');
+    const marker = '        // Chat-only idle group thinking notice v1.\n';
+    assert.equal(middleware.split(marker).length, 2, 'fixture begins with exactly one thinking marker');
+    await writeFile(middlewarePath, middleware.replace(marker, ''));
+    const before = await hashes(root);
+    await assert.rejects(run(enforcer, [root]), (error) => {
+        assert.notEqual(error.code, 0);
+        assert.match(error.stderr, /partial idle thinking notice/u);
         return true;
     });
     assert.deepEqual(await hashes(root), before, 'strict rejection performs zero adapter writes');
