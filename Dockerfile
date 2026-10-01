@@ -74,6 +74,7 @@ COPY --from=build /usr/local/lib/instrument-qqbot-startup.mjs /usr/local/lib/ins
 COPY --from=build /usr/local/lib/enforce-chat-only.mjs /usr/local/lib/enforce-chat-only.mjs
 COPY --from=build /usr/local/lib/enforce-model-context.mjs /usr/local/lib/enforce-model-context.mjs
 COPY --from=build /opt/dsh-seed/ /opt/dsh-seed/
+COPY defaults/qqbot-context-diagnostics.mjs /opt/qqbot-defaults/qqbot-context-diagnostics.mjs
 COPY defaults/qqbot-model-context.mjs /opt/qqbot-defaults/qqbot-model-context.mjs
 COPY scripts/link-global-bins.mjs /usr/local/lib/link-global-bins.mjs
 
@@ -109,9 +110,13 @@ COPY defaults/qqbot-documents.mjs /opt/qqbot-defaults/qqbot-documents.mjs
 COPY defaults/qqbot-dice.mjs /opt/qqbot-defaults/qqbot-dice.mjs
 COPY defaults/qqbot-concurrency.mjs /opt/qqbot-defaults/qqbot-concurrency.mjs
 COPY defaults/qqbot-generation.mjs /opt/qqbot-defaults/qqbot-generation.mjs
+COPY defaults/qqbot-image-input.mjs /opt/qqbot-defaults/qqbot-image-input.mjs
+COPY defaults/qqbot-image-input-worker.mjs /opt/qqbot-defaults/qqbot-image-input-worker.mjs
 COPY defaults/qqbot-generation-scope.mjs /opt/qqbot-defaults/qqbot-generation-scope.mjs
 COPY defaults/qqbot-generation-quotas.mjs /opt/qqbot-defaults/qqbot-generation-quotas.mjs
 COPY defaults/qqbot-generation-sender.mjs /opt/qqbot-defaults/qqbot-generation-sender.mjs
+
+RUN node --input-type=module -e "import sharp from '/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/sharp/dist/index.cjs'; import { normalizeEditImage } from '/opt/qqbot-defaults/qqbot-image-input.mjs'; const source = await sharp({ create: { width: 1, height: 1, channels: 4, background: { r: 255, g: 0, b: 0, alpha: 1 } } }).webp({ lossless: true }).toBuffer(); const output = await normalizeEditImage(source, { inspectImage: bytes => bytes[0] === 137 ? 'image/png' : undefined }); const metadata = await sharp(output).metadata(); if (metadata.format !== 'png' || metadata.width !== 1 || metadata.height !== 1) process.exit(1)"
 
 RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh \
     && chown -R node:node /opt/dsh-seed /opt/qqbot-defaults

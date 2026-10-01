@@ -23,6 +23,7 @@ try {
     if (error.code !== 'EEXIST') throw error;
 }
 const { handleInbound } = await import(`${adapterDist}/transport/inbound.js`);
+const { logContextInbound, logContextBinding, logContextProjection } = await import('/opt/qqbot-defaults/qqbot-context-diagnostics.mjs');
 const { BasicCompactionEngine } = await import(compactionModule);
 const {
     beginGroupModelContext,
@@ -51,6 +52,15 @@ function texts(messages) {
 }
 
 test('real QQ inbound and AgentLoop stream receive only the current group batch', async () => {
+    const previousDebug = process.env.QQBOT_CONTEXT_DEBUG;
+    const originalInfo = console.info;
+    const diagnosticLines = [];
+    process.env.QQBOT_CONTEXT_DEBUG = 'true';
+    console.info = (...args) => {
+        const line = args.join(' ');
+        if (line.startsWith('[qqbot-context-debug] ')) diagnosticLines.push(line);
+        else originalInfo(...args);
+    };
     const runtime = new Context();
     try {
         for (const name of ['dsh-session-projection', 'dsh-session', 'dsh-agent',
@@ -96,9 +106,15 @@ test('real QQ inbound and AgentLoop stream receive only the current group batch'
         for (const [index, content] of ['First batch', 'Second batch'].entries()) {
             await handleInbound({
                 message: { kind: 'group', groupOpenid: 'test-group', senderId: 'member',
-                    senderName: 'Member', messageId: `msg-${index}`, content },
+                    senderName: 'Member', messageId: `msg-${index}`, content,
+                    ...(index === 1 ? {
+                        refMsgIdx: 'SENSITIVE_REFERENCE_ID',
+                        msgElements: [{ content: 'SENSITIVE_ELEMENT_BODY' }],
+                        raw: { msg_elements: [{ content: 'https://private.example/SENSITIVE_TOKEN' }] },
+                    } : {}) },
                 state: { history: [], mention: { wasMentioned: true },
-                    ...(index === 1 ? { quote: { text: 'Explicit quote text' } } : {}) },
+                    ...(index === 1 ? { quote: { source: 'msg_elements', refKey: 'SENSITIVE_REFERENCE_ID',
+                        text: 'Explicit quote text SENSITIVE_QUOTE_BODY' } } : {}) },
                 bot: {},
             }, manager, { appId: 'fixture' }, logger);
         }
@@ -151,8 +167,103 @@ test('real QQ inbound and AgentLoop stream receive only the current group batch'
         assert.match(privateSecond, /Private first turn/);
         assert.match(privateSecond, /Private second turn/);
         assert.match(privateSecond, /answer-6/);
+        const diagnostics = diagnosticLines.map((line) => JSON.parse(line.slice('[qqbot-context-debug] '.length)));
+        const inbound = diagnostics.filter((entry) => entry.stage === 'inbound');
+        const bounds = diagnostics.filter((entry) => entry.stage === 'bound');
+        const projections = diagnostics.filter((entry) => entry.stage === 'projection' && entry.state === 'applied');
+        assert.equal(inbound.length, 5, 'each QQ inbound emits one metadata-only record');
+        assert.equal(bounds.length, 5, 'each QQ inbound binds its final request body');
+        assert.deepEqual(bounds.map((entry) => entry.assembledBody.hmac),
+            inbound.map((entry) => entry.assembledBody.hmac),
+            'the bound event can be matched to its original inbound event');
+        assert.equal(projections.length, 3, 'each guarded model request emits one projection record');
+        assert.equal(inbound[1].explicitQuote, true);
+        assert.equal(inbound[1].quote.source, 'msg_elements');
+        assert.equal(inbound[1].msgElements.count, 1);
+        assert.equal(inbound[1].rawMsgElements.count, 1);
+        assert.equal(inbound[1].assembledBody.quoteStart, 1);
+        assert.equal(inbound[1].assembledBody.historyStart, 0);
+        for (const [index, projection] of projections.entries()) {
+            const actual = requests[index + 1].messages;
+            const bound = bounds[index === 0 ? 0 : 1];
+            assert.equal(projection.sessionHmac, bound.sessionHmac);
+            assert.ok(projection.messages.some((entry) => entry.role === 'user' && entry.hmac === bound.body.hmac),
+                'the final bound QQ body appears in the provider request');
+            assert.ok(projection.inputCount >= projection.outputCount);
+            assert.equal(projection.outputCount, actual.length);
+            assert.deepEqual(projection.messages.map((entry) => entry.role), actual.map((entry) => entry.role));
+            assert.deepEqual(projection.messages.map((entry) => entry.length), actual.map((entry) =>
+                entry.content.filter((block) => block.type === 'text').map((block) => block.text).join('\n').length));
+            assert.ok(projection.messages.every((entry) => /^[0-9a-f]{20}$/u.test(entry.hmac)));
+        }
+        assert.ok(projections[0].droppedOldEventCount >= 2);
+        assert.equal(projections[2].currentRoles.tool, 1);
+        assert.equal(bounds[0].sessionHmac, bounds[2].sessionHmac, 'the same group has one process-local session fingerprint');
+        assert.notEqual(bounds[0].sessionHmac, bounds[3].sessionHmac, 'private and group sessions have different fingerprints');
+        const redactedLog = diagnosticLines.join('\n');
+        assert.doesNotMatch(redactedLog,
+            /SENSITIVE_REFERENCE_ID|SENSITIVE_ELEMENT_BODY|SENSITIVE_TOKEN|SENSITIVE_QUOTE_BODY|private\.example|Old group question|live-group|live-private/u);
+        assert.ok(diagnostics.some((entry) => entry.stage === 'guard' && entry.state === 'bypass' && entry.reason === 'disabled'));
+        assert.ok(diagnostics.some((entry) => entry.stage === 'guard' && entry.state === 'bypass' && entry.reason === 'private'));
     } finally {
+        console.info = originalInfo;
+        if (previousDebug === undefined) delete process.env.QQBOT_CONTEXT_DEBUG;
+        else process.env.QQBOT_CONTEXT_DEBUG = previousDebug;
         await runtime.fiber.dispose();
+    }
+});
+
+test('diagnostics bound merged and quote-source records and return immediately when disabled', () => {
+    const previousDebug = process.env.QQBOT_CONTEXT_DEBUG;
+    const originalInfo = console.info;
+    const lines = [];
+    console.info = (line) => lines.push(line);
+    try {
+        delete process.env.QQBOT_CONTEXT_DEBUG;
+        assert.doesNotThrow(() => logContextInbound({ get message() { throw new Error('disabled accessed input'); } }, [], ''));
+        assert.doesNotThrow(() => logContextBinding({ get session() { throw new Error('disabled accessed agent'); } }, ''));
+        assert.doesNotThrow(() => logContextProjection({ get input() { throw new Error('disabled accessed input'); } }));
+        assert.deepEqual(lines, []);
+        process.env.QQBOT_CONTEXT_DEBUG = 'true';
+        const source = 'SENSITIVE_MERGED_BODY https://private.example/SENSITIVE_URL';
+        const quoteText = `[消息类型] 引用消息\n[关联消息]\n--- 第1条 ---\n[消息内容] ${source}`
+            + '\n--- 第2条 ---\n[消息内容] SENSITIVE_SECOND_ITEM';
+        logContextInbound({ message: {
+            kind: 'group', content: source, refMsgIdx: 'SENSITIVE_REF',
+            msgElements: Array.from({ length: 18 }, () => ({ content: source })),
+            raw: { msg_elements: [{ content: source }, { content: source }] },
+        }, state: { history: Array.from({ length: 3 }, () => ({})),
+            quote: { source: 'store', text: quoteText } } },
+        Array.from({ length: 20 }, () => ({ text: source })),
+        `[Chat history begins]x[Chat history ends][Quoted message begins]x[Quoted message ends]`
+        + `[Quoted message begins]${quoteText}[Quoted message ends]`);
+        const entry = JSON.parse(lines[0].slice('[qqbot-context-debug] '.length));
+        assert.equal(entry.mergedRequestCount, 20);
+        assert.equal(entry.mergedRequests.length, 16);
+        assert.equal(entry.mergedRequestsOmitted, 4);
+        assert.equal(entry.msgElements.count, 18);
+        assert.equal(entry.msgElements.shown.length, 16);
+        assert.equal(entry.msgElements.omitted, 2);
+        assert.equal(entry.rawMsgElements.count, 2);
+        assert.equal(entry.historyCount, 3);
+        assert.equal(entry.explicitQuote, true);
+        assert.equal(entry.assembledBody.historyStart, 1);
+        assert.equal(entry.assembledBody.quoteStart, 2);
+        assert.equal(entry.quote.text.qqQuoteType, 1);
+        assert.equal(entry.quote.text.qqRelated, 1);
+        assert.equal(entry.quote.text.qqContent, 2);
+        assert.equal(entry.quote.text.qqNumbered, 2);
+        assert.equal(entry.assembledBody.qqNumbered, 2);
+        assert.equal(entry.current.hmac, entry.mergedRequests[0].hmac, 'same in-process text has a stable keyed digest');
+        assert.doesNotMatch(lines[0], /SENSITIVE_|private\.example/u);
+        console.info = () => { throw new Error('diagnostic output failed'); };
+        assert.doesNotThrow(() => logContextInbound({ message: { content: source } }, [], source));
+        assert.doesNotThrow(() => logContextBinding({ session: { id: 'secret-session-id' } }, source));
+        assert.doesNotThrow(() => logContextProjection({ input: [], output: [] }));
+    } finally {
+        console.info = originalInfo;
+        if (previousDebug === undefined) delete process.env.QQBOT_CONTEXT_DEBUG;
+        else process.env.QQBOT_CONTEXT_DEBUG = previousDebug;
     }
 });
 

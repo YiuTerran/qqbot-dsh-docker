@@ -110,8 +110,12 @@
       image or edit one image attached to or explicitly quoted in this turn.
       Use only the current opaque
       requestId and imageAttachmentId supplied for this turn; never invent IDs
-      or pass a path or URL. Editing accepts one PNG/JPEG of at most 10 MiB;
-      prompts are limited to 4,000 characters. Before calling, improve short
+      or pass a path or URL. Editing accepts one PNG/JPEG/GIF/WebP;
+      the tool automatically converts
+      valid inputs to PNG when needed, taking the first frame of animation.
+      Do not ask the user to convert these formats. Input and converted output
+      are each capped at 10 MiB; conversion is limited to 40 million pixels
+      and 10 seconds. Prompts are limited to 4,000 characters. Improve short
       or vague visual descriptions using only the matched original QQ request
       and its explicit quote. Add moderate subject, composition, lighting,
       palette, and style detail while preserving explicit subjects, styles,
@@ -161,8 +165,13 @@
       asks to create an image or edit one image attached to or explicitly
       quoted in this turn. Use only the current opaque requestId and
       imageAttachmentId supplied for this turn;
-      never invent IDs or pass a path or URL. Editing accepts one PNG/JPEG of
-      at most 10 MiB; prompts are limited to 4,000 characters. Before calling,
+      never invent IDs or pass a path or URL. Editing accepts one
+      PNG/JPEG/GIF/WebP; valid inputs are
+      automatically converted to PNG when needed, taking the first frame of
+      animation. Do not ask the user to convert these formats. Input and
+      converted output are each capped at 10 MiB; conversion is limited to
+      40 million pixels and 10 seconds. Prompts are limited to 4,000 characters.
+      Before calling,
       improve short or vague visual descriptions using only the matched
       original QQ request and its explicit quote. Add moderate subject,
       composition, lighting, palette, and style detail while preserving

@@ -44,6 +44,20 @@ if (thinkingOnly) {
 // Reverse the newer generation layers before reproducing the historical
 // concurrency layout. Thinking-only fixtures keep these current layers.
 await edit('transport/inbound.js', (source) => {
+    if (source.includes('// Chat-only context diagnostics v1.')) {
+        source = replaceOnce(source,
+            "import { logContextInbound, logContextBinding } from '/opt/qqbot-defaults/qqbot-context-diagnostics.mjs';\n",
+            '', 'context diagnostics import');
+        source = replaceOnce(source,
+            '    // Chat-only context diagnostics v1.\n    logContextInbound(ctx, getMergedGenerationRequests(ctx), agentBody);\n',
+            '', 'context diagnostics call');
+        source = replaceOnce(source,
+            '    // Chat-only context binding diagnostics v1.\n    logContextBinding(chatOnlyAgent, requestBody, agentBody);\n',
+            '', 'context binding diagnostics call');
+    }
+    else if (source.includes('logContextInbound') || source.includes('logContextBinding')) {
+        throw new Error('pre-concurrency fixture found partial context diagnostics');
+    }
     if (source.includes('// Chat-only group model context v1.')) {
         source = replaceOnce(source,
             "import { beginGroupModelContext, endGroupModelContext } from '/opt/qqbot-defaults/qqbot-model-context.mjs';\n",

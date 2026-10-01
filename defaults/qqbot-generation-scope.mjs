@@ -66,7 +66,7 @@ function isAllowedImageAttachment(attachment) {
     if (!attachment) return false;
     const type = attachment.contentType;
     if (type === 'image' || type === 'file' || type === 'application/octet-stream' || type === '') return true;
-    return type === 'image/png' || type === 'image/jpeg';
+    return ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(type);
 }
 
 function isPlainTextAttachment(attachment) {
@@ -185,7 +185,7 @@ export function beginGenerationTurn(agent, originalRequests, downloadedFiles, op
                 // Quote IDs authorize a specific source, not pre-downloaded
                 // bytes. Only an actual edit tool call may fetch this URL.
                 const lazyQuote = quoted && quoteMaxBytes !== undefined
-                    && ['image', 'image/png', 'image/jpeg'].includes(attachment.contentType);
+                    && ['image', 'image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(attachment.contentType);
                 if (!file && !lazyQuote) {
                     diagnostics.missingDownload++;
                     continue;

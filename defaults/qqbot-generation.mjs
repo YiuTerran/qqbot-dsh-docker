@@ -9,6 +9,7 @@ import {
 } from './qqbot-generation-scope.mjs';
 import { resolvePublicHttpAddresses } from './qqbot-web-pages.mjs';
 import { logDownloadDiagnostics } from './qqbot-image-diagnostics.mjs';
+import { normalizeEditImage } from './qqbot-image-input.mjs';
 
 export { createGenerationSender } from './qqbot-generation-sender.mjs';
 
@@ -36,7 +37,7 @@ const notices = Object.freeze({
     state: '主人，这项功能的本地额度记录暂时不可用，稍后再试吧。',
     failed: '主人，这次图片或文件操作没有完成，稍后再试吧。',
     expired: '主人，这条消息已经过期，本鱼不能再替它发送结果啦。',
-    'image-type': '主人，这张图不是受支持的 PNG/JPEG，请转换后重发吧。',
+    'image-type': '主人，这张图没法解码成可编辑图片，请重新发送原图再试吧。',
     'too-large': '主人，这张图或文档超出大小限制，请缩小后再试吧。',
     invalid: '主人，这次请求的格式不太对，请检查内容后再试吧。',
 });
@@ -697,17 +698,15 @@ async function performImageTask({ scope, request, args, exec, service, quota, se
                 await sendOperationalNotice(sender, scope, request, notice, 'image', noticeSignal);
                 return result('failed', notice);
             }
-            const mime = inspectImage(imageBytes);
-            if (!mime) {
-                const status = imageBytes.length > maxBytes ? 'too-large' : 'image-type';
+            try {
+                imageBytes = await normalizeEditImage(imageBytes, { signal: operationSignal, inspectImage });
+            }
+            catch (error) {
+                if (generationScopeFailure(scope, 'image')) return result('expired');
+                const status = error?.kind === 'too-large' ? 'too-large' : error?.kind === 'image-type' ? 'image-type' : 'failed';
                 const notice = notices[status];
                 await sendOperationalNotice(sender, scope, request, notice, 'image', noticeSignal);
                 return result(status, notice);
-            }
-            if (imageGrant.contentType && ['image/png', 'image/jpeg'].includes(imageGrant.contentType) && imageGrant.contentType !== mime) {
-                const notice = notices['image-type'];
-                await sendOperationalNotice(sender, scope, request, notice, 'image', noticeSignal);
-                return result('image-type', notice);
             }
         }
         if (generationScopeFailure(scope, 'image')) return result('expired');
@@ -953,7 +952,7 @@ export function registerGenerationTools(ctx, options = {}) {
     if (route) {
         registerStatusTool(ctx, {
             name: GENERATE_IMAGE_TOOL,
-            description: 'Generate one image from a prompt, or edit one PNG/JPEG image explicitly attached to or quoted in the same original QQ request. Use only when that original user clearly asks for image generation or editing. Before calling, improve short or vague visual descriptions into concise, concrete prompts using only that original request and its explicit QQ quote: add moderate subject, composition, lighting, palette, and style detail while preserving explicit subject, style, text, quantity, and prohibitions; do not impose a style or add an unrequested theme. Keep detailed prompts and requests to preserve wording unchanged as written. For edits, state only the requested changes and preserve everything else. Keep the final prompt at or below 4000 characters. Prompt polishing is not authorization to generate. Pass the matching opaque requestId and, for editing, an imageAttachmentId listed under that same request. Never use another batch member’s or historical personal information, and never pass a URL, path, user id, or group id.',
+            description: 'Generate one image from a prompt, or edit one PNG/JPEG/GIF/WebP image explicitly attached to or quoted in the same original QQ request. Unsupported input encodings, including GIF/WebP and PNG/JPEG that need normalization, are converted to PNG automatically; animated inputs use the first frame. Use only when that original user clearly asks for image generation or editing. Before calling, improve short or vague visual descriptions into concise, concrete prompts using only that original request and its explicit QQ quote: add moderate subject, composition, lighting, palette, and style detail while preserving explicit subject, style, text, quantity, and prohibitions; do not impose a style or add an unrequested theme. Keep detailed prompts and requests to preserve wording unchanged as written. For edits, state only the requested changes and preserve everything else. Keep the final prompt at or below 4000 characters. Prompt polishing is not authorization to generate. Pass the matching opaque requestId and, for editing, an imageAttachmentId listed under that same request. Never use another batch member’s or historical personal information, and never pass a URL, path, user id, or group id.',
             parameters: imageToolSchema(),
             async execute(args, exec) {
                 return executeGeneration(args, exec, 'image', context);

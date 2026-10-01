@@ -415,6 +415,7 @@ docker create \
         node --check "$middleware_setup"
         node --check /opt/qqbot-defaults/qqbot-session-recovery.mjs
         node --check /opt/qqbot-defaults/qqbot-model-context.mjs
+        node --check /opt/qqbot-defaults/qqbot-context-diagnostics.mjs
         node --check /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-agent-loop/lib/index.js
         node --check /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-compaction-basic/lib/index.js
         node --check /opt/qqbot-defaults/qqbot-provider-errors.mjs

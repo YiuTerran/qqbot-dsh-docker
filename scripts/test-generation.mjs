@@ -7,6 +7,7 @@ import { createServer } from 'node:https';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { EventEmitter } from 'node:events';
 import { promisify } from 'node:util';
 import { deflateSync } from 'node:zlib';
 import { test } from 'node:test';
@@ -849,6 +850,148 @@ test('registered native image tool uses same-source attachment bytes, user quota
     assert.equal(notices.length, 0);
     await endGenerationTurn(agent, scope);
     endDocumentTurn(agent, documentScope);
+});
+
+test('native editing converts WebP, GIF and decoder-valid JPEG inputs to PNG only when the edit runs', async (t) => {
+    const { default: sharp } = await import('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/sharp/dist/index.cjs');
+    const { PublicHttpProvider } = await import(pathToFileURL(join(generationDir, 'qqbot-web-pages.mjs')).href);
+    const originalRequestOnce = PublicHttpProvider.prototype.requestOnce;
+    t.after(() => { PublicHttpProvider.prototype.requestOnce = originalRequestOnce; });
+    const red = Buffer.from([255, 0, 0, 255, 255, 0, 0, 0]);
+    const raw = { raw: { width: 2, height: 1, channels: 4 } };
+    const webp = await sharp(red, raw).webp({ lossless: true }).toBuffer();
+    const gif = await sharp(red, raw).gif().toBuffer();
+    const redFrame = await sharp({ create: { width: 1, height: 1, channels: 4,
+        background: { r: 255, g: 0, b: 0, alpha: 1 } } }).png().toBuffer();
+    const blueFrame = await sharp({ create: { width: 1, height: 1, channels: 4,
+        background: { r: 0, g: 0, b: 255, alpha: 1 } } }).png().toBuffer();
+    const animatedGif = await sharp([redFrame, blueFrame], { join: { animated: true } }).gif({ delay: [100, 100] }).toBuffer();
+    assert.equal((await sharp(animatedGif).metadata()).pages, 2);
+    const trailingJpeg = Buffer.concat([await sharp(red, raw).jpeg().toBuffer(), Buffer.from([0, 0, 0])]);
+    const sources = [
+        { name: 'mislabeled-webp', bytes: webp, declared: 'image/jpeg', httpType: 'image/webp', quote: true },
+        { name: 'gif', bytes: gif, declared: 'image/gif', httpType: 'image/gif', quote: true },
+        { name: 'animated-gif', bytes: animatedGif, declared: 'image/gif', httpType: 'image/gif', quote: true, width: 1 },
+        { name: 'trailing-jpeg', bytes: trailingJpeg, declared: 'image/jpeg', quote: false },
+        { name: 'corrupt-gif', bytes: Buffer.from('GIF89a\x01\x00\x01\x00broken', 'binary'),
+            declared: 'image/gif', httpType: 'image/gif', quote: true, invalid: true },
+    ];
+    let downloadCount = 0;
+    const byUrl = new Map(sources.filter((source) => source.quote)
+        .map((source) => [`https://example.com/${source.name}`, source]));
+    PublicHttpProvider.prototype.requestOnce = async function (url) {
+        downloadCount++;
+        const source = byUrl.get(String(url));
+        assert.ok(source);
+        return { response: new Response(source.bytes, { headers: { 'content-type': source.httpType } }), close: async () => {} };
+    };
+    const providerCalls = [];
+    const quota = makeQuota();
+    const { ctx } = await nativeGenerationRuntime(t, {
+        route: route(), quota, markdownEnabled: false,
+        imageService: makeImageService({ onRequest: async (request) => {
+            providerCalls.push(request);
+            return responseImage();
+        } }),
+        sender: { async sendImage() { return { sent: true }; }, async sendNotice() { return { sent: true }; } },
+    });
+    const mediaDir = await mkdtemp('/data/qqbot-media/normalize-edit-');
+    t.after(() => rm(mediaDir, { recursive: true, force: true }));
+    for (const source of sources) {
+        const agent = {};
+        beginDocumentTurn(agent, { content: `Edit ${source.name}` });
+        const documentScope = getDocumentTurn(agent);
+        const url = `https://example.com/${source.name}`;
+        const attachment = { url, filename: `${source.name}.jpg`, content_type: source.declared };
+        let downloads = [];
+        if (!source.quote) {
+            const localPath = join(mediaDir, `${source.name}.jpg`);
+            await writeFile(localPath, source.bytes);
+            setCurrentImages(agent, [{ localPath, contentType: 'image' }], documentScope);
+            downloads = [{ sourceUrl: url, localPath, contentType: source.declared }];
+        }
+        const request = { ...makeGenerationRequest('normalize-owner', 'normalize-group', `message-${source.name}`),
+            [source.quote ? 'quotedAttachments' : 'currentAttachments']: [attachment] };
+        const scope = beginGenerationTurn(agent, [request], downloads,
+            { documentScope, media: { enabled: true, maxMB: 10 } });
+        const [metadata] = generationRequestMetadata(scope);
+        assert.equal(metadata.images.length, 1, `${source.name} has a scoped image ID`);
+        const before = downloadCount;
+        const beforeProvider = providerCalls.length;
+        const beforeQuota = quota.events.filter(([kind]) => kind === 'reserve').length;
+        const result = await nativeCall(ctx, GENERATE_IMAGE_TOOL, {
+            requestId: metadata.requestId, imageAttachmentId: metadata.images[0].imageAttachmentId,
+            prompt: 'Preserve all pixels and add a small label.',
+        }, agent, `normalize-${source.name}`);
+        assert.equal(result.value.status, source.invalid ? 'image-type' : 'sent', `${source.name}: ${JSON.stringify(result)}`);
+        assert.equal(downloadCount - before, source.quote ? 1 : 0, 'only the chosen remote quote is fetched');
+        if (source.invalid) {
+            assert.equal(providerCalls.length, beforeProvider, 'corrupt images never reach the provider');
+            assert.equal(quota.events.filter(([kind]) => kind === 'reserve').length, beforeQuota,
+                'corrupt images do not consume user quota');
+            await endGenerationTurn(agent, scope);
+            clearCurrentImages(agent, documentScope);
+            endDocumentTurn(agent, documentScope);
+            continue;
+        }
+        const requestBody = providerCalls.at(-1).body;
+        const imageFile = requestBody.get('image');
+        assert.equal(imageFile.type, 'image/png');
+        assert.equal(imageFile.name, 'input.png');
+        const converted = Buffer.from(await imageFile.arrayBuffer());
+        const metadataOut = await sharp(converted).metadata();
+        assert.equal(metadataOut.width, source.width ?? 2);
+        assert.equal(metadataOut.height, 1);
+        const originalMetadata = await sharp(source.bytes).metadata();
+        assert.equal(metadataOut.hasAlpha, originalMetadata.hasAlpha);
+        const rgba = await sharp(converted).ensureAlpha().raw().toBuffer();
+        const originalRgba = await sharp(source.bytes, { page: 0, pages: 1 }).ensureAlpha().raw().toBuffer();
+        assert.deepEqual([...rgba.subarray(0, 4)], [...originalRgba.subarray(0, 4)]);
+        await endGenerationTurn(agent, scope);
+        clearCurrentImages(agent, documentScope);
+        endDocumentTurn(agent, documentScope);
+    }
+    assert.equal(quota.events.filter(([kind]) => kind === 'reserve').length, sources.length - 1);
+    assert.equal((await readdir(mediaDir)).length, 1, 'quoted conversions leave no cache file');
+});
+
+test('image conversion enforces pixel bounds and drains its worker before cancellation or deadline settles', async () => {
+    const { normalizeEditImage } = await import(pathToFileURL(join(generationDir, 'qqbot-image-input.mjs')).href);
+    const header = Buffer.from(png.subarray(16, 29));
+    header.writeUInt32BE(30000, 0);
+    header.writeUInt32BE(2000, 4);
+    const giantHeader = Buffer.concat([png.subarray(0, 8), pngChunk('IHDR', header),
+        png.subarray(33)]);
+    await assert.rejects(normalizeEditImage(giantHeader, { inspectImage: () => undefined }),
+        (error) => error.kind === 'too-large');
+
+    const source = Buffer.from('GIF89a\x01\x00\x01\x00placeholder', 'binary');
+    for (const mode of ['cancel', 'timeout']) {
+        const controller = new AbortController();
+        const stopped = deferred();
+        const releaseTermination = deferred();
+        let worker;
+        class SuspendedWorker extends EventEmitter {
+            postMessage() {}
+            terminate() { stopped.resolve(); return releaseTermination.promise; }
+        }
+        const operation = normalizeEditImage(source, {
+            signal: controller.signal,
+            inspectImage: () => undefined,
+            createWorker: () => { worker = new SuspendedWorker(); return worker; },
+            timeoutMs: mode === 'timeout' ? 5 : 10_000,
+        });
+        if (mode === 'cancel') controller.abort();
+        let settled = false;
+        void operation.finally(() => { settled = true; }).catch(() => {});
+        await stopped.promise;
+        assert.equal(settled, false, 'concurrency remains owned while worker termination is pending');
+        releaseTermination.resolve(0);
+        await assert.rejects(operation, (error) => error.kind === (mode === 'cancel' ? 'cancelled' : 'failed'));
+        assert.equal(worker.listenerCount('message'), 0);
+        assert.equal(worker.listenerCount('error'), 0);
+        assert.equal(worker.listenerCount('exit'), 0);
+    }
 });
 
 for (const quoteMode of ['store', 'rendered-text']) test(`group quote (${quoteMode}) passes the original image bytes through inbound and the native editing tool`, async (t) => {

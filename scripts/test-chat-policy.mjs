@@ -1402,6 +1402,7 @@ test('image diagnostics distinguish quote metadata, download failures, and grant
     const request = { ownerId: 'SECRET_USER', replyTarget: target, text: 'SECRET_PROMPT', quotedAttachments: [source,
         { ...source, url: 'https://example.com/missing?rkey=SECRET_RKEY' },
         { ...source, content_type: 'image/gif' },
+        { ...source, content_type: 'application/pdf' },
     ] };
     const scope = beginGenerationTurn(agent, [request], files);
     await endGenerationTurn(agent, scope);
@@ -1422,7 +1423,7 @@ test('image diagnostics distinguish quote metadata, download failures, and grant
     assert.ok(downloads.some((event) => event.reason === 'other_error'));
     const grant = events.find((event) => event.event === 'generation');
     assert.equal(grant.images, 1);
-    assert.equal(grant.missingDownload, 1);
+    assert.equal(grant.missingDownload, 2);
     assert.equal(grant.unsupportedType, 1);
     assert.equal(grant.trace, cached.trace);
     assert.equal(grant.quoted.items[0].asset, downloads.find((event) => event.status === 'success').asset);

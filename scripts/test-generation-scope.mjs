@@ -134,7 +134,7 @@ test('quoted image grants survive a QQ message ID with visible punctuation, whil
     }
 });
 
-test('only matching public PNG/JPEG downloads become image grants', async (t) => {
+test('only matching public supported image downloads become image grants', async (t) => {
     const agent = {};
     const scope = beginGenerationTurn(agent, [originalRequest({
         ownerId: 'user-a', groupId: 'group-a', msgId: 'message-a',
@@ -152,8 +152,9 @@ test('only matching public PNG/JPEG downloads become image grants', async (t) =>
     t.after(() => endGenerationTurn(agent, scope));
 
     const { metadata } = metadataFor(scope, 'user-a');
-    assert.equal(metadata.images.length, 1);
+    assert.equal(metadata.images.length, 2);
     assert.equal(metadata.images[0].filename, 'ok.png');
+    assert.equal(metadata.images[1].filename, 'animated.gif');
 });
 
 test('lazy quote grants are bounded, immutable, request scoped and require enabled media', async () => {
@@ -161,6 +162,7 @@ test('lazy quote grants are bounded, immutable, request scoped and require enabl
     const source = originalRequest({ ownerId: 'user-a', groupId: 'group-a', msgId: 'message-a',
         currentAttachments: [image(imageA, 'current.png')],
         quotedAttachments: [image(imageB, 'quote.jpg', 'image/jpeg'),
+            image('https://cdn.example.test/photo.webp', 'photo.jpg', 'image/webp'),
             image('https://cdn.example.test/file.png', 'file.png', 'file'),
             image('http://cdn.example.test/insecure.png', 'insecure.png'),
             image('https://user:pass@cdn.example.test/private.png', 'private.png')],
@@ -175,7 +177,7 @@ test('lazy quote grants are bounded, immutable, request scoped and require enabl
         originalRequest({ ownerId: 'user-b', groupId: 'group-a', msgId: 'message-b' })], [],
         { documentScope: activeDocumentScope(), media: { enabled: true, maxMB: 2 } });
     const [first, second] = generationRequestMetadata(scope);
-    assert.equal(first.images.length, 1, 'only an explicitly declared quoted image can be deferred');
+    assert.equal(first.images.length, 2, 'only explicitly declared quoted images can be deferred');
     const grant = getGenerationImageAttachment(scope, first.requestId, first.images[0].imageAttachmentId);
     assert.ok(Object.isFrozen(grant));
     assert.equal(grant.localPath, undefined);

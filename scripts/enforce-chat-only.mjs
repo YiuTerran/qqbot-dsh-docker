@@ -14,6 +14,7 @@ const concurrencyPolicy = '/opt/qqbot-defaults/qqbot-concurrency.mjs';
 const generationPolicy = '/opt/qqbot-defaults/qqbot-generation.mjs';
 const generationScopePolicy = '/opt/qqbot-defaults/qqbot-generation-scope.mjs';
 const modelContextPolicy = '/opt/qqbot-defaults/qqbot-model-context.mjs';
+const contextDiagnosticsPolicy = '/opt/qqbot-defaults/qqbot-context-diagnostics.mjs';
 const imageToolPolicyImport = `import { loadChatImageBytes } from '${policy}';`;
 const imageLoaderV3Marker = '// Chat-only scoped image loader v3.';
 const imageSchemaV3Marker = '// Chat-only image schema: scoped QQ media paths or public HTTPS image URLs v3.';
@@ -655,6 +656,19 @@ await patch('transport/inbound.js', '// Chat-only group model context v1.', (con
         '    } finally {\n        clearCurrentImages(chatOnlyAgent, documentTurn);',
         '    } finally {\n        endGroupModelContext(chatOnlyAgent, modelContextTurn);\n        clearCurrentImages(chatOnlyAgent, documentTurn);', file);
     return content;
+});
+
+await patch('transport/inbound.js', '// Chat-only context diagnostics v1.', (content, file) => {
+    const importLine = `import { logContextInbound, logContextBinding } from '${contextDiagnosticsPolicy}';`;
+    if (!content.includes(importLine)) content = `${importLine}\n${content}`;
+    content = replaceOne(content,
+        '    const agentBody = assembleAgentBody(msg, mwState, scope, logger);',
+        '    const agentBody = assembleAgentBody(msg, mwState, scope, logger);\n'
+        + '    // Chat-only context diagnostics v1.\n'
+        + '    logContextInbound(ctx, getMergedGenerationRequests(ctx), agentBody);', file);
+    const binding = '    modelContextTurn = beginGroupModelContext(chatOnlyAgent, scope, documentTurn);';
+    return replaceOne(content, binding,
+        `${binding}\n    // Chat-only context binding diagnostics v1.\n    logContextBinding(chatOnlyAgent, requestBody, agentBody);`, file);
 });
 
 await patch('transport/outbound.js', '// Chat-only content-risk turn recovery v1.', (content, file) => {
@@ -1639,6 +1653,22 @@ function assertOnce(source, marker, label) {
 }
 
 const finalInbound = await finalText('transport/inbound.js');
+const contextDiagnosticsImport = `import { logContextInbound, logContextBinding } from '${contextDiagnosticsPolicy}';`;
+assertOnce(finalInbound, contextDiagnosticsImport, 'context diagnostics import');
+assertOnce(finalInbound, '// Chat-only context diagnostics v1.', 'context diagnostics marker');
+assertOnce(finalInbound, 'logContextInbound(ctx, getMergedGenerationRequests(ctx), agentBody);', 'context diagnostics call');
+assertOnce(finalInbound, '// Chat-only context binding diagnostics v1.', 'context binding diagnostics marker');
+assertOnce(finalInbound, 'logContextBinding(chatOnlyAgent, requestBody, agentBody);', 'context binding diagnostics call');
+if (finalInbound.indexOf('logContextInbound(ctx, getMergedGenerationRequests(ctx), agentBody);')
+    < finalInbound.indexOf('const agentBody = assembleAgentBody(msg, mwState, scope, logger);')
+    || finalInbound.indexOf('logContextInbound(ctx, getMergedGenerationRequests(ctx), agentBody);')
+    > finalInbound.indexOf('if (!agentBody)')
+    || finalInbound.indexOf('logContextBinding(chatOnlyAgent, requestBody, agentBody);')
+    < finalInbound.indexOf('modelContextTurn = beginGroupModelContext(chatOnlyAgent, scope, documentTurn);')
+    || finalInbound.indexOf('logContextBinding(chatOnlyAgent, requestBody, agentBody);')
+    > finalInbound.indexOf('chatOnlyAgent.followup(message);')) {
+    throw new Error('Chat-only patch: context diagnostics must bracket the assembled and bound model input');
+}
 const modelContextImport = `import { beginGroupModelContext, endGroupModelContext } from '${modelContextPolicy}';`;
 assertOnce(finalInbound, modelContextImport, 'group model context import');
 assertOnce(finalInbound, '// Chat-only group model context v1.', 'group model context marker');

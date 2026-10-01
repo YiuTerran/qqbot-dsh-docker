@@ -61,6 +61,11 @@ async function assertCurrentPatch(root) {
             'await sendMergeQueueFullNotice(sender, droppedCtx);',
         ],
         'transport/inbound.js': [
+            "import { logContextInbound, logContextBinding } from '/opt/qqbot-defaults/qqbot-context-diagnostics.mjs';",
+            '// Chat-only context diagnostics v1.',
+            'logContextInbound(ctx, getMergedGenerationRequests(ctx), agentBody);',
+            '// Chat-only context binding diagnostics v1.',
+            'logContextBinding(chatOnlyAgent, requestBody, agentBody);',
             "import { beginGroupModelContext, endGroupModelContext } from '/opt/qqbot-defaults/qqbot-model-context.mjs';",
             '// Chat-only group model context v1.',
             'let modelContextTurn;',
