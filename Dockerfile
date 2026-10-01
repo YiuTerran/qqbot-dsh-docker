@@ -93,6 +93,10 @@ COPY defaults/qqbot-text-documents.mjs /opt/qqbot-defaults/qqbot-text-documents.
 COPY defaults/qqbot-documents.mjs /opt/qqbot-defaults/qqbot-documents.mjs
 COPY defaults/qqbot-dice.mjs /opt/qqbot-defaults/qqbot-dice.mjs
 COPY defaults/qqbot-concurrency.mjs /opt/qqbot-defaults/qqbot-concurrency.mjs
+COPY defaults/qqbot-generation.mjs /opt/qqbot-defaults/qqbot-generation.mjs
+COPY defaults/qqbot-generation-scope.mjs /opt/qqbot-defaults/qqbot-generation-scope.mjs
+COPY defaults/qqbot-generation-quotas.mjs /opt/qqbot-defaults/qqbot-generation-quotas.mjs
+COPY defaults/qqbot-generation-sender.mjs /opt/qqbot-defaults/qqbot-generation-sender.mjs
 
 RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh \
     && chown -R node:node /opt/dsh-seed /opt/qqbot-defaults

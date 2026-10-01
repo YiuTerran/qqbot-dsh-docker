@@ -8,6 +8,9 @@ dice_policy_test="${repo_root}/scripts/test-dice.mjs"
 recovery_policy_test="${repo_root}/scripts/test-session-recovery.mjs"
 provider_errors_test="${repo_root}/scripts/test-provider-errors.mjs"
 concurrency_test="${repo_root}/scripts/test-concurrency.mjs"
+generation_test="${repo_root}/scripts/test-generation.mjs"
+generation_scope_test="${repo_root}/scripts/test-generation-scope.mjs"
+generation_quota_test="${repo_root}/scripts/test-generation-quotas.mjs"
 recovery_upgrade_test="${repo_root}/scripts/test-recovery-upgrade.mjs"
 pre_recovery_fixture="${repo_root}/scripts/prepare-pre-recovery-fixture.mjs"
 pre_concurrency_fixture="${repo_root}/scripts/prepare-pre-concurrency-fixture.mjs"
@@ -88,6 +91,21 @@ fi
 
 if [[ ! -r "$concurrency_test" ]]; then
     echo "missing concurrency regression script: $concurrency_test" >&2
+    exit 66
+fi
+
+if [[ ! -r "$generation_test" ]]; then
+    echo "missing image generation and Markdown regression script: $generation_test" >&2
+    exit 66
+fi
+
+if [[ ! -r "$generation_scope_test" ]]; then
+    echo "missing image generation provenance regression script: $generation_scope_test" >&2
+    exit 66
+fi
+
+if [[ ! -r "$generation_quota_test" ]]; then
+    echo "missing generation quota regression script: $generation_quota_test" >&2
     exit 66
 fi
 
@@ -190,6 +208,24 @@ run_profile_probe \
     --env LLM_API_KEY=fixture-chat-key \
     --env LLM_SEARCH_MODEL=fixture-search-without-endpoint
 run_profile_probe \
+    "dedicated OpenAI image route defaults its protocol independently" \
+    "$official_data_volume" \
+    "https://api.deepseek.com/anthropic/v1" \
+    --env DEEPSEEK_API_KEY=fixture-official-key \
+    --env IMAGE_API_KEY=fixture-openai-image-key \
+    --env IMAGE_API_BASE_URL=https://image-gateway.example.com/v1 \
+    --env IMAGE_MODEL=fixture-image-model
+run_profile_probe \
+    "dedicated xAI image route stays independent and can disable Markdown export" \
+    "$official_data_volume" \
+    "https://api.deepseek.com/anthropic/v1" \
+    --env DEEPSEEK_API_KEY=fixture-official-key \
+    --env IMAGE_API_KEY=fixture-image-key \
+    --env IMAGE_API_BASE_URL=https://image-gateway.example.com/v1 \
+    --env IMAGE_MODEL=fixture-image-model \
+    --env IMAGE_API_PROTOCOL=xai-images \
+    --env QQBOT_MARKDOWN_ENABLED=false
+run_profile_probe \
     "official route after third-party config persists in same volume" \
     "$search_env_data_volume" \
     "https://api.deepseek.com/anthropic/v1" \
@@ -223,6 +259,34 @@ if docker run --rm --network none --volume "${official_data_volume}:/data" \
     exit 1
 fi
 grep -Fq "LLM_SEARCH_BASE_URL must not contain credentials" "$incompatible_log"
+if docker run --rm --network none --volume "${official_data_volume}:/data" \
+    --env QQBOT_APPID=fixture-app-id --env QQBOT_SECRET=fixture-app-secret \
+    --env IMAGE_API_KEY=fixture-image-key \
+    "$IMAGE" sh -c true >"$incompatible_log" 2>&1; then
+    echo "entrypoint unexpectedly accepted a partial image API route" >&2
+    exit 1
+fi
+grep -Fq "IMAGE_API_KEY, IMAGE_API_BASE_URL, and IMAGE_MODEL must be set together" "$incompatible_log"
+if docker run --rm --network none --volume "${official_data_volume}:/data" \
+    --env QQBOT_APPID=fixture-app-id --env QQBOT_SECRET=fixture-app-secret \
+    --env IMAGE_API_KEY=fixture-image-key \
+    --env IMAGE_API_BASE_URL=https://image-gateway.example.com/v1 \
+    --env IMAGE_MODEL=fixture-image-model --env IMAGE_API_PROTOCOL=unsupported-images \
+    "$IMAGE" sh -c true >"$incompatible_log" 2>&1; then
+    echo "entrypoint unexpectedly accepted an unsupported image protocol" >&2
+    exit 1
+fi
+grep -Fq "IMAGE_API_PROTOCOL must be openai-images or xai-images" "$incompatible_log"
+if docker run --rm --network none --volume "${official_data_volume}:/data" \
+    --env QQBOT_APPID=fixture-app-id --env QQBOT_SECRET=fixture-app-secret \
+    --env IMAGE_API_KEY=fixture-image-key \
+    --env IMAGE_API_BASE_URL=http://image-gateway.example.com/v1 \
+    --env IMAGE_MODEL=fixture-image-model \
+    "$IMAGE" sh -c true >"$incompatible_log" 2>&1; then
+    echo "entrypoint unexpectedly accepted a non-HTTPS image API base URL" >&2
+    exit 1
+fi
+grep -Fq "IMAGE_API_BASE_URL must be a public HTTPS base URL" "$incompatible_log"
 
 log "Checking entrypoint refuses conflicting persistent media paths"
 docker run --rm --network none \
@@ -281,6 +345,9 @@ docker create \
     --mount "type=bind,src=${recovery_policy_test},dst=/tmp/test-session-recovery.mjs,readonly" \
     --mount "type=bind,src=${provider_errors_test},dst=/tmp/test-provider-errors.mjs,readonly" \
     --mount "type=bind,src=${concurrency_test},dst=/tmp/test-concurrency.mjs,readonly" \
+    --mount "type=bind,src=${generation_test},dst=/tmp/test-generation.mjs,readonly" \
+    --mount "type=bind,src=${generation_scope_test},dst=/tmp/test-generation-scope.mjs,readonly" \
+    --mount "type=bind,src=${generation_quota_test},dst=/tmp/test-generation-quotas.mjs,readonly" \
     --mount "type=bind,src=${recovery_upgrade_test},dst=/tmp/test-recovery-upgrade.mjs,readonly" \
     --mount "type=bind,src=${pre_recovery_fixture},dst=/tmp/prepare-pre-recovery-fixture.mjs,readonly" \
     --mount "type=bind,src=${pre_concurrency_fixture},dst=/tmp/prepare-pre-concurrency-fixture.mjs,readonly" \
@@ -326,6 +393,10 @@ docker create \
         node --check /opt/qqbot-defaults/qqbot-provider-errors.mjs
         node --check /opt/qqbot-defaults/qqbot-concurrency.mjs
         node --check /opt/qqbot-defaults/qqbot-dice.mjs
+        node --check /opt/qqbot-defaults/qqbot-generation.mjs
+        node --check /opt/qqbot-defaults/qqbot-generation-sender.mjs
+        node --check /opt/qqbot-defaults/qqbot-generation-scope.mjs
+        node --check /opt/qqbot-defaults/qqbot-generation-quotas.mjs
         node --check /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/transport/inbound.js
         node --check /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/transport/outbound.js
         node --check /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/model/prefs-store.js
@@ -353,6 +424,9 @@ docker create \
         QQBOT_RECOVERY_MODULE=/opt/qqbot-defaults/qqbot-session-recovery.mjs QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-session-recovery.mjs
         QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-provider-errors.mjs
         QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-concurrency.mjs
+        QQBOT_GENERATION_MODULE=/opt/qqbot-defaults/qqbot-generation.mjs QQBOT_GENERATION_SCOPE_MODULE=/opt/qqbot-defaults/qqbot-generation-scope.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test --test-timeout=30000 /tmp/test-generation.mjs
+        QQBOT_GENERATION_SCOPE_MODULE=/opt/qqbot-defaults/qqbot-generation-scope.mjs node --test /tmp/test-generation-scope.mjs
+        QQBOT_GENERATION_QUOTA_MODULE=/opt/qqbot-defaults/qqbot-generation-quotas.mjs node --test /tmp/test-generation-quotas.mjs
         QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist QQBOT_ENFORCER_SCRIPT=/usr/local/lib/enforce-chat-only.mjs node --test /tmp/test-recovery-upgrade.mjs
         node /tmp/test-profile-boot.mjs
     '

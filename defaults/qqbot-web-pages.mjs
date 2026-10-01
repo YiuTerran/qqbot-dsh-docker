@@ -112,6 +112,18 @@ export class PublicHttpProvider extends HttpFetchProvider {
     }
 }
 
+/** Resolve once through the same public-address validator used by page reads. */
+export async function resolvePublicHttpAddresses(hostname, signal) {
+    const provider = new PublicHttpProvider({
+        timeoutMs: 120000,
+        maxResponseBytes: 1,
+        maxBodyChars: 1,
+        maxRedirects: 0,
+        userAgent: 'qqbot-dsh (bounded image transport)',
+    });
+    return provider.resolveAddresses(hostname, signal);
+}
+
 // Reuse dsh's public-IP validation, DNS connection pinning, bounded reads,
 // cancellation, and same-origin redirect policy; add a webpage-only boundary.
 export class WebPageProvider extends PublicHttpProvider {

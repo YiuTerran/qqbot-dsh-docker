@@ -12,6 +12,7 @@ const {
     closeMergeBatch,
     createMergeConcurrencyGuard,
     formatQueueFullNotice,
+    getMergedGenerationRequests,
     noteMergeBatchTurnStart,
     sendMergeQueueFullNotice,
     sendMergeThinkingNotice,
@@ -51,12 +52,12 @@ function message(id, content, { scope = 'group', targetId = 'group-a', senderId 
     };
 }
 
-function context(msg) {
+function context(msg, state = {}) {
     const controller = new AbortController();
     const stopped = [];
     return {
         message: msg,
-        state: {},
+        state,
         signal: controller.signal,
         abort(reason) { controller.abort(reason); },
         stop(reason) { stopped.push(reason); },
@@ -149,6 +150,56 @@ test('different group keys continue processing independently', async () => {
     gateA.resolve();
     gateB.resolve();
     await Promise.all([runA, runB]);
+});
+
+test('merge guard snapshots every original sender, target, current attachment, and quote before defaultMerge mutates the survivor', async () => {
+    const firstGate = deferred();
+    const merged = [];
+    const guard = createMergeConcurrencyGuard({ maxQueue: 4, maxProcessingMs: 0 });
+    const downstream = async (ctx) => {
+        if (ctx.message.messageId === 'generation-first') {
+            await firstGate.promise;
+            return;
+        }
+        merged.push({ ctx, requests: getMergedGenerationRequests(ctx) });
+    };
+
+    const firstCtx = context(message('generation-first', 'First', {
+        targetId: 'group-generation', senderId: 'user-first',
+    }));
+    const first = submit(guard, firstCtx, downstream);
+    await waitFor(() => getMergedGenerationRequests(firstCtx).length > 0, 'first generation provenance');
+
+    const quoteB = { url: 'https://cdn.example.test/quote-b.png', filename: 'same.png', content_type: 'image/png' };
+    const quoteC = { url: 'https://cdn.example.test/quote-c.png', filename: 'same.png', content_type: 'image/png' };
+    const currentB = { url: 'https://cdn.example.test/current-b.png', filename: 'b.png', content_type: 'image/png' };
+    const currentC = { url: 'https://cdn.example.test/current-c.png', filename: 'c.png', content_type: 'image/png' };
+    const ctxB = context(message('generation-b', 'B', {
+        targetId: 'group-generation', senderId: 'user-b', attachments: [currentB],
+    }), { quote: { attachments: [quoteB] } });
+    const ctxC = context(message('generation-c', 'C', {
+        targetId: 'group-generation', senderId: 'user-c', attachments: [currentC],
+    }), { quote: { attachments: [quoteC] } });
+    const runB = submit(guard, ctxB, downstream);
+    const runC = submit(guard, ctxC, downstream);
+    firstGate.resolve();
+    await waitFor(() => merged.length === 1, 'the queued generation requests to merge');
+    await Promise.all([first, runB, runC]);
+
+    assert.equal(ctxB.message.content, 'B\nC');
+    assert.deepEqual(ctxB.message.attachments, [currentB, currentC], 'the ordinary merged adapter view remains unchanged');
+    const requests = merged[0].requests;
+    assert.equal(requests.length, 2);
+    assert.deepEqual(requests.map((request) => request.ownerId), ['user-b', 'user-c']);
+    assert.deepEqual(requests.map((request) => request.replyTarget.msgId), ['generation-b', 'generation-c']);
+    assert.deepEqual(requests.map((request) => request.currentAttachments.map((attachment) => attachment.url)), [
+        [currentB.url], [currentC.url],
+    ]);
+    assert.deepEqual(requests.map((request) => request.quotedAttachments.map((attachment) => attachment.url)), [
+        [quoteB.url], [quoteC.url],
+    ]);
+    assert.deepEqual(ctxB.state.qqbotGenerationQuoteAttachments.map((attachment) => attachment.url), [quoteB.url, quoteC.url]);
+    assert.ok(Object.isFrozen(requests) && requests.every((request) => Object.isFrozen(request)));
 });
 
 test('onStart receives only idle group owners; private and pre-aborted contexts skip it', async () => {

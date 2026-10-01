@@ -11,6 +11,8 @@ const documentScopePolicy = '/opt/qqbot-defaults/qqbot-document-scope.mjs';
 const sessionRecoveryPolicy = '/opt/qqbot-defaults/qqbot-session-recovery.mjs';
 const providerErrorsPolicy = '/opt/qqbot-defaults/qqbot-provider-errors.mjs';
 const concurrencyPolicy = '/opt/qqbot-defaults/qqbot-concurrency.mjs';
+const generationPolicy = '/opt/qqbot-defaults/qqbot-generation.mjs';
+const generationScopePolicy = '/opt/qqbot-defaults/qqbot-generation-scope.mjs';
 const imageToolPolicyImport = `import { loadChatImageBytes } from '${policy}';`;
 const imageLoaderV3Marker = '// Chat-only scoped image loader v3.';
 const imageSchemaV3Marker = '// Chat-only image schema: scoped QQ media paths or public HTTPS image URLs v3.';
@@ -37,6 +39,34 @@ await patch('gateway/bootstrap.js', `import { installChatPolicy } from '${policy
         'export async function bootstrapGateway(ctx, agents, config, logger) {\n    installChatPolicy(ctx);', file);
     return replaceOne(content, '    registerSendFileTool(ctx, mediaSender, manager, config, logger);',
         '    // Chat-only deployment: file sending is not registered.', file);
+});
+
+await patch('gateway/bootstrap.js', '// Chat-only generation tools v1.', (content, file) => {
+    const protocolImport = "import { MediaApi, MessageApi } from '@tencent-connect/qqbot-nodejs/protocol';";
+    const generationImport = "import { createGenerationSender, registerGenerationTools } from '" + generationPolicy + "';";
+    if (!content.includes(protocolImport)) content = protocolImport + '\n' + content;
+    if (!content.includes(generationImport)) content = generationImport + '\n' + content;
+    const oldRegistration = '    // Chat-only deployment: file sending is not registered.';
+    const registration = [
+        '    // Chat-only deployment: file sending is not registered.',
+        '    // Chat-only generation tools v1.',
+        '    registerGenerationTools(ctx, {',
+        '        sender: createGenerationSender({',
+        '            bot,',
+        '            replyLimiter,',
+        '            sdk: { MediaApi, MessageApi },',
+        '            credentials: { appId: config.appId, clientSecret: config.appSecret },',
+        '            sendResolvedMarkdown,',
+        '            logger,',
+        '        }),',
+        '        appId: config.appId,',
+        '        logger,',
+        '    });',
+    ].join('\n');
+    if (content.includes(oldRegistration)) content = replaceOne(content, oldRegistration, registration, file);
+    else if (!content.includes('// Chat-only generation tools v1.'))
+        throw new Error('Chat-only patch: expected dedicated generation registration point in ' + file);
+    return content;
 });
 
 await patch('gateway/bootstrap.js', '// Chat-only merge batch reply adapter v1.', (content, file) => {
@@ -142,6 +172,31 @@ await patch('gateway/middleware-setup.js', `import {createScopedQuoteRef} from '
     ].join('\n'), file);
 });
 
+await patch('gateway/middleware-setup.js', '// Chat-only generation quote capture v1.', (content, file) => {
+    const quoteBlock = [
+        '    // Chat-only scoped quote references prevent cross-peer message-key collisions.',
+        '    bot.use(createScopedQuoteRef(quoteRef));',
+    ].join('\n');
+    const marker = '// Chat-only generation quote capture v1.';
+    if (content.includes(marker)) return content;
+    if (content.split(quoteBlock).length !== 2) {
+        throw new Error('Chat-only patch: scoped quote middleware is missing or duplicated in ' + file);
+    }
+    const guardMarker = '    // Chat-only serialized merge guard v1.';
+    const answerCall = '    bot.use(questionAnswer(manager));';
+    const guardPosition = content.indexOf(guardMarker);
+    const answerPosition = content.indexOf(answerCall);
+    if (answerPosition < 0 || guardPosition <= answerPosition) {
+        throw new Error('Chat-only patch: quote capture cannot be ordered after question answering and before merge guard in ' + file);
+    }
+    content = replaceOne(content, quoteBlock, '', file);
+    const nextGuardPosition = content.indexOf(guardMarker);
+    return content.slice(0, nextGuardPosition)
+        + '    // Chat-only generation quote capture v1.\n'
+        + quoteBlock + '\n'
+        + content.slice(nextGuardPosition);
+});
+
 await patch('gateway/middleware-setup.js', '// Chat-only dice command middleware v1.', (content, file) => {
     const diceImport = `import { createDiceCommandMiddleware, createDiceAwareHistoryBuffer } from '${policy}';`;
     if (!content.includes(diceImport)) content = `${diceImport}\n${content}`;
@@ -237,6 +292,8 @@ const canonicalMergeGuard = [
 ].join('\n');
 const mergeGuardEndPosition = patchedMiddlewareSetup.indexOf(canonicalMergeGuard) + canonicalMergeGuard.length;
 const answerPosition = patchedMiddlewareSetup.indexOf('bot.use(questionAnswer(manager));');
+const generationQuotePosition = patchedMiddlewareSetup.indexOf('// Chat-only generation quote capture v1.');
+const scopedQuoteCallPosition = patchedMiddlewareSetup.indexOf('bot.use(createScopedQuoteRef(quoteRef));');
 const typingPosition = patchedMiddlewareSetup.indexOf('bot.use(typingIndicator());');
 if (patchedMiddlewareSetup.split(mergeGuardImport).length !== 2
     || patchedMiddlewareSetup.split(oldMergeGuardImport).length !== 1
@@ -250,12 +307,17 @@ if (patchedMiddlewareSetup.split(mergeGuardImport).length !== 2
     || !patchedMiddlewareSetup.includes('await sendMergeQueueFullNotice(sender, droppedCtx);')
     || accessPosition < 0 || mentionPosition <= accessPosition || rateLimitPosition <= mentionPosition
     || diceCommandPosition <= rateLimitPosition || slashPosition <= diceCommandPosition
-    || answerPosition <= slashPosition || mergeGuardPosition <= answerPosition
+    || answerPosition <= slashPosition || generationQuotePosition <= answerPosition
+    || scopedQuoteCallPosition <= generationQuotePosition || mergeGuardPosition <= scopedQuoteCallPosition
     || thinkingNoticePosition <= mergeGuardPosition || onStartPosition <= thinkingNoticePosition
     || thinkingSendPosition <= onStartPosition || onDropPosition <= thinkingSendPosition
     || attachmentPosition <= mergeGuardEndPosition || typingPosition <= mergeGuardEndPosition
     || !patchedMiddlewareSetup.includes('setupMiddlewares(bot, config, manager, logger, sender)')) {
     throw new Error('Chat-only patch: serialized merge middleware, overflow notice, or ordering is incomplete');
+}
+if (patchedMiddlewareSetup.split('// Chat-only generation quote capture v1.').length !== 2
+    || patchedMiddlewareSetup.split('bot.use(createScopedQuoteRef(quoteRef));').length !== 2) {
+    throw new Error('Chat-only patch: generation quote provenance is missing or duplicated');
 }
 
 await patch('index.js', "export const inject = ['agents', 'tools', 'web', 'systemPrompt'];", (content, file) => {
@@ -455,6 +517,58 @@ await patch('transport/inbound.js', '// Chat-only content-risk recovery context 
     return content;
 });
 
+await patch('transport/inbound.js', '// Chat-only generation provenance v1.', (content, file) => {
+    const generationImport = "import { beginGenerationTurn, endGenerationTurn, renderGenerationRequestMetadata } from '" + generationScopePolicy + "';";
+    const requestsImport = "import { getMergedGenerationRequests, enqueueMergeBatchSend } from '" + concurrencyPolicy + "';";
+    if (!content.includes(generationImport)) content = generationImport + '\n' + content;
+    if (!content.includes(requestsImport)) content = requestsImport + '\n' + content;
+
+    const marker = '// Chat-only generation provenance v1.';
+    const oldDeclaration = '    let documentTurn;';
+    if (content.includes(oldDeclaration)) content = replaceOne(content, oldDeclaration, '    let documentTurn;\n    let generationTurn;', file);
+    else if (!content.includes('    let generationTurn;')) throw new Error('Chat-only patch: missing document scope declaration in ' + file);
+
+    const oldTurnBinding = '        documentTurn = getDocumentTurn(chatOnlyAgent);';
+    const generationBinding = [
+        oldTurnBinding,
+        '        ' + marker,
+        '        generationTurn = beginGenerationTurn(',
+        '            chatOnlyAgent,',
+        '            getMergedGenerationRequests(ctx),',
+        '            [...(mwState.downloadedFiles ?? []), ...(mwState.downloadedQuoteFiles ?? []), ...(mwState.downloadedGenerationQuoteFiles ?? [])],',
+        '            {',
+        '                documentScope: documentTurn,',
+        '                signal: ctx.signal,',
+        '                isCurrentRecord,',
+        '                record,',
+        '                enqueueSend: (operation) => enqueueMergeBatchSend(record, operation),',
+        '            },',
+        '        );',
+        '        const generationMetadata = renderGenerationRequestMetadata(generationTurn);',
+    ].join('\n');
+    if (content.includes(oldTurnBinding) && !content.includes(marker)) {
+        content = replaceOne(content, oldTurnBinding, generationBinding, file);
+    }
+    else if (!content.includes(marker) || !content.includes('renderGenerationRequestMetadata(generationTurn)')) {
+        throw new Error('Chat-only patch: generation provenance scope is incomplete in ' + file);
+    }
+
+    const oldBodyEnd = '            : agentBody;';
+    const requestBodyLine = "        const requestBody = [documentBody, generationMetadata].filter(Boolean).join('\\n\\n');";
+    if (content.includes(oldBodyEnd) && !content.includes(requestBodyLine)) {
+        content = replaceOne(content, oldBodyEnd, oldBodyEnd + '\n' + requestBodyLine, file);
+    }
+    else if (!content.includes(requestBodyLine)) throw new Error('Chat-only patch: inbound body composition is incomplete in ' + file);
+    content = replaceOne(content, "const content = [{ type: 'text', text: documentBody }];",
+        "const content = [{ type: 'text', text: requestBody }];", file);
+
+    const oldImages = '        setCurrentImages(chatOnlyAgent, [...(mwState.downloadedFiles ?? []), ...(mwState.downloadedQuoteFiles ?? [])], documentTurn);';
+    const generationImages = '        setCurrentImages(chatOnlyAgent, [...(mwState.downloadedFiles ?? []), ...(mwState.downloadedQuoteFiles ?? []), ...(mwState.downloadedGenerationQuoteFiles ?? [])], documentTurn);';
+    if (content.includes(oldImages)) content = replaceOne(content, oldImages, generationImages, file);
+    else if (!content.includes(generationImages)) throw new Error('Chat-only patch: generation images are not in the local image grant set in ' + file);
+    return content;
+});
+
 await patch('transport/inbound.js', '// Chat-only safe batch finalization v1.', (content, file) => {
     const clearAndEnd = [
         '        clearCurrentImages(chatOnlyAgent, documentTurn);',
@@ -483,6 +597,28 @@ await patch('transport/inbound.js', '// Chat-only safe batch finalization v1.', 
     else if (content.includes(oldVolume)) content = replaceOne(content, oldVolume, safeFinalizer, file);
     else if (!content.includes('// Chat-only safe batch finalization v1.')) {
         throw new Error(`Chat-only patch: expected current/old inbound batch cleanup order in ${file}`);
+    }
+    return content;
+});
+
+await patch('transport/inbound.js', '// Chat-only generation cleanup v1.', (content, file) => {
+    const marker = '// Chat-only generation cleanup v1.';
+    const finish = '                if (documentTurn) await finishContentRiskRecovery(documentTurn);';
+    const cleanup = [
+        '                ' + marker,
+        '                if (generationTurn) await endGenerationTurn(chatOnlyAgent, generationTurn);',
+        finish,
+    ].join('\n');
+    if (content.includes(finish) && !content.includes(marker)) content = replaceOne(content, finish, cleanup, file);
+    else if (!content.includes(marker) || !content.includes('await endGenerationTurn(chatOnlyAgent, generationTurn);'))
+        throw new Error('Chat-only patch: generation scope drain is missing from inbound cleanup in ' + file);
+    const endDocumentPosition = content.indexOf('if (documentTurn) endDocumentTurn(chatOnlyAgent, documentTurn);');
+    const generationPosition = content.indexOf('await endGenerationTurn(chatOnlyAgent, generationTurn);');
+    const finishPosition = content.indexOf(finish);
+    const closePosition = content.indexOf('await closeMergeBatch(replyBatch);');
+    if (endDocumentPosition < 0 || generationPosition <= endDocumentPosition
+        || finishPosition <= generationPosition || closePosition <= finishPosition) {
+        throw new Error('Chat-only patch: generation scope is not revoked/drained before batch handoff in ' + file);
     }
     return content;
 });
@@ -707,6 +843,42 @@ await patch('transport/outbound.js', '// Chat-only batch-bound outbound routing 
     content = replaceOne(content,
         "                void this.send(record, formatProviderFailure(failure), 'sendTurnEndError');",
         "                trackMergeBatchSend(originRecord, this.send(record, formatProviderFailure(failure), 'sendTurnEndError'));", file);
+    return content;
+});
+
+await patch('transport/outbound.js', '// Chat-only generation outbound v1.', (content, file) => {
+    const oldImport = `import { captureMergeBatchReply, noteMergeBatchTurnStart, trackMergeBatchSend } from '${concurrencyPolicy}';`;
+    const newImport = `import { captureMergeBatchReply, enqueueMergeBatchSend, noteMergeBatchTurnStart } from '${concurrencyPolicy}';`;
+    if (content.includes(oldImport)) content = replaceOne(content, oldImport, newImport, file);
+    else if (!content.includes(newImport)) throw new Error('Chat-only patch: missing merge outbound executor import in ' + file);
+
+    const flush = 'trackMergeBatchSend(originRecord, buffer.flush());';
+    if (content.includes(flush)) content = content.split(flush).join('enqueueMergeBatchSend(originRecord, () => buffer.flush());');
+    const cancel = 'trackMergeBatchSend(originRecord, buffer.cancel());';
+    if (content.includes(cancel)) content = replaceOne(content, cancel, 'enqueueMergeBatchSend(originRecord, () => buffer.cancel());', file);
+    const sends = [
+        ["trackMergeBatchSend(originRecord, this.send(record, fullText, 'sendMarkdown'));", "enqueueMergeBatchSend(originRecord, () => this.send(record, fullText, 'sendMarkdown'));"],
+        ["trackMergeBatchSend(originRecord, this.send(record, formatToolFailure(), 'sendToolResultError'));", "enqueueMergeBatchSend(originRecord, () => this.send(record, formatToolFailure(), 'sendToolResultError'));"],
+        ["trackMergeBatchSend(originRecord, this.send(record, text, 'sendToolResult'));", "enqueueMergeBatchSend(originRecord, () => this.send(record, text, 'sendToolResult'));"],
+        ["trackMergeBatchSend(originRecord, this.send(record, formatProviderFailure(failure), 'sendTurnEndError'));", "enqueueMergeBatchSend(originRecord, () => this.send(record, formatProviderFailure(failure), 'sendTurnEndError'));"],
+        ["trackMergeBatchSend(originRecord, this.send({ ...record, replyTarget: replyTarget ?? record.replyTarget }, text, 'sendContentRiskRecovery'))", "enqueueMergeBatchSend(originRecord, () => this.send({ ...record, replyTarget: replyTarget ?? record.replyTarget }, text, 'sendContentRiskRecovery'))"],
+    ];
+    for (const [before, after] of sends) {
+        if (content.includes(before)) content = replaceOne(content, before, after, file);
+    }
+    const resultGate = [
+        '        if (!this.config.showToolResults)',
+        '            return;',
+    ].join('\n');
+    const generationGate = [
+        '        // Chat-only generation outbound v1.',
+        "        if (call.name === 'qqbot_generate_image' || call.name === 'qqbot_create_markdown') return;",
+        '        if (!this.config.showToolResults)',
+        '            return;',
+    ].join('\n');
+    if (content.includes(resultGate)) content = replaceOne(content, resultGate, generationGate, file);
+    else if (!content.includes('// Chat-only generation outbound v1.'))
+        throw new Error('Chat-only patch: tool-result suppression point is missing in ' + file);
     return content;
 });
 
@@ -1087,7 +1259,7 @@ await patch('transport/inbound.js', '// Chat-only explicit-quote text trigger v1
         '    if (isEmptyMessage(userContent, msg.attachments, isGroup, wasMentioned))',
         '    // Chat-only explicit-quote text trigger v1.\n    if (isEmptyMessage(userContent, [...(msg.attachments ?? []), ...(state.quote?.attachments ?? [])], isGroup, wasMentioned))', file));
 
-await patch('transport/attachment.js', '// Chat-only current-image downloads v2.', (content, file) => {
+await patch('transport/attachment.js', '// Chat-only generation attachment provenance v1.', (content, file) => {
     const helperImport = `import { downloadCurrentQQImage } from '${webPagesPolicy}';`;
     if (content.includes(helperImport)) {
         if (content.split(helperImport).length !== 2) {
@@ -1150,10 +1322,17 @@ await patch('transport/attachment.js', '// Chat-only current-image downloads v2.
     if (content.includes(resolverCall)) {
         content = replaceOne(content, resolverCall, '', file);
     }
+    const oldMetadata = '        results.push({ filename: att.filename, contentType, localPath });';
+    const markedMetadata = '        // Chat-only generation attachment provenance v1.\n        results.push({ filename: att.filename, contentType, localPath, sourceUrl: normalizeUrl(att.url) });';
+    if (content.includes(oldMetadata)) content = replaceOne(content, oldMetadata, markedMetadata, file);
+    else if (!content.includes('// Chat-only generation attachment provenance v1.')
+        || !content.includes('sourceUrl: normalizeUrl(att.url)')) {
+        throw new Error('Chat-only patch: attachment provenance result is missing in ' + file);
+    }
     return content;
 });
 
-await patch('middleware/attachment.js', '// Chat-only quoted-image downloads v2.', (content, file) => {
+await patch('middleware/attachment.js', '// Chat-only generation quote image downloads v1.', (content, file) => {
     const quoteDownloadBlock = [
         '            // 引用消息附件：转成 RawAttachment 结构复用下载（voice 由 downloadMediaAttachments 自动跳过）',
         '            const quoteAttachments = ctx.state.quote?.attachments;',
@@ -1178,12 +1357,36 @@ await patch('middleware/attachment.js', '// Chat-only quoted-image downloads v2.
         '            ctx.state.downloadedQuoteFiles = [];',
     ].join('\n');
     if (content.includes(legacyRestrictedBlock)) {
-        return replaceOne(content, legacyRestrictedBlock, replacement, file);
+        content = replaceOne(content, legacyRestrictedBlock, replacement, file);
     }
-    if (content.includes(quoteDownloadBlock)) {
-        return replaceOne(content, quoteDownloadBlock, replacement, file);
+    else if (content.includes(quoteDownloadBlock)) {
+        if (!content.includes(marker)) content = replaceOne(content, quoteDownloadBlock, replacement, file);
     }
-    throw new Error(`Chat-only patch: expected one matching location in ${file}`);
+    else if (!content.includes(marker)) {
+        throw new Error(`Chat-only patch: expected one matching location in ${file}`);
+    }
+    const oldQuoteAssignment = '                ctx.state.downloadedQuoteFiles = downloadedQuote;';
+    const generationQuoteDownloads = [
+        oldQuoteAssignment,
+        '                // Chat-only generation quote image downloads v1.',
+        '                const generationQuoteAttachments = ctx.state.qqbotGenerationQuoteAttachments ?? [];',
+        "                const generationImageQuotes = generationQuoteAttachments.filter((a) => a.url && ['image/png', 'image/jpeg', 'image', 'application/octet-stream', ''].includes((a.content_type ?? a.contentType ?? '').toLowerCase()));",
+        '                const rawGenerationQuote = generationImageQuotes.map((a) => ({',
+        "                    content_type: a.content_type ?? a.contentType ?? '',",
+        "                    filename: a.filename ?? '',",
+        '                    size: a.size ?? 0,',
+        '                    url: a.url,',
+        '                }));',
+        '                ctx.state.downloadedGenerationQuoteFiles = rawGenerationQuote.length > 0',
+        '                    ? await downloadMediaAttachments(rawGenerationQuote, config.media, logger)',
+        '                    : [];',
+    ].join('\n');
+    if (content.includes(oldQuoteAssignment)) content = replaceOne(content, oldQuoteAssignment, generationQuoteDownloads, file);
+    else if (!content.includes('// Chat-only generation quote image downloads v1.')
+        || !content.includes('ctx.state.downloadedGenerationQuoteFiles = rawGenerationQuote.length > 0')) {
+        throw new Error('Chat-only patch: generation quote image download path is missing in ' + file);
+    }
+    return content;
 });
 
 await patch('media/vision-tool.js', '        timeoutMs: vision.timeoutMs,', (content, file) =>
@@ -1393,6 +1596,8 @@ if (historyGuardPosition > finalInbound.indexOf('const agentBody = assembleAgent
     || inboundDocumentEndPosition <= inboundImageClearPosition
     || inboundRecoveryFinishPosition <= inboundDocumentEndPosition
     || inboundRecoveryFinishPosition >= finalInbound.indexOf('await closeMergeBatch(replyBatch);')
+    || finalInbound.indexOf('await endGenerationTurn(chatOnlyAgent, generationTurn);') <= inboundDocumentEndPosition
+    || finalInbound.indexOf('await endGenerationTurn(chatOnlyAgent, generationTurn);') >= inboundRecoveryFinishPosition
     || finalInbound.indexOf(recoveryInboundRegistration) < finalInbound.indexOf('documentTurn = getDocumentTurn(chatOnlyAgent);')
     || finalInbound.indexOf(recoveryInboundRegistration) > finalInbound.indexOf('chatOnlyAgent.followup(message);')
     ) {
@@ -1407,14 +1612,26 @@ if (finalBootstrap.indexOf('// Chat-only merge batch reply adapter v1.') > final
 }
 
 const finalOutbound = await finalText('transport/outbound.js');
-const mergeOutboundImport = `import { captureMergeBatchReply, noteMergeBatchTurnStart, trackMergeBatchSend } from '${concurrencyPolicy}';`;
-assertOnce(finalOutbound, mergeOutboundImport, 'outbound merge target import');
+const mergeOutboundImports = [
+    `import { captureMergeBatchReply, noteMergeBatchTurnStart, trackMergeBatchSend } from '${concurrencyPolicy}';`,
+    `import { captureMergeBatchReply, enqueueMergeBatchSend, noteMergeBatchTurnStart } from '${concurrencyPolicy}';`,
+];
+if (!mergeOutboundImports.some((value) => finalOutbound.split(value).length === 2))
+    throw new Error('Chat-only patch: outbound merge target import is missing or duplicated');
 assertOnce(finalOutbound, '// Chat-only batch-bound outbound routing v1.', 'outbound merge routing marker');
 assertOnce(finalOutbound, 'captureMergeBatchReply(record, { sessionId, turnId: raw?.data?.turn, seq: raw?.seq })', 'outbound native event binding');
-if (finalOutbound.split('trackMergeBatchSend(originRecord, buffer.flush());').length !== 3) {
+const outboundFlushTracking = [
+    'trackMergeBatchSend(originRecord, buffer.flush());',
+    'enqueueMergeBatchSend(originRecord, () => buffer.flush());',
+];
+if (!outboundFlushTracking.some((value) => finalOutbound.split(value).length === 3))
     throw new Error('Chat-only patch: both message and turn flushes must be tracked exactly once');
-}
-assertOnce(finalOutbound, 'trackMergeBatchSend(originRecord, this.send(record, fullText, \'sendMarkdown\'));', 'outbound text send tracking');
+const outboundTextTracking = [
+    "trackMergeBatchSend(originRecord, this.send(record, fullText, 'sendMarkdown'));",
+    "enqueueMergeBatchSend(originRecord, () => this.send(record, fullText, 'sendMarkdown'));",
+];
+if (!outboundTextTracking.some((value) => finalOutbound.split(value).length === 2))
+    throw new Error('Chat-only patch: outbound text send tracking is missing or duplicated');
 const finalEvents = await finalText('transport/events.js');
 assertOnce(finalEvents, '// Chat-only structured provider failures v1.', 'structured provider failure marker');
 assertOnce(finalEvents, 'status: detail?.status ?? reason.status,', 'provider status extraction');
@@ -1425,8 +1642,18 @@ assertOnce(finalOutbound, friendlyOutboundImport, 'friendly errors import');
 assertOnce(finalOutbound, '// Chat-only friendly provider errors v1.', 'friendly errors marker');
 assertOnce(finalOutbound, 'this.onToolResult(replyRecord, event, raw, record);', 'raw tool result binding');
 assertOnce(finalOutbound, 'onToolResult(record, event, raw, originRecord = record) {', 'safe tool result handler');
-assertOnce(finalOutbound, "trackMergeBatchSend(originRecord, this.send(record, formatToolFailure(), 'sendToolResultError'));", 'safe tool failure notice');
-assertOnce(finalOutbound, "trackMergeBatchSend(originRecord, this.send(record, formatProviderFailure(failure), 'sendTurnEndError'));", 'safe turn failure notice');
+const toolFailureTracking = [
+    "trackMergeBatchSend(originRecord, this.send(record, formatToolFailure(), 'sendToolResultError'));",
+    "enqueueMergeBatchSend(originRecord, () => this.send(record, formatToolFailure(), 'sendToolResultError'));",
+];
+if (!toolFailureTracking.some((value) => finalOutbound.split(value).length === 2))
+    throw new Error('Chat-only patch: safe tool failure notice is missing or duplicated');
+const turnFailureTracking = [
+    "trackMergeBatchSend(originRecord, this.send(record, formatProviderFailure(failure), 'sendTurnEndError'));",
+    "enqueueMergeBatchSend(originRecord, () => this.send(record, formatProviderFailure(failure), 'sendTurnEndError'));",
+];
+if (!turnFailureTracking.some((value) => finalOutbound.split(value).length === 2))
+    throw new Error('Chat-only patch: safe turn failure notice is missing or duplicated');
 assertOnce(finalOutbound, "block?.type === 'tool-result' && block.isError === true", 'block-only tool failure check');
 assertOnce(finalOutbound, 'this.logger.error(`im-qqbot: ${tag} failed to send reply`);', 'safe QQ send error log');
 if (finalOutbound.includes('${failure.code}') || finalOutbound.includes('${failure.message}')

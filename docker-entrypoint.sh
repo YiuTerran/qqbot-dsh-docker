@@ -21,6 +21,83 @@ if [ -n "$deepseek_api_key" ] && [ -n "$llm_api_key" ]; then
     exit 64
 fi
 
+# Image generation has its own credential and route. It is never inferred from
+# the chat provider. A completely absent route keeps the dedicated image tool
+# unavailable; any partial route is a configuration error.
+image_api_key=${IMAGE_API_KEY:-}
+image_api_base_url=${IMAGE_API_BASE_URL:-}
+image_model=${IMAGE_MODEL:-}
+image_api_protocol=${IMAGE_API_PROTOCOL:-}
+if [ -n "$image_api_key" ] || [ -n "$image_api_base_url" ] || [ -n "$image_model" ] || [ -n "$image_api_protocol" ]; then
+    if [ -z "$image_api_key" ] || [ -z "$image_api_base_url" ] || [ -z "$image_model" ]; then
+        echo "[entrypoint] IMAGE_API_KEY, IMAGE_API_BASE_URL, and IMAGE_MODEL must be set together" >&2
+        exit 64
+    fi
+    image_api_protocol=${image_api_protocol:-openai-images}
+    if [ "$image_api_protocol" != "openai-images" ] && [ "$image_api_protocol" != "xai-images" ]; then
+        echo "[entrypoint] IMAGE_API_PROTOCOL must be openai-images or xai-images" >&2
+        exit 64
+    fi
+    export IMAGE_API_PROTOCOL="$image_api_protocol"
+fi
+
+QQBOT_MARKDOWN_ENABLED=${QQBOT_MARKDOWN_ENABLED:-true}
+QQBOT_IMAGE_USER_HOURLY_LIMIT=${QQBOT_IMAGE_USER_HOURLY_LIMIT:-10}
+QQBOT_MARKDOWN_USER_HOURLY_LIMIT=${QQBOT_MARKDOWN_USER_HOURLY_LIMIT:-30}
+QQBOT_IMAGE_MAX_CONCURRENT=${QQBOT_IMAGE_MAX_CONCURRENT:-2}
+QQBOT_MARKDOWN_MAX_CONCURRENT=${QQBOT_MARKDOWN_MAX_CONCURRENT:-4}
+if [ "$QQBOT_MARKDOWN_ENABLED" != "true" ] && [ "$QQBOT_MARKDOWN_ENABLED" != "false" ]; then
+    echo "[entrypoint] QQBOT_MARKDOWN_ENABLED must be true or false" >&2
+    exit 64
+fi
+export QQBOT_MARKDOWN_ENABLED QQBOT_IMAGE_USER_HOURLY_LIMIT QQBOT_MARKDOWN_USER_HOURLY_LIMIT
+export QQBOT_IMAGE_MAX_CONCURRENT QQBOT_MARKDOWN_MAX_CONCURRENT
+
+# Validate route syntax and resource settings before touching persistent state.
+# The image request path performs its own DNS/IP checks and pins the connection.
+node <<'NODE'
+const raw = process.env.IMAGE_API_BASE_URL || '';
+for (const [name, maximum] of [
+  ['IMAGE_API_KEY', 4096],
+  ['IMAGE_API_BASE_URL', 2048],
+  ['IMAGE_MODEL', 256],
+]) {
+  const value = process.env[name] || '';
+  if (value.length > maximum) {
+    throw new Error(`${name} must be at most ${maximum} characters`);
+  }
+  if (/[\u0000-\u001f\u007f]/.test(value)) {
+    throw new Error(`${name} must not contain control characters`);
+  }
+}
+
+if (raw) {
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    throw new Error('IMAGE_API_BASE_URL must be a valid public HTTPS base URL');
+  }
+  const authority = raw.match(/^https:\/\/([^/?#]*)/i)?.[1] || '';
+  if (url.protocol !== 'https:' || !authority || authority.includes('@') ||
+      !url.hostname || url.username || url.password || url.search || url.hash || /[?#]/.test(raw)) {
+    throw new Error('IMAGE_API_BASE_URL must be a public HTTPS base URL without credentials, query, or fragment');
+  }
+}
+
+for (const name of [
+  'QQBOT_IMAGE_USER_HOURLY_LIMIT',
+  'QQBOT_MARKDOWN_USER_HOURLY_LIMIT',
+  'QQBOT_IMAGE_MAX_CONCURRENT',
+  'QQBOT_MARKDOWN_MAX_CONCURRENT',
+]) {
+  const value = process.env[name] || '';
+  if (!/^[1-9][0-9]*$/.test(value) || !Number.isSafeInteger(Number(value))) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+}
+NODE
+
 selected_provider=''
 if [ -n "$llm_api_key" ]; then
     selected_provider=${LLM_PROVIDER:-}

@@ -6,6 +6,51 @@ const OPEN_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
 const activeBatches = new WeakMap();
 const everBoundRecords = new WeakSet();
 const recordWatermarks = new WeakMap();
+const generationRequestsByContext = new WeakMap();
+
+function snapshotGenerationAttachment(attachment) {
+    if (!attachment || typeof attachment !== 'object') return undefined;
+    const url = attachment.url;
+    if (typeof url !== 'string' || url.length > 8192) return undefined;
+    return Object.freeze({
+        url,
+        filename: typeof attachment.filename === 'string' ? attachment.filename : '',
+        content_type: typeof attachment.content_type === 'string' ? attachment.content_type
+            : typeof attachment.contentType === 'string' ? attachment.contentType : '',
+        size: attachment.size,
+    });
+}
+
+function snapshotGenerationRequest(ctx) {
+    const message = ctx?.message;
+    const replyTarget = snapshotReplyTarget(message?.replyTarget ?? ctx?.replyTarget);
+    if (!message || !replyTarget) return undefined;
+    return Object.freeze({
+        ownerId: message.senderId,
+        replyTarget,
+        text: typeof message.content === 'string' ? message.content.slice(0, 4000) : '',
+        currentAttachments: Object.freeze((Array.isArray(message.attachments) ? message.attachments : [])
+            .map(snapshotGenerationAttachment).filter(Boolean)),
+        quotedAttachments: Object.freeze((Array.isArray(ctx?.state?.quote?.attachments) ? ctx.state.quote.attachments : [])
+            .map(snapshotGenerationAttachment).filter(Boolean)),
+    });
+}
+
+function captureGenerationRequests(entries, mergedCtx) {
+    const requests = entries.map(({ ctx }) => snapshotGenerationRequest(ctx)).filter(Boolean);
+    if (!mergedCtx || typeof mergedCtx !== 'object') return;
+    generationRequestsByContext.set(mergedCtx, Object.freeze(requests));
+    // Keep the extra quote set separate from state.quote so ordinary quoted
+    // message text and document reading continue to use the first request.
+    if (mergedCtx.state && typeof mergedCtx.state === 'object') {
+        mergedCtx.state.qqbotGenerationQuoteAttachments = Object.freeze(requests.flatMap((request) => request.quotedAttachments));
+    }
+}
+
+/** Return trusted original-message provenance captured before a merge mutates its first context. */
+export function getMergedGenerationRequests(ctx) {
+    return ctx && typeof ctx === 'object' ? generationRequestsByContext.get(ctx) ?? [] : [];
+}
 
 function validObject(value) {
     return (typeof value === 'object' && value !== null) || typeof value === 'function';
@@ -130,6 +175,7 @@ export function createMergeConcurrencyGuard(options = {}) {
 
     async function drainOwner(firstEntry, state) {
         state.activeCtx = firstEntry.ctx;
+        captureGenerationRequests([firstEntry], firstEntry.ctx);
         const firstResult = await runEntry(firstEntry, true);
         while (state.mergeBuffer.length > 0) {
             const entries = state.mergeBuffer.splice(0);
@@ -141,6 +187,9 @@ export function createMergeConcurrencyGuard(options = {}) {
             if (available.length === 0) continue;
             let survivorCtx;
             try {
+                // Capture sender, target and per-message quote grants before
+                // defaultMerge folds text and attachments into the first ctx.
+                captureGenerationRequests(available, available[0]?.ctx);
                 survivorCtx = defaultMerge(available);
             }
             catch {
@@ -240,6 +289,7 @@ export function beginMergeBatch(record, replyTarget) {
         sessionId: record.sessionId,
         replyTarget: target,
         pending: new Set(),
+        sendQueue: Promise.resolve(),
         closed: false,
         closing: undefined,
         lastSequence: watermark.lastSequence,
@@ -327,12 +377,36 @@ export function trackMergeBatchSend(record, promise) {
     return pending;
 }
 
+/** Queue one actual outbound operation in arrival order and keep batch close waiting for it. */
+export function enqueueMergeBatchSend(record, operation) {
+    if (typeof operation !== 'function') throw new TypeError('A queued outbound operation is required.');
+    const batch = validObject(record) ? activeBatches.get(record) : undefined;
+    // Standalone adapter probes and non-merged native events have no batch
+    // binding. Preserve the adapter's ordinary send behavior for records that
+    // have never been bound; once a record was bound, late events remain
+    // suppressed after its batch closes.
+    if (!batch) {
+        if (validObject(record) && everBoundRecords.has(record)) return Promise.resolve(undefined);
+        return Promise.resolve().then(operation).catch(() => {});
+    }
+    if (batch.closed) return Promise.resolve(undefined);
+    const pending = batch.sendQueue.catch(() => {}).then(() => operation());
+    batch.sendQueue = pending.then(() => undefined, () => undefined);
+    batch.pending.add(pending);
+    void pending.then(
+        () => batch.pending.delete(pending),
+        () => batch.pending.delete(pending),
+    );
+    return pending;
+}
+
 export async function closeMergeBatch(batch) {
     if (!batch) return;
     if (!batch.closing) {
         batch.closed = true;
         batch.closing = (async () => {
-            while (batch.pending.size > 0) await Promise.all([...batch.pending]);
+            while (batch.pending.size > 0) await Promise.allSettled([...batch.pending]);
+            await batch.sendQueue;
             batch.drained = true;
             if (activeBatches.get(batch.record) === batch) activeBatches.delete(batch.record);
         })();

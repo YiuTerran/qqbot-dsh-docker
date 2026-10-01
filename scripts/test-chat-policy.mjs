@@ -150,7 +150,7 @@ test('executor rejects dangerous and unknown tools before their bodies run, even
     assert.equal(prependAllows, 1, 'prepend allow listener was reached');
     assert.equal(executed, 0, 'monotonic guard must still refuse');
     const assembly = await ctx.systemPrompt.assemble();
-    assert.deepEqual(assembly.tools.map((tool) => tool.name), ['qqbot_read_document', 'qqbot_roll_dice']);
+    assert.deepEqual(assembly.tools.map((tool) => tool.name).sort(), ['qqbot_read_document', 'qqbot_roll_dice']);
     assert.ok(assembly.sections.some((section) => section.name === 'qqbot:chat-only-policy'));
 });
 
@@ -1716,7 +1716,7 @@ test('webpage reader accepts validated text including attachments and uses publi
         const blocked = await call(ctx, 'web_fetch', { url }, agent);
         assert.equal(blocked.isError, true, url);
     }
-    assert.deepEqual((await ctx.systemPrompt.assemble()).tools.map((tool) => tool.name), ['qqbot_read_document', 'qqbot_roll_dice', 'web_fetch']);
+    assert.deepEqual((await ctx.systemPrompt.assemble()).tools.map((tool) => tool.name).sort(), ['qqbot_read_document', 'qqbot_roll_dice', 'web_fetch']);
 });
 
 test('QQ file/video attachments are not downloaded', async () => {

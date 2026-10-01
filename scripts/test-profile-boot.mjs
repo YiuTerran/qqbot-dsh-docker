@@ -72,6 +72,8 @@ try {
   const systemPrompt = ctx.get('systemPrompt');
   const web = ctx.get('web');
   const expectedSearchBaseUrl = process.env.QQBOT_TEST_EXPECT_SEARCH_BASE_URL;
+  const expectedImageEnabled = Boolean(process.env.IMAGE_API_KEY);
+  const expectedMarkdownEnabled = process.env.QQBOT_MARKDOWN_ENABLED !== 'false';
   const thirdPartyMode = Boolean(process.env.LLM_API_KEY);
   const expectedProvider = thirdPartyMode ? process.env.LLM_PROVIDER : 'deepseek-official';
   const expectedModel = thirdPartyMode ? process.env.LLM_MODEL : 'deepseek-flash';
@@ -102,18 +104,31 @@ try {
   for (const fixtureKey of ['fixture-chat-key', 'fixture-official-key']) {
     assert.ok(!persistedPatch.includes(fixtureKey), `persisted profile must not contain ${fixtureKey}`);
   }
+  for (const fixtureValue of [process.env.IMAGE_API_KEY, process.env.IMAGE_API_BASE_URL]) {
+    if (fixtureValue) assert.ok(!persistedPatch.includes(fixtureValue), 'image route credentials and endpoint must not be persisted in the profile patch');
+  }
 
   const logText = captured.map(({ line }) => line).join('\n');
   assert.match(logText, /\[im-qqbot\] chat-only policy installed;/, 'chat policy was not installed');
   assert.match(logText, /\[im-qqbot\] Bot ready!/, 'QQ profile did not reach local SDK ready');
   assert.doesNotMatch(logText, /gateway initialization failed|failed to import|entry did not activate/, 'QQ profile reported startup failure');
+  for (const secret of [process.env.IMAGE_API_KEY, process.env.IMAGE_API_BASE_URL]) {
+    if (secret) assert.ok(!logText.includes(secret), 'image route credentials and endpoint must not appear in logs');
+  }
 
   const registryNames = tools.schemas().map((tool) => tool.name).sort();
   const assembly = await systemPrompt.assemble();
   const modelNames = assembly.tools.map((tool) => tool.name).sort();
-  assert.deepEqual(modelNames, searchEnabled
-    ? ['qqbot_describe_image', 'qqbot_read_document', 'qqbot_roll_dice', 'web_fetch', 'web_search']
-    : ['qqbot_describe_image', 'qqbot_read_document', 'qqbot_roll_dice', 'web_fetch'], 'model-facing chat tool catalog does not match configured search availability');
+  assert.equal(registryNames.includes('qqbot_generate_image'), expectedImageEnabled, 'image generation registration does not match the dedicated image route');
+  assert.equal(registryNames.includes('qqbot_create_markdown'), expectedMarkdownEnabled, 'Markdown export registration does not match QQBOT_MARKDOWN_ENABLED');
+  const expectedTools = [
+    'qqbot_describe_image', 'qqbot_read_document', 'qqbot_roll_dice',
+    ...(expectedImageEnabled ? ['qqbot_generate_image'] : []),
+    ...(expectedMarkdownEnabled ? ['qqbot_create_markdown'] : []),
+    'web_fetch',
+    ...(searchEnabled ? ['web_search'] : []),
+  ].sort();
+  assert.deepEqual(modelNames, expectedTools, 'model-facing chat tool catalog does not match configured search and generation availability');
   assert.ok(registryNames.includes('qqbot_read_document'), 'QQ document reader must be registered');
   assert.ok(registryNames.includes('qqbot_roll_dice'), 'TRPG dice tool must be registered');
   if (!searchEnabled) {

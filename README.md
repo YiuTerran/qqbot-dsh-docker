@@ -35,7 +35,7 @@ dsh --profile qqbot
 
 ## 纯聊天能力
 
-本机器人定位为对话式 QQ Bot；除普通文字回复外，还提供以下五项严格受限的能力：
+本机器人定位为对话式 QQ Bot；除普通文字回复外，还提供以下严格受限的能力：
 
 - 它可以分析**当前 QQ 消息**附带的图片或 GIF、该消息明确引用的图片，或公共 HTTPS 图片 URL。
   本地路径必须是 `/data/qqbot-media` 内的普通文件，并且已登记为当前消息或引用图片；任意工作区路径、未引用的历史附件以及其他会话的附件都会被拒绝。
@@ -43,10 +43,12 @@ dsh --profile qqbot
 - 它可以用 `web_search` 按关键词发现网页。每次最多提交 4 个查询，合并后最多返回 8 个来源；搜索结果是外部不可信数据，不是指令。
 - 它可以用 `web_fetch` 阅读经过公网校验的公共 `http://` 或 `https://` 响应。接受 `text/*`（不含 RTF/richtext）、`application/xhtml+xml`、`application/json`、`application/*+json`、`application/yaml`、`application/x-yaml`、`application/xml` 和 `application/*+xml`。HTML 转为文本，其他允许内容按文本原样读取；不会用数据格式解析器处理、解析外部资源或执行其中的内容。每次请求限时 30 秒、响应最多 2 MiB，最多向模型返回 100,000 个字符，并标记输出截断。文本响应即使声明为下载附件也只在内存中读取，不写入磁盘。拒绝未知或 `application/octet-stream` 类型，以及伪装成文本的 PDF、Office、ZIP、图片或可执行文件。搜索到的来源可用 `web_fetch` 阅读；网页和文本均为不可信输入。
 - 主人可以让机器人阅读当前 QQ 消息附带或明确引用的文本文件。机器人只会看到不透明的附件 ID 和少量元数据，再按需调用 `qqbot_read_document`；附件原始/签名下载 URL 和磁盘路径不会暴露给模型。最多每轮 4 个文件、每个 512 KiB、每次读取返回最多 50,000 个字符，每轮返回总量最多 100,000 个字符，缓存重读也计入总量。本轮结束时授权撤销、进行中的读取取消，本轮缓存清空。只支持纯文本；当 MIME 缺失、为 `application/octet-stream`，或 QQ 只提供通用文件元数据时，才会按 `.txt`、`.md`、`.markdown`、`.json`、`.yaml`、`.yml`、`.csv`、`.tsv`、`.log`、`.xml`、`.ini`、`.toml` 后缀白名单回退，并进行严格解码和二进制检查。字符集只接受有效的声明值、UTF-16 BOM 或默认 UTF-8，不猜测编码；请将无法解码的文件转成 UTF-8 后重发。PDF、Word、Excel 及其他复杂格式仍不支持。附件不会写入磁盘，原始/签名下载 URL 不会暴露给模型或写入持久配置；文档正文中的普通 URL 可能随文本交给当前配置的 LLM，并进入现有聊天历史。
+- 部署配置了独立图片 API 后，机器人可以按明确请求调用 `qqbot_generate_image` 生成一张图片，或编辑当前消息附带/本轮明确引用的一张 QQ 图片。编辑仅接受 PNG/JPEG，最大 10 MiB；提示词最多 4,000 字符；结果图片最大 10 MiB。图片服务会收到提示词及用户指定的图片字节；不使用聊天密钥，也不调用第二个 LLM。每用户每滚动小时默认 10 次，生成与编辑合计；工具每次仅生成一张。完成或失败的任务都会计入已开始任务的额度；图片服务请求限时 120 秒，整个图片工具最多 180 秒。生成结果通过 QQ 当前回复发送。调用时机依赖模型对用户自然语言意图的判断，因此提示规则不能证明每次调用都完全符合用户意图。
+- 可以按明确请求使用 `qqbot_create_markdown` 创建并发送 UTF-8 Markdown 附件，最多 128 KiB，不落盘，也不会再调用第二个模型。该能力默认启用，可用 `QQBOT_MARKDOWN_ENABLED=false` 关闭；每用户每滚动小时默认 30 次。文件发送失败时会在原回复目标尝试发送固定提示和可复制的正文，并遵循现有 QQ 消息额度；无法发送完整正文时会明确标注截断。QQ 文件发送能力取决于实际机器人账号和平台权限，部署时需要验证。
 
 当 QQ 消息带有文档，或 `web_fetch` 实际读到非 HTML 的文本响应时，本轮进入文档保护模式：远程 `web_fetch` 和图片 URL 视觉分析只接受当前用户消息中明确写出的完整规范化 URL，以及成功结构化搜索结果提供的来源 URL；不会从文档正文或嵌入资源中自动发现、跟随链接，也不会从普通文本生成 URL。文档正文、历史消息、引用消息或新拼出的查询参数中出现的 URL 不会自动获准；需要打开文档里的链接时，请把完整链接单独发在新的消息中。`web_search` 仍会把关键词发送到部署者配置的搜索服务，因此这不保证文本不会离开容器；文档或网页中的内容也不能更改安全规则。
 
-私聊和群聊中均不可使用 Shell 命令、代码执行、通用文件读写、文件发送、通用文件下载、后台任务、子 Agent、工作流及类似环境操作。受限文本读取只在内存中处理，不创建下载文件。机器人可以解释命令或以文本展示代码，但绝不会运行。用户确认或自定义人设都不能取消这些限制。
+私聊和群聊中均不可使用 Shell 命令、代码执行、通用文件读写/发送、通用文件下载、后台任务、子 Agent、工作流及类似环境操作。图片生成/编辑与 Markdown 导出只经上述专用工具执行，不开放一般文件 API。受限文本读取只在内存中处理，不创建下载文件。机器人可以解释命令或以文本展示代码，但绝不会运行。用户确认或自定义人设都不能取消这些限制。
 
 群聊使用共享会话。同一群或同一私聊目标的回复按批次串行处理：正在处理时收到的消息会按到达顺序合并为下一批，由模型结合共享上下文回答；默认最多等待 20 条，满后新消息不会触发模型，群聊会 @ 该消息发送者并提示稍后再试。群聊空闲并接受一条通过门控的普通消息时，会先回复固定提示“收到啦，主人，本鱼正在思考中…”，且不 @ 发送者；私聊、未通过门控的消息、直接处理的骰子及斜杠命令、排队合并的后续消息不会收到这条提示。被拒绝的群消息仍可能依照现有历史策略，作为之后对话的背景，但不会单独触发模型请求。不同群及不同私聊用户互不阻塞。回复与附件授权会在本批完成并发送完毕后再交接给下一批。
 
@@ -66,6 +68,28 @@ dsh --profile qqbot
 | `.r d100` | 百分骰 |
 
 结果显示实际骰点、合计及舍弃的骰子（以 `×` 标记）。限制为最多 128 个字符、8 项、每骰面数 `1～1,000,000`、整数修正值绝对值不超过 `1,000,000`、每次最多重复 20 次且总计生成不超过 100 颗骰子；自然语言工具每轮最多 8 次独立调用、累计 200 颗骰子。骰点由 Node `crypto.randomInt` 生成。不执行 Python、Bash 或其他代码；不支持括号、乘除、爆骰、条件重掷、宏、暗骰或游戏规则裁定。机器人不得编造或修改骰点，也不得为挑选结果擅自重掷。普通跑团使用即可，不提供公开可验证或防部署者操纵的随机证明。
+
+### 图片生成路由与 Markdown 限额
+
+图片生成/编辑走独立的服务商密钥和模型，不会复用 `DEEPSEEK_API_KEY`、`LLM_API_KEY` 或视觉模型。留空全部图片路由变量时，图片生成工具不可用；设置路由时，`IMAGE_API_KEY`、`IMAGE_API_BASE_URL` 和 `IMAGE_MODEL` 必须同时提供。`IMAGE_API_PROTOCOL` 可省略，默认 `openai-images`，也可设为 `xai-images`；不会自动探测协议或失败后切换。基础地址必须是无凭据、无查询参数、无片段的 HTTPS URL；服务请求会追加固定的 `/images/generations` 或 `/images/edits` 路径，并在连接前校验和固定公网地址。密钥只从环境变量读取，不写入 `/data`。图片路由长度上限分别为密钥 4,096、基础地址 2,048、模型名 256 个字符，且拒绝控制字符。部分路由、非法协议/地址、非正整数额度或并发值会拒绝启动；Markdown 开关只接受 `true` 或 `false`。
+
+图片生成与编辑合计按 QQ SDK 提供的发送者 ID 共享每用户额度，不按昵称识别；同一机器人应用的用户跨群共享额度。默认每滚动小时 10 次，可通过 `QQBOT_IMAGE_USER_HOURLY_LIMIT` 调整。Markdown 默认每滚动小时每用户 30 次，可通过 `QQBOT_MARKDOWN_USER_HOURLY_LIMIT` 调整。活动任务槽默认图片 2 个、Markdown 4 个，分别由 `QQBOT_IMAGE_MAX_CONCURRENT` 与 `QQBOT_MARKDOWN_MAX_CONCURRENT` 配置；它们限制同时运行数，不是累计次数。实例按单进程运行；额度时间戳保存在 `/data`，重启不清零，状态损坏时停止生成以避免绕过额度。正在读取文档或网页本轮进入文档保护模式后，图片生成/编辑不可调用，Markdown 导出仍可用。模型仍基于自然语言决定是否调用工具。
+
+配置示例：
+
+```dotenv
+IMAGE_API_KEY=
+IMAGE_API_BASE_URL=https://api.example.com/v1
+IMAGE_MODEL=your-image-model
+IMAGE_API_PROTOCOL=openai-images
+QQBOT_MARKDOWN_ENABLED=true
+QQBOT_IMAGE_USER_HOURLY_LIMIT=10
+QQBOT_MARKDOWN_USER_HOURLY_LIMIT=30
+QQBOT_IMAGE_MAX_CONCURRENT=2
+QQBOT_MARKDOWN_MAX_CONCURRENT=4
+```
+
+仅当确实需要图片能力时填写前三项；`api.example.com` 和模型名是占位示例。图片编辑会将用户指定的当前/引用图片字节及编辑提示词发给图片服务商。Markdown 正文可能已经随聊天请求发送给当前 LLM，也会随附件/回退正文发送到 QQ；图片工具不持久化生成字节，但这不代表聊天历史或 QQ 平台不会保留相应内容。
 
 ## 通用 Docker Compose 部署
 
@@ -92,6 +116,15 @@ services:
       QQBOT_VISION_MODEL: ${QQBOT_VISION_MODEL:-}
       QQBOT_MEDIA_ENABLED: ${QQBOT_MEDIA_ENABLED:-true}
       QQBOT_VISION_ENABLED: ${QQBOT_VISION_ENABLED:-true}
+      IMAGE_API_KEY: ${IMAGE_API_KEY:-}
+      IMAGE_API_BASE_URL: ${IMAGE_API_BASE_URL:-}
+      IMAGE_MODEL: ${IMAGE_MODEL:-}
+      IMAGE_API_PROTOCOL: ${IMAGE_API_PROTOCOL:-}
+      QQBOT_MARKDOWN_ENABLED: ${QQBOT_MARKDOWN_ENABLED:-true}
+      QQBOT_IMAGE_USER_HOURLY_LIMIT: ${QQBOT_IMAGE_USER_HOURLY_LIMIT:-10}
+      QQBOT_MARKDOWN_USER_HOURLY_LIMIT: ${QQBOT_MARKDOWN_USER_HOURLY_LIMIT:-30}
+      QQBOT_IMAGE_MAX_CONCURRENT: ${QQBOT_IMAGE_MAX_CONCURRENT:-2}
+      QQBOT_MARKDOWN_MAX_CONCURRENT: ${QQBOT_MARKDOWN_MAX_CONCURRENT:-4}
       QQBOT_STARTUP_WARN_MS: ${QQBOT_STARTUP_WARN_MS:-20000}
       QQBOT_APPID: ${QQBOT_APPID}
       QQBOT_SECRET: ${QQBOT_SECRET}
@@ -122,6 +155,15 @@ LLM_API_PROTOCOL=
 LLM_SEARCH_BASE_URL=
 # Optional native search model alias in either mode; blank defaults to deepseek-flash.
 LLM_SEARCH_MODEL=
+IMAGE_API_KEY=
+IMAGE_API_BASE_URL=
+IMAGE_MODEL=
+IMAGE_API_PROTOCOL=
+QQBOT_MARKDOWN_ENABLED=true
+QQBOT_IMAGE_USER_HOURLY_LIMIT=10
+QQBOT_MARKDOWN_USER_HOURLY_LIMIT=30
+QQBOT_IMAGE_MAX_CONCURRENT=2
+QQBOT_MARKDOWN_MAX_CONCURRENT=4
 QQBOT_APPID=
 QQBOT_SECRET=
 ```
@@ -157,7 +199,7 @@ Compose 会创建并使用命名卷 `dsh-qqbot-data` 和 `dsh-qqbot-workspace`�
       - dsh-workspace:/workspace
 ```
 
-将自己的文件以只读方式挂载到 `/data/AGENTS.md`，即可替换人设和软性行为指引，但不会移除镜像的传输层策略：群聊消息必须提及机器人；当前消息或明确引用的图片和公共 HTTPS 图片 URL 才能进入受限视觉流程；网页通过关键词搜索和受限的公共网页/纯文本读取能力访问；当前消息或明确引用的纯文本附件可按需读取。Shell、代码执行、通用文件操作、文件发送、通用文件下载和后台工作仍不可用。入口脚本也会强制 DSH 使用 `read-only`；不要把自定义人设当作安全机制。升级时会保留已有的 `/data/AGENTS.md`，不会自动覆盖旧人设文件；如需同步更新其中的软性指引，请手动修改该文件。
+将自己的文件以只读方式挂载到 `/data/AGENTS.md`，即可替换人设和软性行为指引，但不会移除镜像的传输层策略：群聊消息必须提及机器人；当前消息或明确引用的图片和公共 HTTPS 图片 URL 才能进入受限视觉流程；网页通过关键词搜索和受限的公共网页/纯文本读取能力访问；当前消息或明确引用的纯文本附件可按需读取。通用 Shell、代码、文件操作/发送、通用文件下载和后台工作仍不可用；启用图片路由后只允许使用专用图片工具，Markdown 只允许使用专用导出工具。入口脚本也会强制 DSH 使用 `read-only`；不要把自定义人设当作安全机制。升级时会保留已有的 `/data/AGENTS.md`，不会自动覆盖旧人设文件；若旧文件仍写着“不能生成图片/文件”，请在保留个人软性指引的前提下，手动按新版 [默认指引](defaults/AGENTS.md)同步能力说明。
 
 视觉能力使用当前密钥模式选定的提供者：官方模式为 `deepseek-official`，第三方模式为 `LLM_PROVIDER`。设置 `QQBOT_VISION_PROVIDER` 时，它必须与当前模式的提供者相同；可用 `QQBOT_VISION_MODEL` 覆盖模型。第三方聊天和视觉共用 `LLM_API_KEY`。所选模型必须确实支持图片输入；提供者声明中的 `input: [text, image]` 只表示该路由符合 dsh 的候选条件，并不会让纯文本模型获得多模态能力。
 
