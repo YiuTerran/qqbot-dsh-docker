@@ -4,6 +4,7 @@ set -euo pipefail
 IMAGE="${IMAGE:-dsh-qqbot:test-local}"
 repo_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 chat_policy_test="${repo_root}/scripts/test-chat-policy.mjs"
+model_context_test="${repo_root}/scripts/test-model-context.mjs"
 dice_policy_test="${repo_root}/scripts/test-dice.mjs"
 recovery_policy_test="${repo_root}/scripts/test-session-recovery.mjs"
 provider_errors_test="${repo_root}/scripts/test-provider-errors.mjs"
@@ -62,6 +63,11 @@ fi
 
 if [[ ! -r "$chat_policy_test" ]]; then
     echo "missing chat policy regression script: $chat_policy_test" >&2
+    exit 66
+fi
+
+if [[ ! -r "$model_context_test" ]]; then
+    echo "missing model context regression script: $model_context_test" >&2
     exit 66
 fi
 
@@ -358,6 +364,7 @@ docker create \
     --volume "${data_volume}:/data" \
     --volume "${workspace_volume}:/workspace" \
     --mount "type=bind,src=${chat_policy_test},dst=/tmp/test-chat-policy.mjs,readonly" \
+    --mount "type=bind,src=${model_context_test},dst=/tmp/test-model-context.mjs,readonly" \
     --mount "type=bind,src=${dice_policy_test},dst=/tmp/test-dice.mjs,readonly" \
     --mount "type=bind,src=${recovery_policy_test},dst=/tmp/test-session-recovery.mjs,readonly" \
     --mount "type=bind,src=${provider_errors_test},dst=/tmp/test-provider-errors.mjs,readonly" \
@@ -407,6 +414,9 @@ docker create \
         grep -Fq "createDiceAwareHistoryBuffer(historyBuffer" "$middleware_setup"
         node --check "$middleware_setup"
         node --check /opt/qqbot-defaults/qqbot-session-recovery.mjs
+        node --check /opt/qqbot-defaults/qqbot-model-context.mjs
+        node --check /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-agent-loop/lib/index.js
+        node --check /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-compaction-basic/lib/index.js
         node --check /opt/qqbot-defaults/qqbot-provider-errors.mjs
         node --check /opt/qqbot-defaults/qqbot-concurrency.mjs
         node --check /opt/qqbot-defaults/qqbot-dice.mjs
@@ -430,6 +440,7 @@ docker create \
         grep -A6 -F -- "- id: web-fetch-http" "$dump" | grep -Fq "disabled: true"
         grep -A9 -F -- "- id: tool-web" "$dump" | grep -Fq "searchMaxResults: 8"
         grep -A9 -F -- "- id: tool-web" "$dump" | grep -Fq "searchMaxQueries: 4"
+        grep -A8 -F -- "- id: web-search-deepseek" "$dump" | grep -Fq "maxUses: 0"
         grep -A9 -F -- "- id: tool-web" "$dump" | grep -Fq "searchTimeoutMs: 60000"
         grep -A9 -F -- "- id: tool-web" "$dump" | grep -Fq "fetch: true"
         grep -A3 -F -- "- id: tools" "$dump" | grep -Fq "mode: native"
@@ -437,6 +448,7 @@ docker create \
         test "$(grep -A6 -F -- "- id: im-qqbot" "$dump" | grep -Fc "appId: __FROM_ENV__")" -eq 1
         test "$(grep -A6 -F -- "- id: im-qqbot" "$dump" | grep -Fc "appSecret: __FROM_ENV__")" -eq 1
         node --test /tmp/test-chat-policy.mjs
+        QQBOT_MODEL_CONTEXT_MODULE=/opt/qqbot-defaults/qqbot-model-context.mjs QQBOT_SESSION_MODULE=/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session/lib/index.js QQBOT_LLM_MODULE=/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm/lib/index.js QQBOT_RUNTIME_ROOT=/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist QQBOT_COMPACTION_MODULE=/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-compaction-basic/lib/index.js node --test /tmp/test-model-context.mjs
         QQBOT_DICE_MODULE=/opt/qqbot-defaults/qqbot-dice.mjs node --test /tmp/test-dice.mjs
         QQBOT_RECOVERY_MODULE=/opt/qqbot-defaults/qqbot-session-recovery.mjs QQBOT_DICE_MODULE=/opt/qqbot-defaults/qqbot-dice.mjs QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-session-recovery.mjs
         QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-provider-errors.mjs
@@ -891,7 +903,14 @@ docker run --rm --network none --entrypoint node --volume "${legacy_data_volume}
     let middleware = fs.readFileSync(middlewarePath, "utf8");
     const quoteMarker = "            // Chat-only quoted-image downloads v2.\n";
     const patchedQuote = "            // Chat-only quote attachments: never downloaded.\n            // Keep quote text/metadata available to the conversation, but only current-message images may enter the cache.\n            ctx.state.downloadedQuoteFiles = [];";
-    if (middleware.includes(quoteMarker)) {
+    if (middleware.includes("// Chat-only lazy quoted images v1.")) {
+        const start = middleware.indexOf(quoteMarker);
+        const end = middleware.indexOf("\n        }\n        catch (err)", start);
+        if (start < 0 || end < start) throw new Error("legacy fixture expected the lazy quote block");
+        middleware = middleware.slice(0, start) + originalQuoteBlock + middleware.slice(end);
+        fs.writeFileSync(middlewarePath, middleware);
+    }
+    else if (middleware.includes(quoteMarker)) {
         middleware = middleware.replace(quoteMarker, "");
         fs.writeFileSync(middlewarePath, middleware);
     }

@@ -13,6 +13,7 @@ const providerErrorsPolicy = '/opt/qqbot-defaults/qqbot-provider-errors.mjs';
 const concurrencyPolicy = '/opt/qqbot-defaults/qqbot-concurrency.mjs';
 const generationPolicy = '/opt/qqbot-defaults/qqbot-generation.mjs';
 const generationScopePolicy = '/opt/qqbot-defaults/qqbot-generation-scope.mjs';
+const modelContextPolicy = '/opt/qqbot-defaults/qqbot-model-context.mjs';
 const imageToolPolicyImport = `import { loadChatImageBytes } from '${policy}';`;
 const imageLoaderV3Marker = '// Chat-only scoped image loader v3.';
 const imageSchemaV3Marker = '// Chat-only image schema: scoped QQ media paths or public HTTPS image URLs v3.';
@@ -582,6 +583,11 @@ await patch('transport/inbound.js', '// Chat-only generation provenance v1.', (c
     return content;
 });
 
+await patch('transport/inbound.js', '// Chat-only lazy quoted image grants v1.', (content, file) => {
+    return replaceOne(content, '                documentScope: documentTurn,',
+        '                // Chat-only lazy quoted image grants v1.\n                media: config.media,\n                documentScope: documentTurn,', file);
+});
+
 await patch('transport/inbound.js', '// Chat-only safe batch finalization v1.', (content, file) => {
     const clearAndEnd = [
         '        clearCurrentImages(chatOnlyAgent, documentTurn);',
@@ -633,6 +639,21 @@ await patch('transport/inbound.js', '// Chat-only generation cleanup v1.', (cont
         || finishPosition <= generationPosition || closePosition <= finishPosition) {
         throw new Error('Chat-only patch: generation scope is not revoked/drained before batch handoff in ' + file);
     }
+    return content;
+});
+
+await patch('transport/inbound.js', '// Chat-only group model context v1.', (content, file) => {
+    const marker = '// Chat-only group model context v1.';
+    const importLine = `import { beginGroupModelContext, endGroupModelContext } from '${modelContextPolicy}';`;
+    if (!content.includes(importLine)) content = `${importLine}\n${content}`;
+    content = replaceOne(content, '    let generationTurn;\n    try {',
+        '    let generationTurn;\n    let modelContextTurn;\n    try {', file);
+    content = replaceOne(content,
+        '    chatOnlyAgent.followup(message);',
+        `    ${marker}\n    modelContextTurn = beginGroupModelContext(chatOnlyAgent, scope, documentTurn);\n    chatOnlyAgent.followup(message);`, file);
+    content = replaceOne(content,
+        '    } finally {\n        clearCurrentImages(chatOnlyAgent, documentTurn);',
+        '    } finally {\n        endGroupModelContext(chatOnlyAgent, modelContextTurn);\n        clearCurrentImages(chatOnlyAgent, documentTurn);', file);
     return content;
 });
 
@@ -1431,6 +1452,24 @@ await patch('middleware/attachment.js', '// Chat-only independent merged quote d
         '            }\n            // Chat-only independent merged quote downloads v2.\n' + independent, file);
 });
 
+await patch('middleware/attachment.js', '// Chat-only lazy quoted images v1.', (content, file) => {
+    const start = content.indexOf('            // Chat-only quoted-image downloads v2.');
+    const end = content.indexOf('\n        }\n        catch (err)', start);
+    if (start < 0 || end < start) throw new Error('Chat-only patch: missing eager quote download block in ' + file);
+    // Preserve older migration markers so repeated enforcement and upgrades
+    // never reinstall either quote download path.
+    const lazy = [
+        '            // Chat-only quoted-image downloads v2.',
+        '            // Chat-only generation quote image downloads v1.',
+        '            // Chat-only independent merged quote downloads v2.',
+        '            // Chat-only lazy quoted images v1.',
+        '            // Quote metadata is enough for grants; fetch bytes only in the selected tool.',
+        '            ctx.state.downloadedQuoteFiles = [];',
+        '            ctx.state.downloadedGenerationQuoteFiles = [];',
+    ].join('\n');
+    return content.slice(0, start) + lazy + content.slice(end);
+});
+
 await patch('media/vision-tool.js', '        timeoutMs: vision.timeoutMs,', (content, file) =>
     replaceOne(content, '        name: DESCRIBE_IMAGE_TOOL_NAME,',
         '        name: DESCRIBE_IMAGE_TOOL_NAME,\n        timeoutMs: vision.timeoutMs,', file));
@@ -1600,6 +1639,28 @@ function assertOnce(source, marker, label) {
 }
 
 const finalInbound = await finalText('transport/inbound.js');
+const modelContextImport = `import { beginGroupModelContext, endGroupModelContext } from '${modelContextPolicy}';`;
+assertOnce(finalInbound, modelContextImport, 'group model context import');
+assertOnce(finalInbound, '// Chat-only group model context v1.', 'group model context marker');
+assertOnce(finalInbound, 'let modelContextTurn;', 'group model context scope');
+assertOnce(finalInbound, 'modelContextTurn = beginGroupModelContext(chatOnlyAgent, scope, documentTurn);', 'group model context binding');
+assertOnce(finalInbound, 'endGroupModelContext(chatOnlyAgent, modelContextTurn);', 'group model context cleanup');
+if (finalInbound.indexOf('modelContextTurn = beginGroupModelContext(chatOnlyAgent, scope, documentTurn);')
+    > finalInbound.indexOf('chatOnlyAgent.followup(message);')
+    || finalInbound.indexOf('endGroupModelContext(chatOnlyAgent, modelContextTurn);')
+    < finalInbound.indexOf('await chatOnlyAgent.whenIdle();')) {
+    throw new Error('Chat-only patch: group model context must bracket the model turn');
+}
+assertOnce(finalInbound, '// Chat-only lazy quoted image grants v1.', 'lazy quote grant marker');
+assertOnce(finalInbound, '                media: config.media,', 'lazy quote media configuration');
+const finalAttachments = await finalText('middleware/attachment.js');
+assertOnce(finalAttachments, '// Chat-only lazy quoted images v1.', 'lazy quote middleware marker');
+assertOnce(finalAttachments, 'ctx.state.downloadedQuoteFiles = [];', 'deferred quote files');
+assertOnce(finalAttachments, 'ctx.state.downloadedGenerationQuoteFiles = [];', 'deferred merged quote files');
+if (finalAttachments.includes('downloadMediaAttachments(rawQuote')
+    || finalAttachments.includes('downloadMediaAttachments(rawGenerationQuote')) {
+    throw new Error('Chat-only patch: quoted images still have an eager download path');
+}
 const mergeInboundImport = `import { beginMergeBatch, closeMergeBatch } from '${concurrencyPolicy}';`;
 assertOnce(finalInbound, mergeInboundImport, 'inbound merge batch import');
 assertOnce(finalInbound, '// Chat-only batch cancellation and reply binding v1.', 'inbound batch cancellation marker');

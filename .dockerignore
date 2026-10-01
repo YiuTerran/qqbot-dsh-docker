@@ -8,10 +8,12 @@
 npm-debug.log*
 *.log
 README.md
-# The image build needs these two helpers; keep the remaining local test and
+# The image build needs these helpers; keep the remaining local test and
 # release helpers out of the Docker context.
 scripts/*
 !scripts/instrument-qqbot-startup.mjs
 !scripts/link-global-bins.mjs
 !scripts/enforce-chat-only.mjs
+!scripts/enforce-web-search.mjs
+!scripts/enforce-model-context.mjs
 .workbuddy/

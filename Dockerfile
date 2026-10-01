@@ -38,6 +38,17 @@ RUN --mount=type=cache,target=/root/.npm \
 COPY scripts/enforce-chat-only.mjs /usr/local/lib/enforce-chat-only.mjs
 RUN node /usr/local/lib/enforce-chat-only.mjs /opt/dsh-seed/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
 
+COPY scripts/enforce-model-context.mjs /usr/local/lib/enforce-model-context.mjs
+RUN node /usr/local/lib/enforce-model-context.mjs /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai \
+    && node /usr/local/lib/enforce-model-context.mjs /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai \
+    && node --check /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-agent-loop/lib/index.js \
+    && node --check /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-compaction-basic/lib/index.js
+
+COPY scripts/enforce-web-search.mjs /usr/local/lib/enforce-web-search.mjs
+RUN node /usr/local/lib/enforce-web-search.mjs /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-search-deepseek \
+    && node /usr/local/lib/enforce-web-search.mjs /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-search-deepseek \
+    && node --check /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-search-deepseek/lib/index.js
+
 FROM node:24.14.0-bookworm-slim@sha256:d8e448a56fc63242f70026718378bd4b00f8c82e78d20eefb199224a4d8e33d8
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -61,7 +72,9 @@ RUN apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
 COPY --from=build /usr/local/lib/node_modules/ /usr/local/lib/node_modules/
 COPY --from=build /usr/local/lib/instrument-qqbot-startup.mjs /usr/local/lib/instrument-qqbot-startup.mjs
 COPY --from=build /usr/local/lib/enforce-chat-only.mjs /usr/local/lib/enforce-chat-only.mjs
+COPY --from=build /usr/local/lib/enforce-model-context.mjs /usr/local/lib/enforce-model-context.mjs
 COPY --from=build /opt/dsh-seed/ /opt/dsh-seed/
+COPY defaults/qqbot-model-context.mjs /opt/qqbot-defaults/qqbot-model-context.mjs
 COPY scripts/link-global-bins.mjs /usr/local/lib/link-global-bins.mjs
 
 # npm installs /usr/local/bin/dsh and /usr/local/bin/pnpm as symlinks into

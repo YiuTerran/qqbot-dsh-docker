@@ -289,7 +289,7 @@ export function denyUnsafeTool(exec) {
 }
 
 /** Load bounded image bytes only from the active QQ attachment scope or a public HTTPS image URL. */
-export async function loadChatImageBytes(image, maxBytes, exec) {
+export async function loadChatImageBytes(image, maxBytes, exec, requestSignal) {
     if (!Number.isFinite(maxBytes) || maxBytes <= 0) {
         throw new Error('qqbot_describe_image: image size limit must be a positive finite number');
     }
@@ -299,7 +299,7 @@ export async function loadChatImageBytes(image, maxBytes, exec) {
     const scopeFailure = documentExecutionFailure(exec);
     if (scopeFailure) throw new Error(scopeFailure);
     const turn = getBoundDocumentExecution(exec);
-    const signal = getTurnRequestSignal(turn, exec?.signal);
+    const signal = getTurnRequestSignal(turn, requestSignal ?? exec?.signal);
     throwIfAborted(signal);
     const reason = denyUnsafeTool({
         ...exec,

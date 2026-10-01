@@ -8,6 +8,7 @@ import {
     trackGenerationOperation,
 } from './qqbot-generation-scope.mjs';
 import { resolvePublicHttpAddresses } from './qqbot-web-pages.mjs';
+import { logDownloadDiagnostics } from './qqbot-image-diagnostics.mjs';
 
 export { createGenerationSender } from './qqbot-generation-sender.mjs';
 
@@ -654,39 +655,6 @@ async function performImageTask({ scope, request, args, exec, service, quota, se
     const imageGrant = args.imageAttachmentId
         ? getGenerationImageAttachment(scope, args.requestId, args.imageAttachmentId)
         : undefined;
-    let imageBytes;
-    if (imageGrant) {
-        if (imageGrant.size !== null && imageGrant.size > MAX_IMAGE_BYTES) {
-            const notice = notices['too-large'];
-            await sendOperationalNotice(sender, scope, request, notice, 'image', noticeSignal);
-            return result('too-large', notice);
-        }
-        try {
-            const { loadChatImageBytes } = await import('./qqbot-chat-policy.mjs');
-            if (operationSignal.aborted) throw operationSignal.reason ?? new Error('cancelled');
-            imageBytes = Buffer.from(await loadChatImageBytes(imageGrant.localPath, MAX_IMAGE_BYTES, exec.sourceExecution ?? exec));
-            if (operationSignal.aborted) throw operationSignal.reason ?? new Error('cancelled');
-        }
-        catch {
-            if (generationScopeFailure(scope, 'image')) return result('expired');
-            const notice = notices.failed;
-            await sendOperationalNotice(sender, scope, request, notice, 'image', noticeSignal);
-            return result('failed', notice);
-        }
-        const mime = inspectImage(imageBytes);
-        if (!mime) {
-            const status = imageBytes.length > MAX_IMAGE_BYTES ? 'too-large' : 'image-type';
-            const notice = notices[status];
-            await sendOperationalNotice(sender, scope, request, notice, 'image', noticeSignal);
-            return result(status, notice);
-        }
-        if (imageGrant.contentType && ['image/png', 'image/jpeg'].includes(imageGrant.contentType) && imageGrant.contentType !== mime) {
-            const notice = notices['image-type'];
-            await sendOperationalNotice(sender, scope, request, notice, 'image', noticeSignal);
-            return result('image-type', notice);
-        }
-    }
-    if (generationScopeFailure(scope, 'image')) return result('expired');
     let acquired;
     try {
         acquired = await quota.tryAcquire({ ownerId: request.ownerId, type: 'image' });
@@ -701,6 +669,48 @@ async function performImageTask({ scope, request, args, exec, service, quota, se
         return result(status, notice);
     }
     try {
+        let imageBytes;
+        if (imageGrant) {
+            const maxBytes = imageGrant.maxBytes ?? MAX_IMAGE_BYTES;
+            const remote = !imageGrant.localPath;
+            if (imageGrant.size !== null && imageGrant.size > maxBytes) {
+                const notice = notices['too-large'];
+                await sendOperationalNotice(sender, scope, request, notice, 'image', noticeSignal);
+                return result('too-large', notice);
+            }
+            try {
+                const { loadChatImageBytes } = await import('./qqbot-chat-policy.mjs');
+                if (operationSignal.aborted) throw operationSignal.reason ?? new Error('cancelled');
+                if (remote) logDownloadDiagnostics(imageGrant, 'start');
+                // Source URL is taken only from the request-scoped grant. The
+                // downloader validates public HTTPS and image bytes; no file is
+                // written for a quoted base image, even on a failed edit.
+                imageBytes = Buffer.from(await loadChatImageBytes(imageGrant.localPath ?? imageGrant.sourceUrl, maxBytes,
+                    exec.sourceExecution ?? exec, operationSignal));
+                if (operationSignal.aborted) throw operationSignal.reason ?? new Error('cancelled');
+                if (remote) logDownloadDiagnostics(imageGrant, 'success');
+            }
+            catch (error) {
+                if (remote) logDownloadDiagnostics(imageGrant, 'failed', error);
+                if (generationScopeFailure(scope, 'image')) return result('expired');
+                const notice = notices.failed;
+                await sendOperationalNotice(sender, scope, request, notice, 'image', noticeSignal);
+                return result('failed', notice);
+            }
+            const mime = inspectImage(imageBytes);
+            if (!mime) {
+                const status = imageBytes.length > maxBytes ? 'too-large' : 'image-type';
+                const notice = notices[status];
+                await sendOperationalNotice(sender, scope, request, notice, 'image', noticeSignal);
+                return result(status, notice);
+            }
+            if (imageGrant.contentType && ['image/png', 'image/jpeg'].includes(imageGrant.contentType) && imageGrant.contentType !== mime) {
+                const notice = notices['image-type'];
+                await sendOperationalNotice(sender, scope, request, notice, 'image', noticeSignal);
+                return result('image-type', notice);
+            }
+        }
+        if (generationScopeFailure(scope, 'image')) return result('expired');
         let reserved;
         try {
             reserved = await quota.reserve({ ownerId: request.ownerId, type: 'image' });

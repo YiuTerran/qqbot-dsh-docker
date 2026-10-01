@@ -512,6 +512,7 @@ integration('real inbound drains the original reply after session removal, revok
     eventHandler = createOutboundHandler(manager, bot, config, logger, {});
 
     oldAgent = {
+        session: { seq: 0 },
         followup(message) {
             followups++;
             const body = inspectModelBody(message, oldAgent, 'rejected prompt');
@@ -560,6 +561,7 @@ integration('real inbound drains the original reply after session removal, revok
         },
     };
     replacementAgent = {
+        session: { seq: 0 },
         followup(message) {
             followups++;
             const body = inspectModelBody(message, replacementAgent, 'next prompt');
@@ -704,6 +706,7 @@ integration('real queued group history drops a pre-reset snapshot but keeps curr
             if (!record) {
                 const isFirst = createdRecords++ === 0;
                 const agent = {
+                    session: { seq: 0 },
                     followup(message) {
                         if (!isFirst) {
                             const body = JSON.stringify(message);
@@ -828,6 +831,7 @@ integration('false group-history mode supplies persisted history while the adapt
     let followedInput;
     let ctx;
     const agent = {
+        session: { seq: 0 },
         followup(message) {
             followedInput = message;
             assert.deepEqual(ctx.state.history, [priorMessage], 'the pinned adapter history middleware supplies persisted group context');

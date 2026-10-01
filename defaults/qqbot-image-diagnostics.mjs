@@ -20,11 +20,12 @@ function attachment(value) {
     const mime = ['', 'image', 'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'file', 'application/octet-stream'].includes(type) ? type : 'other';
     let urlKind = 'missing';
     let asset;
-    if (typeof a.url === 'string' && a.url.length > 0) {
+    const candidateUrl = a.url ?? a.sourceUrl;
+    if (typeof candidateUrl === 'string' && candidateUrl.length > 0) {
         urlKind = 'invalid';
-        if (a.url.length <= 8192) {
+        if (candidateUrl.length <= 8192) {
             try {
-                const url = new URL(a.url.startsWith('//') ? `https:${a.url}` : a.url);
+                const url = new URL(candidateUrl.startsWith('//') ? `https:${candidateUrl}` : candidateUrl);
                 url.hash = '';
                 urlKind = url.username || url.password ? 'credentials' : url.protocol === 'https:' ? 'https' : 'other_protocol';
                 asset = token(url.href);

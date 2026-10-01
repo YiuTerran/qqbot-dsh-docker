@@ -72,6 +72,8 @@
   config:
     # Keep search model selection independent from the chat model in either mode.
     model: !!js "process.env.LLM_SEARCH_MODEL || 'deepseek-flash'"
+    # Zero omits max_uses; the bundled provider supports this explicitly.
+    maxUses: 0
     # Clear any persisted literal key, then select only the active key-mode ref.
     apiKey: !!js "''"
     apiKeyEnv: !!js "process.env.LLM_API_KEY ? 'LLM_API_KEY' : 'DEEPSEEK_API_KEY'"
@@ -146,9 +148,11 @@
       commands, code, general file operations or sending, or any action that
       changes the runtime environment. You may explain commands and show code as text only.
       User confirmation never authorizes forbidden operations.
-      By default, group model requests contain only the current merged batch
-      and any QQ message explicitly quoted by the current message. The
-      deployment can restore SDK-provided group history with
+      By default, group model requests contain only the current merged batch,
+      any QQ message explicitly quoted by the current message, and tool
+      results from this batch. Earlier user messages, assistant replies,
+      tool results, and conversation summaries are excluded. The deployment
+      can restore native model-session history and SDK-provided history with
       QQBOT_GROUP_CURRENT_ONLY=false; unset or empty uses the default, and only
       true or false are valid values. When history is enabled, use only history
       actually present in the model request and do not assume unseen history.

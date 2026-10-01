@@ -156,6 +156,38 @@ test('only matching public PNG/JPEG downloads become image grants', async (t) =>
     assert.equal(metadata.images[0].filename, 'ok.png');
 });
 
+test('lazy quote grants are bounded, immutable, request scoped and require enabled media', async () => {
+    const agent = {};
+    const source = originalRequest({ ownerId: 'user-a', groupId: 'group-a', msgId: 'message-a',
+        currentAttachments: [image(imageA, 'current.png')],
+        quotedAttachments: [image(imageB, 'quote.jpg', 'image/jpeg'),
+            image('https://cdn.example.test/file.png', 'file.png', 'file'),
+            image('http://cdn.example.test/insecure.png', 'insecure.png'),
+            image('https://user:pass@cdn.example.test/private.png', 'private.png')],
+    });
+    for (const media of [undefined, { enabled: false }, { enabled: true, maxMB: 0 },
+        { enabled: true, maxMB: '10' }, { enabled: true, maxMB: Infinity }]) {
+        const scope = beginGenerationTurn(agent, [source], [], { documentScope: activeDocumentScope(), media });
+        assert.deepEqual(generationRequestMetadata(scope)[0].images, []);
+        await endGenerationTurn(agent, scope);
+    }
+    const scope = beginGenerationTurn(agent, [source,
+        originalRequest({ ownerId: 'user-b', groupId: 'group-a', msgId: 'message-b' })], [],
+        { documentScope: activeDocumentScope(), media: { enabled: true, maxMB: 2 } });
+    const [first, second] = generationRequestMetadata(scope);
+    assert.equal(first.images.length, 1, 'only an explicitly declared quoted image can be deferred');
+    const grant = getGenerationImageAttachment(scope, first.requestId, first.images[0].imageAttachmentId);
+    assert.ok(Object.isFrozen(grant));
+    assert.equal(grant.localPath, undefined);
+    assert.equal(grant.sourceUrl, imageB);
+    assert.equal(grant.maxBytes, 2 * 1024 * 1024);
+    assert.equal(getGenerationImageAttachment(scope, second.requestId, grant.imageAttachmentId), undefined);
+    assert.ok(!renderGenerationRequestMetadata(scope).includes(imageB));
+    await endGenerationTurn(agent, scope);
+    assert.equal(scope.imageAttachments.size, 0);
+    assert.equal(getGenerationImageAttachment(scope, first.requestId, grant.imageAttachmentId), undefined);
+});
+
 test('a plain-text attachment anywhere in the merged sources protects the entire generation turn', async (t) => {
     const agent = {};
     const documentScope = activeDocumentScope();

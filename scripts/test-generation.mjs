@@ -2,7 +2,7 @@
 // Provider and QQ SDK requests use injected adapters or a local trusted HTTPS fixture.
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:https';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -857,7 +857,9 @@ for (const quoteMode of ['store', 'rendered-text']) test(`group quote (${quoteMo
     const { handleInbound } = await import(`${adapter}transport/inbound.js`);
     const { PublicHttpProvider } = await import(pathToFileURL(join(generationDir, 'qqbot-web-pages.mjs')).href);
     const originalRequestOnce = PublicHttpProvider.prototype.requestOnce;
+    let quoteDownloads = 0;
     PublicHttpProvider.prototype.requestOnce = async function () {
+        quoteDownloads++;
         return { response: new Response(png, { headers: { 'content-type': 'image/png' } }), close: async () => {} };
     };
     t.after(() => { PublicHttpProvider.prototype.requestOnce = originalRequestOnce; });
@@ -878,11 +880,13 @@ for (const quoteMode of ['store', 'rendered-text']) test(`group quote (${quoteMo
     let pending;
     let calls = 0;
     const agent = {
+        session: { seq: 0 },
         followup() {
             calls++;
             if (quoteMode === 'store' && calls === 1) return;
             const [request] = generationRequestMetadata(getGenerationTurn(agent));
-            assert.equal(request.images.length, 1, 'the actual quote download produces an imageAttachmentId');
+            assert.equal(request.images.length, 1, 'quote metadata produces an imageAttachmentId before downloading');
+            assert.equal(quoteDownloads, quoteMode === 'store' ? 1 : 0, 'only the current source message may have downloaded before the edit call');
             pending = nativeCall(ctx, GENERATE_IMAGE_TOOL, {
                 requestId: request.requestId, imageAttachmentId: request.images[0].imageAttachmentId,
                 prompt: 'Add a blue whale in the river; preserve the original scene.',
@@ -936,12 +940,16 @@ for (const quoteMode of ['store', 'rendered-text']) test(`group quote (${quoteMo
         await run({ messageId: 'native-original', msgIdx: 'native-original-ref', content: `<@!${config.appId}> 看图`,
             attachments: [{ content_type: 'image/png', filename: 'original.png', url: 'https://example.com/native-original.png' }] });
     }
+    await mkdir('/data/qqbot-media', { recursive: true });
+    const beforeEditFiles = (await readdir('/data/qqbot-media')).sort();
     await run({ messageId: 'ROBOT1.0.AB+/cd==', refMsgIdx: 'native-original-ref', content: `<@!${config.appId}> 在江里加一条蓝色鲸鱼`,
         ...(quoteMode === 'rendered-text' ? { msgElements: [{
             content: '[消息类型] 引用消息\n[附件1] 类型:图片 文件名:original.png 尺寸:1920x1080 大小:160.7KB URL:https://example.com/native-original.png',
         }] } : {}),
     });
     assert.equal(calls, quoteMode === 'store' ? 2 : 1);
+    assert.equal(quoteDownloads, quoteMode === 'store' ? 2 : 1, 'the edit tool fetches the selected quote exactly once');
+    assert.deepEqual((await readdir('/data/qqbot-media')).sort(), beforeEditFiles, 'quoted editing creates no persistent media files');
     assert.equal(providerCalls.length, 1);
     assert.equal(requestUrl(providerCalls[0]), 'https://image-api.example.test/v1/images/edits', 'the request uses editing, not new generation');
     assert.deepEqual(Buffer.from(await providerCalls[0].body.get('image').arrayBuffer()), png,
@@ -949,6 +957,94 @@ for (const quoteMode of ['store', 'rendered-text']) test(`group quote (${quoteMo
     assert.equal(sent.length, 1);
     assert.equal(sent[0].target.msgId, 'ROBOT1.0.AB+/cd==');
     assert.equal(getGenerationTurn(agent), undefined, 'edit grants are revoked at turn completion');
+});
+
+test('lazy quoted image failures, limits and cancellation never reach the generation provider', async (t) => {
+    const { PublicHttpProvider } = await import(pathToFileURL(join(generationDir, 'qqbot-web-pages.mjs')).href);
+    const originalRequestOnce = PublicHttpProvider.prototype.requestOnce;
+    t.after(() => { PublicHttpProvider.prototype.requestOnce = originalRequestOnce; });
+    let fetchCount = 0;
+    let fetchImpl;
+    PublicHttpProvider.prototype.requestOnce = async function (url, signal) {
+        fetchCount++;
+        return fetchImpl(url, signal);
+    };
+    const providerCalls = [];
+    const imageSends = [];
+    const acquire = { ok: true };
+    const quota = makeQuota({ acquire });
+    const { ctx } = await nativeGenerationRuntime(t, {
+        route: route(), quota, markdownEnabled: false,
+        imageService: { async generate(input) { providerCalls.push(input); return png; } },
+        sender: {
+            async sendImage() { imageSends.push(true); return { sent: true }; },
+            async sendNotice() { return { sent: true }; },
+        },
+    });
+    const agent = {};
+    const source = { ...makeGenerationRequest('lazy-owner', 'lazy-group', 'lazy-message'),
+        quotedAttachments: [{ content_type: 'image/png', filename: 'base.png', url: 'https://example.com/lazy-base.png' }] };
+    const start = (media = { enabled: true, maxMB: 10 }) => {
+        beginDocumentTurn(agent, { content: 'Edit the explicitly quoted picture.' });
+        const documentScope = getDocumentTurn(agent);
+        const scope = beginGenerationTurn(agent, [source, makeGenerationRequest('other-owner', 'lazy-group', 'other-message')], [], { documentScope, media });
+        const [metadata] = generationRequestMetadata(scope);
+        return { scope, documentScope, metadata };
+    };
+    const finish = async ({ scope, documentScope }) => {
+        await endGenerationTurn(agent, scope);
+        endDocumentTurn(agent, documentScope);
+    };
+    const args = (metadata) => ({ requestId: metadata.requestId,
+        imageAttachmentId: metadata.images[0].imageAttachmentId, prompt: 'Add a blue whale, preserve the scene.' });
+
+    const disabled = start({ enabled: false, maxMB: 10 });
+    assert.deepEqual(disabled.metadata.images, []);
+    await finish(disabled);
+    const scopeOnly = start();
+    assert.equal(fetchCount, 0, 'registration itself never downloads');
+    const foreign = generationRequestMetadata(scopeOnly.scope)[1];
+    assert.equal((await nativeCall(ctx, GENERATE_IMAGE_TOOL, { ...args(scopeOnly.metadata), requestId: foreign.requestId }, agent, 'lazy-foreign')).isError, true);
+    await finish(scopeOnly);
+    assert.equal((await nativeCall(ctx, GENERATE_IMAGE_TOOL, args(scopeOnly.metadata), agent, 'lazy-expired')).isError, true);
+    assert.equal(fetchCount, 0, 'foreign and expired IDs cannot download');
+
+    const busy = start();
+    acquire.ok = false;
+    acquire.reason = 'busy';
+    assert.equal((await nativeCall(ctx, GENERATE_IMAGE_TOOL, args(busy.metadata), agent, 'lazy-busy')).value.status, 'busy');
+    assert.equal(fetchCount, 0, 'a refused concurrency slot prevents even a base-image download');
+    acquire.ok = true;
+    await finish(busy);
+
+    const failed = start();
+    fetchImpl = async () => ({ response: new Response('denied', { status: 403 }), close: async () => {} });
+    assert.equal((await nativeCall(ctx, GENERATE_IMAGE_TOOL, args(failed.metadata), agent, 'lazy-failed')).value.status, 'failed');
+    await finish(failed);
+
+    const bounded = start({ enabled: true, maxMB: 1 / (1024 * 1024) });
+    fetchImpl = async () => ({ response: new Response(png, { headers: { 'content-type': 'image/png' } }), close: async () => {} });
+    assert.equal((await nativeCall(ctx, GENERATE_IMAGE_TOOL, args(bounded.metadata), agent, 'lazy-size')).value.status, 'failed');
+    await finish(bounded);
+
+    const cancelled = start();
+    const started = deferred();
+    fetchImpl = async (_url, signal) => {
+        started.resolve(signal);
+        await new Promise((resolve, reject) => {
+            if (signal.aborted) reject(signal.reason);
+            else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+    };
+    const pending = nativeCall(ctx, GENERATE_IMAGE_TOOL, args(cancelled.metadata), agent, 'lazy-cancelled');
+    const signal = await started.promise;
+    const ending = endGenerationTurn(agent, cancelled.scope);
+    assert.equal(signal.aborted, true, 'turn revocation aborts the ongoing base-image request');
+    await Promise.all([ending, pending]);
+    endDocumentTurn(agent, cancelled.documentScope);
+    assert.equal(providerCalls.length, 0);
+    assert.equal(imageSends.length, 0);
+    assert.equal(quota.events.filter(([name]) => name === 'release').length, 3, 'failed and cancelled downloads release concurrency slots');
 });
 
 test('native Markdown remains available in document mode, validates UTF-8, and falls back once on the same request', async (t) => {

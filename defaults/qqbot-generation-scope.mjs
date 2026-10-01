@@ -116,6 +116,14 @@ function documentScopeActive(documentScope) {
     return Boolean(documentScope?.active);
 }
 
+function lazyQuoteLimit(media) {
+    if (media?.enabled !== true) return undefined;
+    const maxMB = media.maxMB ?? 10;
+    if (typeof maxMB !== 'number' || !Number.isFinite(maxMB) || maxMB <= 0) return undefined;
+    const limit = Math.floor(Math.min(maxMB, 10) * 1024 * 1024);
+    return limit > 0 ? limit : undefined;
+}
+
 /**
  * Start an immutable generation provenance scope from snapshots captured by
  * the merge guard before it combines message text or attachments.
@@ -128,6 +136,7 @@ export function beginGenerationTurn(agent, originalRequests, downloadedFiles, op
     if (previous) revokeGenerationTurn(previous);
 
     const documentScope = options.documentScope;
+    const quoteMaxBytes = lazyQuoteLimit(options.media);
     const downloads = matchingDownloads(downloadedFiles);
     const requests = new Map();
     const imageAttachments = new Map();
@@ -173,7 +182,11 @@ export function beginGenerationTurn(agent, originalRequests, downloadedFiles, op
                 }
                 const matching = downloads.get(attachment.url);
                 const file = matching?.shift();
-                if (!file) {
+                // Quote IDs authorize a specific source, not pre-downloaded
+                // bytes. Only an actual edit tool call may fetch this URL.
+                const lazyQuote = quoted && quoteMaxBytes !== undefined
+                    && ['image', 'image/png', 'image/jpeg'].includes(attachment.contentType);
+                if (!file && !lazyQuote) {
                     diagnostics.missingDownload++;
                     continue;
                 }
@@ -186,8 +199,9 @@ export function beginGenerationTurn(agent, originalRequests, downloadedFiles, op
                     contentType: attachment.contentType,
                     size: attachment.size,
                     quoted,
-                    localPath: file.localPath,
+                    localPath: file?.localPath,
                     sourceUrl: attachment.url,
+                    maxBytes: file ? undefined : quoteMaxBytes,
                 });
                 imageAttachments.set(imageAttachmentId, grant);
                 request.images.push({ imageAttachmentId, filename: grant.filename, quoted });

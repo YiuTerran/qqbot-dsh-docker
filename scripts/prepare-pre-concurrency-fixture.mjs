@@ -44,6 +44,27 @@ if (thinkingOnly) {
 // Reverse the newer generation layers before reproducing the historical
 // concurrency layout. Thinking-only fixtures keep these current layers.
 await edit('transport/inbound.js', (source) => {
+    if (source.includes('// Chat-only group model context v1.')) {
+        source = replaceOnce(source,
+            "import { beginGroupModelContext, endGroupModelContext } from '/opt/qqbot-defaults/qqbot-model-context.mjs';\n",
+            '', 'group model context import');
+        source = replaceOnce(source,
+            '    let modelContextTurn;\n', '', 'group model context declaration');
+        source = replaceOnce(source,
+            '    // Chat-only group model context v1.\n    modelContextTurn = beginGroupModelContext(chatOnlyAgent, scope, documentTurn);\n',
+            '', 'group model context binding');
+        source = replaceOnce(source,
+            '        endGroupModelContext(chatOnlyAgent, modelContextTurn);\n',
+            '', 'group model context cleanup');
+    }
+    else if (source.includes('beginGroupModelContext') || source.includes('modelContextTurn')) {
+        throw new Error('pre-concurrency fixture found partial group model context guard');
+    }
+    if (source.includes('// Chat-only lazy quoted image grants v1.')) {
+        source = replaceOnce(source,
+            '                // Chat-only lazy quoted image grants v1.\n                media: config.media,\n',
+            '', 'lazy quote media configuration');
+    }
     if (!source.includes('// Chat-only generation provenance v1.')) {
         if (source.includes('generationTurn') || source.includes('getMergedGenerationRequests'))
             throw new Error('pre-concurrency fixture found partial generation provenance');
@@ -126,6 +147,29 @@ await edit('transport/outbound.js', (source) => {
 });
 
 await edit('middleware/attachment.js', (source) => {
+    if (source.includes('// Chat-only lazy quoted images v1.')) {
+        const start = source.indexOf('            // Chat-only quoted-image downloads v2.');
+        const end = source.indexOf('\n        }\n        catch (err)', start);
+        if (start < 0 || end < start) throw new Error('pre-concurrency fixture found partial lazy quote downloads');
+        const originalQuote = [
+            '            // Chat-only quoted-image downloads v2.',
+            '            // 引用消息附件：转成 RawAttachment 结构复用下载（voice 由 downloadMediaAttachments 自动跳过）',
+            '            const quoteAttachments = ctx.state.quote?.attachments;',
+            '            if (quoteAttachments && quoteAttachments.length > 0) {',
+            '                const rawQuote = quoteAttachments',
+            '                    .filter(a => a.url)',
+            '                    .map((a) => ({',
+            "                    content_type: a.contentType ?? '',",
+            "                    filename: a.filename ?? '',",
+            '                    size: 0,',
+            '                    url: a.url,',
+            '                }));',
+            '                const downloadedQuote = await downloadMediaAttachments(rawQuote, config.media, logger);',
+            '                ctx.state.downloadedQuoteFiles = downloadedQuote;',
+            '            }',
+        ].join('\n');
+        return source.slice(0, start) + originalQuote + source.slice(end);
+    }
     const independentMarker = '            // Chat-only independent merged quote downloads v2.';
     if (source.includes(independentMarker)) {
         const start = source.indexOf(independentMarker);

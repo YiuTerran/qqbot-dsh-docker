@@ -662,6 +662,7 @@ integration('native group inbound/outbound handlers hold the shared-group lock t
         },
     };
     const agent = {
+        session: { seq: 0 },
         followup(body) {
             followups.push(body);
             if (followups.length === 2) {
@@ -776,6 +777,7 @@ integration('native inbound carries real SDK quote image grants into generation 
     const followups = [];
     let record;
     const agent = {
+        session: { seq: 0 },
         followup(body) {
             const scope = getGenerationTurn(agent);
             const requests = generationRequestMetadata(scope);
@@ -906,6 +908,7 @@ integration('timed-out native turn cancels its captured agent and drains documen
     let record;
     let outbound;
     const agent = {
+        session: { seq: 0 },
         followup(body) {
             followups.push(body);
             if (followups.length === 1) {

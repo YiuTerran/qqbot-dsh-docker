@@ -1,7 +1,7 @@
 // Run inside the built image; exercise the pinned dsh executor and QQ adapter
 // without calling QQ or a paid model API.
 import assert from 'node:assert/strict';
-import { mkdtemp, writeFile, readFile, symlink, mkdir, rename, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, readFile, symlink, mkdir, rename, rm, utimes } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { test } from 'node:test';
@@ -37,7 +37,7 @@ const { applyWebFetchTool, applyWebSearchTool } = await import(`${dshRoot}dsh-to
 const { DeepSeekSearchProvider } = await import(`${dshRoot}dsh-web-search-deepseek/lib/index.js`);
 const adapter = '/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/';
 const { registerDescribeImageTool } = await import(`${adapter}media/vision-tool.js`);
-const { MEDIA_ROOT } = await import(`${adapter}media/media-cleaner.js`);
+const { MEDIA_ROOT, cleanupExpiredMedia } = await import(`${adapter}media/media-cleaner.js`);
 const { handleInbound } = await import(`${adapter}transport/inbound.js`);
 const { downloadMediaAttachments } = await import(`${adapter}transport/attachment.js`);
 const { attachmentProcessor } = await import(`${adapter}middleware/attachment.js`);
@@ -65,6 +65,20 @@ function currentRecordManager(agent, sessionId) {
 }
 
 assert.equal(QQ_MEDIA_ROOT, MEDIA_ROOT, 'policy root must match the pinned adapter media cache');
+
+test('media cleanup removes expired cache files and preserves fresh images', async (t) => {
+    await mkdir(MEDIA_ROOT, { recursive: true });
+    const prefix = `cleanup-${crypto.randomUUID()}`;
+    const expired = join(MEDIA_ROOT, `${prefix}-old.png`);
+    const fresh = join(MEDIA_ROOT, `${prefix}-new.png`);
+    t.after(() => Promise.all([expired, fresh].map((path) => rm(path, { force: true }))));
+    await Promise.all([expired, fresh].map((path) => writeFile(path, png)));
+    const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    await utimes(expired, old, old);
+    assert.ok(await cleanupExpiredMedia(1, logger) >= 1);
+    await assert.rejects(() => readFile(expired), { code: 'ENOENT' });
+    assert.deepEqual(await readFile(fresh), png);
+});
 
 async function mediaTestDir(prefix) {
     await mkdir(QQ_MEDIA_ROOT, { recursive: true });
@@ -720,9 +734,32 @@ test('web_search merges and deduplicates query results, caps sources, and fails 
     assert.equal(requests.length, 1);
     assert.equal(requests[0].url, 'https://search-gateway.example.com/anthropic/v1/messages');
     assert.equal(requests[0].options.method, 'POST');
+    assert.equal(requests[0].options.redirect, 'error', 'the search endpoint never follows redirects');
     assert.equal(requests[0].options.headers['x-api-key'], 'fixture-search-key');
     assert.equal(requests[0].body.model, 'relay-search-model');
     assert.equal(requests[0].body.tools[0].type, 'web_search_20250305');
+    assert.equal(requests[0].body.tools[0].max_uses, 5, 'positive provider caps remain supported');
+
+    const unlimitedProvider = new DeepSeekSearchProvider(() => ({
+        baseURL: 'https://search-gateway.example.com/anthropic/v1', model: 'relay-search-model',
+        apiVersion: '2023-06-01', maxTokens: 4096, maxUses: 0,
+        apiKeyEnv: 'LLM_API_KEY', resolveApiKey: async () => 'fixture-search-key',
+    }));
+    assert.equal(unlimitedProvider.available(), true, 'zero explicitly means no native search-use cap');
+    const unlimitedCtx = await webSearchRuntime(t, unlimitedProvider);
+    const unlimitedAgent = {};
+    beginDocumentTurn(unlimitedAgent, { content: 'Search repeatedly to investigate this topic.' });
+    t.after(() => endDocumentTurn(unlimitedAgent));
+    for (let index = 0; index < 10; index++) {
+        const output = await nativeCall(unlimitedCtx, 'web_search', { queries: [`followup search ${index}`] }, unlimitedAgent, `search-${index}`);
+        assert.equal(output.isError, false, JSON.stringify(output));
+        assert.equal(Object.hasOwn(requests.at(-1).body.tools[0], 'max_uses'), false, 'uncapped requests omit max_uses entirely');
+    }
+    assert.equal(requests.length, 11, 'rapid searches in one turn all reach the provider beyond five uses');
+    globalThis.fetch = async () => new Response(JSON.stringify({ error: { message: 'provider rate limit fixture' } }), { status: 429 });
+    const upstreamLimit = await nativeCall(unlimitedCtx, 'web_search', { queries: ['provider throttled'] }, unlimitedAgent, 'search-429');
+    assert.equal(upstreamLimit.isError, true);
+    assert.match(upstreamLimit.content.map((block) => block.text).join('\n'), /HTTP 429/);
 
     globalThis.fetch = async () => new Response(JSON.stringify({
         content: [{ type: 'text', text: 'This is only an ordinary chat answer.' }],
@@ -960,6 +997,7 @@ test('QQ inbound binds only current downloaded images and clears them after the 
         let messages = 0;
         let documentId;
         const agent = {
+            session: { seq: 0 },
             followup(message) {
                 messages++;
                 assert.ok(message.content.some((block) => block.text.includes('你好')));
@@ -1220,6 +1258,7 @@ test('group image quotes recover cached original attachments through the product
     };
     const followups = [];
     const agent = {
+        session: { seq: 0 },
         followup(body) {
             followups.push({ body, metadata: generationRequestMetadata(getGenerationTurn(agent)) });
         },
@@ -1269,12 +1308,12 @@ test('group image quotes recover cached original attachments through the product
             content: `<@!${config.appId}> 在江里加一条蓝色鲸鱼` });
         assert.equal(quote.state.quote?.source, 'store');
         assert.equal(quote.state.quote?.attachments?.[0]?.url, sourceUrl, 'explicit reference restores the actual original URL');
-        assert.deepEqual(await readFile(quote.state.downloadedQuoteFiles[0].localPath), png);
+        assert.deepEqual(quote.state.downloadedQuoteFiles, [], 'quote metadata does not eagerly download or create a file');
         const modelInput = followups.at(-1);
         assert.equal(modelInput.metadata[0].images.length, 1, 'the quoted original receives an edit grant');
         assert.equal(modelInput.metadata[0].images[0].quoted, true);
         assert.match(JSON.stringify(modelInput.body), /imageAttachmentId/);
-        assert.doesNotMatch(JSON.stringify(modelInput.body), /https:\/\/example\.com\/original-river/);
+        assert.match(JSON.stringify(modelInput.body), /https:\/\/example\.com\/original-river/, 'quoted vision can still use the original URL');
         assert.doesNotMatch(JSON.stringify(modelInput.body), /Chat history begins/);
 
         const textOnly = await run({ messageId: `river-text-only-${mentioned}`, refMsgIdx: sourceId,
@@ -1287,7 +1326,7 @@ test('group image quotes recover cached original attachments through the product
         groupOpenid: 'other-group', content: `<@!${config.appId}> 改图` });
     assert.equal(foreign.state.quote.source, 'none');
     assert.equal(followups.at(-1).metadata[0].images.length, 0, 'another group cannot retrieve cached image metadata');
-    assert.ok(downloads.length >= 4);
+    assert.equal(downloads.length, 1, 'only the original message explicitly attached to a mentioned bot downloads; quotes do not');
 });
 
 test('QQ rendered image records recover only complete HTTPS images from the current explicit quote', () => {
@@ -1917,6 +1956,37 @@ test('QQ file/video attachments are not downloaded', async () => {
     ], { enabled: true, maxMB: 10 }, logger), []);
 });
 
+test('webpage redirect loops stop at three hops and close every response', async () => {
+    for (const loop of ['self', 'two-pages']) {
+        const provider = new WebPageProvider();
+        let requests = 0, closed = 0, cancelled = 0;
+        provider.requestOnce = async (url) => {
+            requests++;
+            const location = loop === 'self' ? url.href : url.pathname === '/a' ? '/b' : '/a';
+            const body = new ReadableStream({ cancel() { cancelled++; } });
+            return { response: new Response(body, { status: 302, headers: { location } }),
+                close: async () => { closed++; } };
+        };
+        await assert.rejects(() => provider.fetch({ url: 'https://example.com/a' }, new AbortController().signal), /maximum of 3 redirects/);
+        assert.equal(requests, 4, 'initial request plus three redirects is the absolute maximum');
+        assert.equal(closed, requests);
+        assert.equal(cancelled, requests, 'redirect bodies are disposed even when the hop limit fails');
+    }
+    const provider = new WebPageProvider();
+    let requests = 0;
+    provider.requestOnce = async (url) => {
+        requests++;
+        const step = Number(url.pathname.slice(1));
+        return { response: step < 3
+            ? new Response('', { status: 302, headers: { location: `/${step + 1}` } })
+            : new Response('<html>final page</html>', { headers: { 'content-type': 'text/html' } }),
+        close: async () => {} };
+    };
+    const response = await provider.fetch({ url: 'https://example.com/0' }, new AbortController().signal);
+    assert.equal(response.body.content, '<html>final page</html>', 'valid redirect chains within the cap still work');
+    assert.equal(requests, 4);
+});
+
 test('current QQ image downloader validates bytes, bounds, redirects, and quoted images', async (t) => {
     await assert.rejects(() => downloadCurrentQQImage('http://example.com/image.png', 1024), /Only HTTPS allowed/);
     await assert.rejects(() => downloadCurrentQQImage('https://user:pass@example.com/image.png', 1024), /Credentials/);
@@ -1964,17 +2034,15 @@ test('current QQ image downloader validates bytes, bounds, redirects, and quoted
         quote: { attachments: [{ contentType: 'image/png', filename: 'quoted.png', url: 'https://example.com/quoted.png' }] },
     };
     let nextCalled = false;
+    const beforeQuote = requestCount;
     await attachmentProcessor({ media: { enabled: true, maxMB: 10 } }, logger)({
         message: { attachments: [] },
         state,
     }, async () => { nextCalled = true; });
     assert.equal(nextCalled, true);
     assert.deepEqual(state.downloadedFiles, []);
-    assert.equal(state.downloadedQuoteFiles.length, 1);
-    assert.equal(state.downloadedQuoteFiles[0].contentType, 'image');
-    assert.equal(state.downloadedQuoteFiles[0].filename, 'quoted.png');
-    assert.deepEqual(await readFile(state.downloadedQuoteFiles[0].localPath), png);
-    t.after(() => rm(state.downloadedQuoteFiles[0].localPath, { force: true }));
+    assert.deepEqual(state.downloadedQuoteFiles, []);
+    assert.equal(requestCount, beforeQuote, 'an ordinary quoted picture never fetches bytes');
 
     const mergedState = {
         qqbotGenerationQuoteAttachments: [{ content_type: 'image/png', filename: 'later-quoted.png', url: 'https://example.com/later.png' }],
@@ -1982,7 +2050,6 @@ test('current QQ image downloader validates bytes, bounds, redirects, and quoted
     await attachmentProcessor({ media: { enabled: true, maxMB: 10 } }, logger)({
         message: { attachments: [] }, state: mergedState,
     }, async () => {});
-    assert.equal(mergedState.downloadedGenerationQuoteFiles.length, 1, 'a later merged quote downloads when the first message has no quote');
-    assert.deepEqual(await readFile(mergedState.downloadedGenerationQuoteFiles[0].localPath), png);
-    t.after(() => rm(mergedState.downloadedGenerationQuoteFiles[0].localPath, { force: true }));
+    assert.deepEqual(mergedState.downloadedGenerationQuoteFiles, [], 'merged quote metadata also stays lazy');
+    assert.equal(requestCount, beforeQuote);
 });
