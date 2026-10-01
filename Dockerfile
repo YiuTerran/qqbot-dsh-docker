@@ -85,6 +85,7 @@ COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY defaults/AGENTS.md /opt/qqbot-defaults/AGENTS.md
 COPY defaults/cordis.safety.patch.yml /opt/qqbot-defaults/cordis.safety.patch.yml
 COPY defaults/qqbot-chat-policy.mjs /opt/qqbot-defaults/qqbot-chat-policy.mjs
+COPY defaults/qqbot-image-diagnostics.mjs /opt/qqbot-defaults/qqbot-image-diagnostics.mjs
 COPY defaults/qqbot-web-pages.mjs /opt/qqbot-defaults/qqbot-web-pages.mjs
 COPY defaults/qqbot-document-scope.mjs /opt/qqbot-defaults/qqbot-document-scope.mjs
 COPY defaults/qqbot-session-recovery.mjs /opt/qqbot-defaults/qqbot-session-recovery.mjs

@@ -1345,6 +1345,24 @@ await patch('transport/attachment.js', '// Chat-only generation attachment prove
     return content;
 });
 
+await patch('transport/attachment.js', '// Chat-only image download diagnostics v1.', (content, file) => {
+    content = "import { logDownloadDiagnostics, logDownloadSelection } from '/opt/qqbot-defaults/qqbot-image-diagnostics.mjs';\n" + content;
+    content = replaceOne(content, '    if (!media.enabled)',
+        '    // Chat-only image download diagnostics v1.\n    logDownloadSelection(attachments, media);\n    if (!media.enabled)', file);
+    content = replaceOne(content, '        if (att.size > maxBytes) {',
+        "        if (att.size > maxBytes) {\n            logDownloadDiagnostics(att, 'too_large');", file);
+    content = replaceOne(content, '            bytes = await download(att.url, localPath, maxBytes);',
+        "            logDownloadDiagnostics(att, 'start');\n            bytes = await download(att.url, localPath, maxBytes);\n            logDownloadDiagnostics(att, 'success');", file);
+    return replaceOne(content, '        catch (err) {',
+        "        catch (err) {\n            logDownloadDiagnostics(att, 'failed', err);", file);
+});
+
+await patch('middleware/attachment.js', '// Chat-only attachment processor diagnostics v1.', (content, file) => {
+    content = "import { logDownloadDiagnostics } from '/opt/qqbot-defaults/qqbot-image-diagnostics.mjs';\n" + content;
+    return replaceOne(content, '        catch (err) {',
+        "        catch (err) {\n            // Chat-only attachment processor diagnostics v1.\n            logDownloadDiagnostics(undefined, 'processor_failed', err);", file);
+});
+
 await patch('middleware/attachment.js', '// Chat-only generation quote image downloads v1.', (content, file) => {
     const quoteDownloadBlock = [
         '            // 引用消息附件：转成 RawAttachment 结构复用下载（voice 由 downloadMediaAttachments 自动跳过）',

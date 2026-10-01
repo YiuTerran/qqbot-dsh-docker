@@ -29,6 +29,7 @@ services:
       QQBOT_VISION_ENABLED: ${QQBOT_VISION_ENABLED:-true}
       # Defaults to current-batch-only group context; false restores SDK history.
       QQBOT_GROUP_CURRENT_ONLY: ${QQBOT_GROUP_CURRENT_ONLY:-true}
+      QQBOT_IMAGE_DEBUG: ${QQBOT_IMAGE_DEBUG:-false}
       # Independent image API route; leave all four blank to hide image tools.
       IMAGE_API_KEY: ${IMAGE_API_KEY:-}
       IMAGE_API_BASE_URL: ${IMAGE_API_BASE_URL:-}

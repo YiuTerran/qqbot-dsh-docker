@@ -1,6 +1,7 @@
 import { constants, lstatSync, realpathSync, statSync } from 'node:fs';
 import { open } from 'node:fs/promises';
 import { AsyncLocalStorage } from 'node:async_hooks';
+import { imageDiagnosticsEnabled, logQuoteDiagnostics } from './qqbot-image-diagnostics.mjs';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { downloadCurrentQQImage, WebPageProvider } from './qqbot-web-pages.mjs';
 import {
@@ -173,6 +174,10 @@ export function createScopedQuoteRef(quoteRef) {
                 });
                 quote.text = [quote.rawContent, ...markers].filter(Boolean).join('\n');
             }
+        }
+        if (imageDiagnosticsEnabled()) {
+            const cached = ctx.message.refMsgIdx ? await store.get(ctx.message.refMsgIdx) : undefined;
+            logQuoteDiagnostics(ctx, cached);
         }
         await next();
     }));

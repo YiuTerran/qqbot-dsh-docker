@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { logGenerationBatch, logGenerationDiagnostics } from './qqbot-image-diagnostics.mjs';
 import { resolveTextDocumentType } from './qqbot-text-documents.mjs';
 import { getBoundDocumentExecution } from './qqbot-document-scope.mjs';
 
@@ -131,6 +132,7 @@ export function beginGenerationTurn(agent, originalRequests, downloadedFiles, op
     const requests = new Map();
     const imageAttachments = new Map();
     const validSources = Array.isArray(originalRequests) ? originalRequests.slice(0, MAX_GENERATION_REQUESTS) : [];
+    logGenerationBatch(validSources, downloadedFiles);
     const sourceHadDocument = validSources.some((source) => {
         const normalized = normalizeOriginalRequest(source);
         return normalized && [...normalized.currentAttachments, ...normalized.quotedAttachments].some(isPlainTextAttachment);
@@ -139,7 +141,11 @@ export function beginGenerationTurn(agent, originalRequests, downloadedFiles, op
 
     for (const source of validSources) {
         const normalized = normalizeOriginalRequest(source);
-        if (!normalized) continue;
+        if (!normalized) {
+            logGenerationDiagnostics(source, undefined);
+            continue;
+        }
+        const diagnostics = { unsupportedType: 0, missingDownload: 0, images: 0 };
         let requestId = opaqueId();
         while (requests.has(requestId)) requestId = opaqueId();
 
@@ -161,10 +167,16 @@ export function beginGenerationTurn(agent, originalRequests, downloadedFiles, op
             [true, normalized.quotedAttachments],
         ]) {
             for (const attachment of attachments) {
-                if (!isAllowedImageAttachment(attachment)) continue;
+                if (!isAllowedImageAttachment(attachment)) {
+                    diagnostics.unsupportedType++;
+                    continue;
+                }
                 const matching = downloads.get(attachment.url);
                 const file = matching?.shift();
-                if (!file) continue;
+                if (!file) {
+                    diagnostics.missingDownload++;
+                    continue;
+                }
                 let imageAttachmentId = opaqueId();
                 while (imageAttachments.has(imageAttachmentId)) imageAttachmentId = opaqueId();
                 const grant = Object.freeze({
@@ -182,6 +194,8 @@ export function beginGenerationTurn(agent, originalRequests, downloadedFiles, op
             }
         }
         requests.set(requestId, request);
+        diagnostics.images = request.images.length;
+        logGenerationDiagnostics(source, normalized, diagnostics);
     }
 
     const scope = {

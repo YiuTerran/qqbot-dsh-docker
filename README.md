@@ -117,6 +117,7 @@ services:
       QQBOT_VISION_MODEL: ${QQBOT_VISION_MODEL:-}
       QQBOT_MEDIA_ENABLED: ${QQBOT_MEDIA_ENABLED:-true}
       QQBOT_VISION_ENABLED: ${QQBOT_VISION_ENABLED:-true}
+      QQBOT_IMAGE_DEBUG: ${QQBOT_IMAGE_DEBUG:-false}
       IMAGE_API_KEY: ${IMAGE_API_KEY:-}
       IMAGE_API_BASE_URL: ${IMAGE_API_BASE_URL:-}
       IMAGE_MODEL: ${IMAGE_MODEL:-}
@@ -186,6 +187,22 @@ Compose 会创建并使用命名卷 `dsh-qqbot-data` 和 `dsh-qqbot-workspace`�
 为便于运维观察，镜像会输出三条不含秘密信息的 QQ 启动日志：凭据已解析、已请求连接网关，以及 `Bot ready!` 或 SDK 启动错误。如果 20 秒后仍未就绪，会输出警告，提示检查 DNS、TLS/代理出站连接或 QQ Bot 凭据与权限。设置 `QQBOT_STARTUP_WARN_MS` 可调整警告阈值；此操作不会终止或重启仍在重试的连接。
 
 镜像还会报告网关连接前初始化过程中的异常，包括媒体和视觉工具注册错误。现有 `/data` 卷会在启动时打补丁，因此这项诊断增强无需删除会话或设置。若要临时隔离启动问题，可设置 `QQBOT_VISION_ENABLED=false`；必要时也可设置 `QQBOT_MEDIA_ENABLED=false`。这两项默认均为启用。
+
+### 引用图片诊断
+
+排查“引用图片可见，但生成请求 `images: []`”时，在 Compose 服务的 `environment` 中添加 `QQBOT_IMAGE_DEBUG: "true"`，再执行 `docker compose up -d --force-recreate qqbot`。使用仓库的 Compose 文件时也可以在 `.env` 中设置 `QQBOT_IMAGE_DEBUG=true`；仅修改 `.env` 而未将变量传入容器不会生效。默认关闭，只有精确值 `true` 才开启。
+
+先引用旧图片复现一次，再发送一张新图片并引用它，分别观察以下日志：
+
+```sh
+docker logs --since 10m dsh-qqbot 2>&1 | grep -F '[qqbot-image-debug]'
+```
+
+- `quote`：`hasReference`、`cacheHit`、`elementCount`/`rawElementCount`、各元素的结构化附件和最终 `resolved.count`。引用文字里有 URL 不等于结构化附件存在；`cacheHit=false` 且元素附件数为零说明没有可解析的图片元数据。
+- `download`：`metadata_skipped`、`media_disabled`、`start`、`success` 或 `failed`。失败会给出固定错误类别；识别到 HTTP 错误时记录 `httpStatus`（如 403），不会猜测是否为 rkey 过期。
+- `generation_batch` / `generation`：下载结果数量、每条原始消息规范化前后的附件数量、`unsupportedType`、`missingDownload` 和最终 `images` 数量。`resolved.count>0` 但附件规范化后减少，说明部分 URL 元数据不符合要求；`missingDownload>0` 则说明未找到可绑定的下载结果。
+
+同一进程内用匿名 `trace` 关联引用与登记日志，用 `asset` 关联附件与下载日志，用 `cacheKey`/`refKey` 对照缓存引用；这些标识重启后变化。每组附件/引用元素详情最多显示 16 项。该前缀的日志不输出消息正文、原始用户/群/消息 ID、文件名、URL、查询签名、磁盘路径、密钥或工具授权 ID。请提供复现期间带此前缀的完整日志，而非完整容器日志。调试结束后删除开关或改为 `"false"` 并重建容器。开启日志需要包含本次诊断代码的新镜像；v0.7.3 不支持此开关。重建会清空内存引用缓存，因此新图对照测试需在重建后发送。
 
 ## 默认人设与安全策略
 

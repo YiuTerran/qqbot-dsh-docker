@@ -14,7 +14,7 @@ import { createScopedQuoteRef, installChatPolicy, setCurrentImages, clearCurrent
 import { WebPageProvider, PublicHttpProvider, downloadCurrentQQImage } from '/opt/qqbot-defaults/qqbot-web-pages.mjs';
 import { beginDocumentTurn, endDocumentTurn, getDocumentTurn, isDocumentTurnActive, isTurnUrlAllowed, runInDocumentExecution, recordSuccessfulSearchSources, authorizeTurnProviderUrl, runWithProviderAuthorization, assertProviderRequestUrl } from '/opt/qqbot-defaults/qqbot-document-scope.mjs';
 import { readChatDocument } from '/opt/qqbot-defaults/qqbot-documents.mjs';
-import { getGenerationTurn, generationRequestMetadata } from '/opt/qqbot-defaults/qqbot-generation-scope.mjs';
+import { beginGenerationTurn, endGenerationTurn, getGenerationTurn, generationRequestMetadata } from '/opt/qqbot-defaults/qqbot-generation-scope.mjs';
 import { resolveTextDocumentType, decodeTextDocumentBytes, isBinaryDocumentBytes } from '/opt/qqbot-defaults/qqbot-text-documents.mjs';
 
 const dshRoot = '/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/';
@@ -1287,6 +1287,78 @@ test('group image quotes recover cached original attachments through the product
     assert.equal(foreign.state.quote.source, 'none');
     assert.equal(followups.at(-1).metadata[0].images.length, 0, 'another group cannot retrieve cached image metadata');
     assert.ok(downloads.length >= 4);
+});
+
+test('image diagnostics distinguish quote metadata, download failures, and grant binding without revealing source data', async (t) => {
+    const previousDebug = process.env.QQBOT_IMAGE_DEBUG;
+    const previousInfo = console.info;
+    const previousRequest = PublicHttpProvider.prototype.requestOnce;
+    const lines = [];
+    console.info = (line) => lines.push(line);
+    t.after(() => {
+        if (previousDebug === undefined) delete process.env.QQBOT_IMAGE_DEBUG;
+        else process.env.QQBOT_IMAGE_DEBUG = previousDebug;
+        console.info = previousInfo;
+        PublicHttpProvider.prototype.requestOnce = previousRequest;
+    });
+    const source = { content_type: 'image/png', filename: 'SECRET_FILENAME.png', url: 'https://example.com/SECRET_IMAGE?rkey=SECRET_RKEY' };
+    delete process.env.QQBOT_IMAGE_DEBUG;
+    await downloadMediaAttachments([source], { enabled: false }, logger);
+    assert.deepEqual(lines, [], 'diagnostics are silent by default');
+    process.env.QQBOT_IMAGE_DEBUG = 'true';
+    const scoped = createScopedQuoteRef(quoteRef);
+    const target = { scope: 'group', targetId: 'SECRET_GROUP', msgId: 'SECRET_EDIT_MESSAGE' };
+    const run = async (fields) => {
+        const ctx = { message: { kind: 'group', groupOpenid: target.targetId, senderId: 'SECRET_USER',
+            replyTarget: target, ...fields }, state: {}, log: logger };
+        await scoped(ctx, async () => {});
+        return ctx;
+    };
+    await run({ messageId: 'SECRET_SOURCE_MESSAGE', msgIdx: 'SECRET_INDEX', content: 'SECRET_BODY', attachments: [source] });
+    await run({ messageId: target.msgId, refMsgIdx: 'SECRET_INDEX', content: 'SECRET_EDIT_TEXT' });
+    await run({ messageId: 'SECRET_CACHE_MISS', refMsgIdx: 'SECRET_UNKNOWN_INDEX' });
+    const elements = [{ content: 'SECRET_QUOTE_TEXT' }, { attachments: [source] }];
+    await run({ messageId: 'SECRET_LATER_ELEMENT', refMsgIdx: 'SECRET_LATER_INDEX', msgElements: elements, raw: { msg_elements: elements } });
+
+    await downloadMediaAttachments([source], { enabled: false }, logger);
+    await downloadMediaAttachments([{ ...source, content_type: 'application/octet-stream' }], { enabled: true }, logger);
+    PublicHttpProvider.prototype.requestOnce = async () => ({ response: new Response(png, { headers: { 'content-type': 'image/png' } }), close: async () => {} });
+    const files = await downloadMediaAttachments([source], { enabled: true }, logger);
+    assert.equal(files.length, 1);
+    t.after(() => rm(files[0].localPath, { force: true }));
+    PublicHttpProvider.prototype.requestOnce = async () => ({ response: new Response('SECRET_SERVER_BODY', { status: 403 }), close: async () => {} });
+    assert.deepEqual(await downloadMediaAttachments([source], { enabled: true }, logger), []);
+    PublicHttpProvider.prototype.requestOnce = async () => { throw new Error('SECRET_ERROR https://example.com/?key=SECRET_KEY'); };
+    assert.deepEqual(await downloadMediaAttachments([source], { enabled: true }, logger), []);
+    const agent = {};
+    const request = { ownerId: 'SECRET_USER', replyTarget: target, text: 'SECRET_PROMPT', quotedAttachments: [source,
+        { ...source, url: 'https://example.com/missing?rkey=SECRET_RKEY' },
+        { ...source, content_type: 'image/gif' },
+    ] };
+    const scope = beginGenerationTurn(agent, [request], files);
+    await endGenerationTurn(agent, scope);
+    const events = lines.map((line) => JSON.parse(line.slice('[qqbot-image-debug] '.length)));
+    const cached = events.find((event) => event.event === 'quote' && event.cacheHit);
+    assert.equal(cached.resolved.count, 1);
+    assert.equal(events.some((event) => event.event === 'quote' && event.hasReference && !event.cacheHit && event.resolved.count === 0), true);
+    const later = events.find((event) => event.elementCount === 2);
+    assert.equal(later.elements[0].attachments.count, 0);
+    assert.equal(later.elements[1].attachments.count, 1, 'logs reveal attachment metadata outside the SDK first-element parser');
+    assert.equal(later.rawElements[1].attachments.count, 1);
+    assert.equal(later.resolved.count, 0);
+    const downloads = events.filter((event) => event.event === 'download');
+    for (const status of ['media_disabled', 'metadata_skipped', 'start', 'success', 'failed']) {
+        assert.ok(downloads.some((event) => event.status === status), status);
+    }
+    assert.ok(downloads.some((event) => event.status === 'failed' && event.httpStatus === 403));
+    assert.ok(downloads.some((event) => event.reason === 'other_error'));
+    const grant = events.find((event) => event.event === 'generation');
+    assert.equal(grant.images, 1);
+    assert.equal(grant.missingDownload, 1);
+    assert.equal(grant.unsupportedType, 1);
+    assert.equal(grant.trace, cached.trace);
+    assert.equal(grant.quoted.items[0].asset, downloads.find((event) => event.status === 'success').asset);
+    assert.doesNotMatch(lines.join('\n'), /SECRET_|https:|rkey|\/data\//, 'diagnostic output contains no identifiers, content, signed URLs, paths, or raw errors');
 });
 
 test('prepared native executions cannot adopt grants from a newer QQ turn', async (t) => {
