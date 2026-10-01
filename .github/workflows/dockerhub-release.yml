@@ -13,11 +13,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  publish:
-    name: Build and push linux/amd64 + linux/arm64
-    runs-on: ubuntu-24.04
-    # Docker Hub credentials are configured as secrets in the GitHub Environment
-    # named "de". Environment secrets are not available without this binding.
+  build:
+    name: Build and validate ${{ matrix.platform }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+            platform: linux/amd64
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
     environment:
       name: de
     env:
@@ -28,11 +36,6 @@ jobs:
     steps:
       - name: Check out release tag
         uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: amd64,arm64
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -50,25 +53,90 @@ jobs:
           pull: true
           load: true
           push: false
-          platforms: linux/amd64
-          tags: dsh-qqbot:test-local
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          platforms: ${{ matrix.platform }}
+          tags: dsh-qqbot:test-local-${{ matrix.arch }}
+          cache-from: type=gha,scope=release-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.arch }}
 
       - name: Run chat-only security regression
-        run: IMAGE=dsh-qqbot:test-local SKIP_BUILD=1 ./scripts/test-local.sh
+        run: IMAGE=dsh-qqbot:test-local-${{ matrix.arch }} SKIP_BUILD=1 ./scripts/test-local.sh
 
-      - name: Build and push multi-architecture image
+      - name: Build and push architecture image by digest
+        id: push
         uses: docker/build-push-action@v6
         with:
           context: .
           pull: true
           push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ env.IMAGE }}:${{ env.TAG }}
+          platforms: ${{ matrix.platform }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ env.TAG }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=release-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.arch }}
+
+      - name: Save image digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          [[ "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]
+          mkdir -p /tmp/digests
+          touch "/tmp/digests/${DIGEST#sha256:}"
+
+      - name: Upload image digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.arch }}
+          path: /tmp/digests/*
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    name: Publish multi-architecture manifest
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: de
+    env:
+      IMAGE: tryao/qqbot-dsh
+      TAG: ${{ github.ref_name }}
+      DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USER }}
+      DOCKERHUB_SECRET: ${{ secrets.DOCKERHUB_SECRET }}
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ env.DOCKERHUB_USER }}
+          password: ${{ env.DOCKERHUB_SECRET }}
+
+      - name: Download architecture digests
+        uses: actions/download-artifact@v4
+        with:
+          pattern: digests-*
+          merge-multiple: true
+          path: /tmp/digests
+
+      - name: Validate and create multi-architecture manifest
+        shell: bash
+        run: |
+          mapfile -t DIGESTS < <(find /tmp/digests -maxdepth 1 -type f -printf '%f\n' | sort)
+          [[ "${#DIGESTS[@]}" -eq 2 ]]
+          for digest in "${DIGESTS[@]}"; do
+            [[ "$digest" =~ ^[a-f0-9]{64}$ ]]
+          done
+
+          docker buildx imagetools create \
+            --tag "$IMAGE:$TAG" \
+            "$IMAGE@sha256:${DIGESTS[0]}" \
+            "$IMAGE@sha256:${DIGESTS[1]}"
+
+          docker buildx imagetools inspect --raw "$IMAGE:$TAG" > /tmp/manifest.json
+          jq -e '
+            [.manifests[] | select(.platform.architecture != "unknown") | "\(.platform.os)/\(.platform.architecture)"]
+            | sort == ["linux/amd64", "linux/arm64"]
+          ' /tmp/manifest.json
