@@ -325,6 +325,57 @@ test('history is cleared at the synchronous reset commit, before a slow disposal
     assert.deepEqual(historyStore.entries.get(otherKey), [{ senderId: 'other', content: 'other group stays' }]);
 });
 
+test('restored group history stays hidden while an asynchronous recovery clear is pending', async () => {
+    const key = 'app:group-a';
+    let finishClear;
+    const clearPromise = new Promise((resolvePromise) => { finishClear = resolvePromise; });
+    let listCalls = 0;
+    const historyStore = {
+        list() { listCalls++; return [{ senderId: 'old', content: 'must stay hidden' }]; },
+        clear() { return clearPromise; },
+    };
+    const documentTurn = { active: false };
+    const agent = {};
+    const record = { agent, sessionId: 'session-group-suppressed' };
+    const manager = {
+        getSessionRecord() { return record; },
+        async remove(_scope, _peer, options) { options.onCommitted(); return true; },
+    };
+    registerRecoveryContext(documentTurn, {
+        manager, appId: 'app', scope: 'group', peerId: 'group-a', record, agent,
+        sessionId: record.sessionId, historySnapshot: { store: historyStore, key },
+    });
+    noteRecoveryTurnStart({ record, sessionId: record.sessionId, turnId: 1 });
+    markContentRiskFailure({ record, sessionId: record.sessionId, turnId: 1, failure: qualifying(), notify() {} });
+    assert.equal(await finishContentRiskRecovery(documentTurn), 'reset');
+    assert.equal(isHistoryStoreSuppressed(historyStore, key), true,
+        'an unresolved asynchronous clear keeps the exact group hidden');
+
+    const diceUrl = process.env.QQBOT_DICE_MODULE
+        ? pathToFileURL(resolve(process.env.QQBOT_DICE_MODULE)).href
+        : new URL('../defaults/qqbot-dice.mjs', import.meta.url).href;
+    const { createDiceAwareHistoryBuffer } = await import(diceUrl);
+    const fakeHistoryBuffer = ({ store }) => async (ctx, next) => {
+        ctx.state.history = await store.list(key, 16);
+        await next();
+    };
+    const ctx = {
+        bot: { appId: 'app' },
+        message: { kind: 'group', groupOpenid: 'group-a', senderId: 'member', content: 'current request' },
+        state: {},
+    };
+    const wrapped = createDiceAwareHistoryBuffer(fakeHistoryBuffer, { store: historyStore }, undefined,
+        { QQBOT_GROUP_CURRENT_ONLY: 'false' });
+    await wrapped(ctx, async () => {});
+    assert.deepEqual(ctx.state.history, [], 'the opt-out path respects recovery suppression until clearing finishes');
+    assert.equal(listCalls, 0, 'suppressed history never reaches the underlying store read');
+
+    finishClear();
+    await clearPromise;
+    await Promise.resolve();
+    assert.equal(isHistoryStoreSuppressed(historyStore, key), false, 'successful clear releases suppression');
+});
+
 const adapterDist = process.env.QQBOT_ADAPTER_DIST;
 const integration = adapterDist ? test : test.skip;
 let adapterPeersPrepared = false;
@@ -745,6 +796,88 @@ integration('real queued group history drops a pre-reset snapshot but keeps curr
     assert.equal(sent[0].text, SUCCESS_NOTICE);
     assert.deepEqual(await sourceStore.list(otherGroupKey, 16), [{ senderId: 'other', content: 'other group history', messageId: 'other-group' }]);
     assert.deepEqual(await sourceStore.list(otherAppKey, 16), [{ senderId: 'other-app', content: 'other app history', messageId: 'other-app' }]);
+});
+
+integration('false group-history mode supplies persisted history while the adapter still includes current and quoted text', async (t) => {
+    await prepareAdapterPeers();
+    const adapter = `${resolve(adapterDist)}/`;
+    const { handleInbound } = await import(`${adapter}transport/inbound.js`);
+    const { historyGroupKey } = await import(`${adapter}features/history-store.js`);
+    const sdkMiddleware = '/data/profiles/qqbot/node_modules/@tencent-connect/qqbot-nodejs/dist/middleware/history-buffer.js';
+    const [{ historyBuffer, MemoryHistoryStore }, { createDiceAwareHistoryBuffer }] = await Promise.all([
+        import(pathToFileURL(sdkMiddleware).href),
+        import(pathToFileURL(resolve(process.env.QQBOT_DICE_MODULE ?? '/opt/qqbot-defaults/qqbot-dice.mjs')).href),
+    ]);
+
+    const appId = 'history-opt-out-app';
+    const groupId = 'history-opt-out-group';
+    const key = historyGroupKey(appId, groupId);
+    const sourceStore = new MemoryHistoryStore();
+    const priorMessage = { senderId: 'prior-peer', content: 'persisted group history', messageId: 'prior-message' };
+    await sourceStore.append(key, priorMessage, 16);
+    const wrappedHistory = createDiceAwareHistoryBuffer(historyBuffer, {
+        limit: 16,
+        store: sourceStore,
+        recordOnSkip: true,
+        groupKey: (ctx) => ctx.message.kind === 'group' && ctx.message.groupOpenid
+            ? historyGroupKey(appId, ctx.message.groupOpenid)
+            : undefined,
+    }, undefined, { QQBOT_GROUP_CURRENT_ONLY: 'false' });
+
+    const fixture = fixtureAssertions();
+    let followedInput;
+    let ctx;
+    const agent = {
+        followup(message) {
+            followedInput = message;
+            assert.deepEqual(ctx.state.history, [priorMessage], 'the pinned adapter history middleware supplies persisted group context');
+        },
+        async whenIdle() {},
+    };
+    agent.followup = fixture.wrap(agent.followup);
+    agent.whenIdle = fixture.wrap(agent.whenIdle);
+    const replyTarget = { scope: 'group', targetId: groupId, msgId: 'current-message' };
+    const record = {
+        sessionKey: `qqbot:${appId}:group:${groupId}`,
+        sessionId: 'history-opt-out-session',
+        scope: 'group', peerId: groupId, senderId: 'current-peer', agent, replyTarget,
+        handle: { async dispose() {} },
+    };
+    const manager = {
+        getSessionRecord(scope, peerId) { return scope === 'group' && peerId === groupId ? record : undefined; },
+        async getOrCreate(scope, peerId, _senderId, target) {
+            assert.equal(scope, 'group');
+            assert.equal(peerId, groupId);
+            record.replyTarget = target;
+            return record;
+        },
+    };
+    const bot = { appId, async sendMarkdown() { assert.fail('ordinary chat should not send recovery notices'); } };
+    const logger = { info() {}, debug() {}, warn() {}, error() {} };
+    ctx = {
+        bot,
+        message: {
+            kind: 'group', groupOpenid: groupId, senderId: 'current-peer', senderName: 'Current',
+            messageId: 'current-message', content: 'current request text', attachments: [], replyTarget,
+        },
+        state: {
+            mention: { wasMentioned: true },
+            quote: { text: 'explicit quoted text', attachments: [] },
+        },
+        log: logger,
+    };
+    await wrappedHistory(ctx, () => handleInbound(ctx, manager, { appId, historyLimit: 16 }, logger));
+    fixture.check();
+    const modelInput = JSON.stringify(followedInput);
+    assert.match(modelInput, /\[Chat history begins\]/u, 'persisted history is formatted into the actual adapter agent request');
+    assert.match(modelInput, /persisted group history/u, 'the restored historical message reaches the actual adapter agent request');
+    assert.match(modelInput, /current request text/u, 'the current user request reaches the adapter agent');
+    assert.match(modelInput, /explicit quoted text/u, 'explicit QQ quote context still reaches the adapter agent');
+    const persistedHistory = await sourceStore.list(key, 16);
+    assert.ok(persistedHistory.some(({ content }) => content === 'persisted group history'));
+    assert.ok(persistedHistory.some(({ content }) => content?.includes('current request text')),
+        'the restored history path retains prior and current messages in persisted history');
+    assert.equal(isHistorySnapshotCurrent(ctx.state.history), true);
 });
 
 integration('pasting the matching error into QQ message text cannot start automatic recovery', async () => {

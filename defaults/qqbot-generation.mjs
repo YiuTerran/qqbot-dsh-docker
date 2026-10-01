@@ -864,7 +864,12 @@ function imageToolSchema() {
         type: 'object',
         properties: {
             requestId: { type: 'string', minLength: 1, maxLength: 64, description: 'Opaque requestId from the original QQ message metadata.' },
-            prompt: { type: 'string', minLength: 1, maxLength: MAX_PROMPT_CHARS },
+            prompt: {
+                type: 'string',
+                minLength: 1,
+                maxLength: MAX_PROMPT_CHARS,
+                description: 'Final image prompt (at most 4000 characters). Before calling, use the matched original QQ request and its explicit quote only: clarify short or vague visual descriptions with concise subject, composition, lighting, palette, and style details; preserve every explicit subject, style, text, quantity, and prohibition, add no unrequested theme or style, leave detailed prompts or requests to keep wording unchanged as written, and for edits describe only requested changes while preserving everything else. Prompt polishing alone does not authorize image generation.',
+            },
             imageAttachmentId: { type: 'string', minLength: 1, maxLength: 64, description: 'Optional opaque imageAttachmentId from that same original request.' },
         },
         required: ['requestId', 'prompt'],
@@ -938,7 +943,7 @@ export function registerGenerationTools(ctx, options = {}) {
     if (route) {
         registerStatusTool(ctx, {
             name: GENERATE_IMAGE_TOOL,
-            description: 'Generate one image from a prompt, or edit one PNG/JPEG image explicitly attached to or quoted in the same original QQ request. Use only when that original user clearly asks for image generation or editing. Pass its opaque requestId and, for editing, an imageAttachmentId listed under that same request. Never pass a URL, path, user id, or group id.',
+            description: 'Generate one image from a prompt, or edit one PNG/JPEG image explicitly attached to or quoted in the same original QQ request. Use only when that original user clearly asks for image generation or editing. Before calling, improve short or vague visual descriptions into concise, concrete prompts using only that original request and its explicit QQ quote: add moderate subject, composition, lighting, palette, and style detail while preserving explicit subject, style, text, quantity, and prohibitions; do not impose a style or add an unrequested theme. Keep detailed prompts and requests to preserve wording unchanged as written. For edits, state only the requested changes and preserve everything else. Keep the final prompt at or below 4000 characters. Prompt polishing is not authorization to generate. Pass the matching opaque requestId and, for editing, an imageAttachmentId listed under that same request. Never use another batch member’s or historical personal information, and never pass a URL, path, user id, or group id.',
             parameters: imageToolSchema(),
             async execute(args, exec) {
                 return executeGeneration(args, exec, 'image', context);

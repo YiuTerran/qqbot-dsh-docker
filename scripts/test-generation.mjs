@@ -743,6 +743,13 @@ test('registered native image tool uses same-source attachment bytes, user quota
     assert.equal(registration.markdownEnabled, true);
     const visibleTools = (await ctx.systemPrompt.assemble()).tools.map(({ name }) => name).sort();
     assert.deepEqual(visibleTools, [CREATE_MARKDOWN_TOOL, GENERATE_IMAGE_TOOL]);
+    const imageTool = (await ctx.systemPrompt.assemble()).tools.find(({ name }) => name === GENERATE_IMAGE_TOOL);
+    const modelFacingSchema = JSON.stringify(imageTool);
+    assert.match(modelFacingSchema, /matched original QQ request/u, 'the model-facing image tool explains request-scoped prompt optimization');
+    assert.match(modelFacingSchema, /another batch member/u, 'the model-facing image tool forbids cross-request context');
+    assert.match(modelFacingSchema, /4000 characters/u, 'the model-facing image tool states the final prompt limit');
+    assert.match(modelFacingSchema, /opaque requestId/u, 'the model-facing image tool preserves the opaque requestId requirement');
+    assert.match(modelFacingSchema, /"maxLength":4000/u, 'the real Cordis tool schema bounds the prompt field at 4000 characters');
 
     const agent = {};
     beginDocumentTurn(agent, { content: 'Edit the attached picture.' });
@@ -762,13 +769,15 @@ test('registered native image tool uses same-source attachment bytes, user quota
     const secondRequest = getGenerationRequest(scope, secondId, 'image');
     const selected = secondRequest.images[0].imageAttachmentId;
 
+    const finalPrompt = 'Remove the reflected glare, preserve the original person and background, and keep the composition unchanged.';
     const output = await nativeCall(ctx, GENERATE_IMAGE_TOOL,
-        { requestId: secondId, imageAttachmentId: selected, prompt: 'Remove the reflected glare.' },
+        { requestId: secondId, imageAttachmentId: selected, prompt: finalPrompt },
         agent, 'image-original-source-call');
     assert.equal(output.isError, false, JSON.stringify(output));
     assert.equal(output.value.status, 'sent');
     assert.equal(output.content?.length ?? 0, 0, 'native output does not send a duplicate generic tool reply');
     assert.equal(providerCalls.length, 1);
+    assert.equal(providerCalls[0].prompt, finalPrompt, 'image execution forwards the model-prepared prompt unchanged without transport-side rewriting');
     assert.deepEqual(providerCalls[0].imageBytes, png);
     assert.deepEqual(quota.events.filter(([kind]) => kind === 'reserve'), [['reserve', 'owner-second', 'image']],
         'the second original user owns the reservation; a merged first user is not charged');
@@ -778,7 +787,7 @@ test('registered native image tool uses same-source attachment bytes, user quota
     assert.equal(imageSends[0].request.isActive('image'), true);
 
     const repeat = await nativeCall(ctx, GENERATE_IMAGE_TOOL,
-        { requestId: secondId, imageAttachmentId: selected, prompt: 'Remove the reflected glare.' },
+        { requestId: secondId, imageAttachmentId: selected, prompt: finalPrompt },
         agent, 'image-original-source-call');
     assert.equal(repeat.value.status, 'sent');
     assert.equal(providerCalls.length, 1, 'a duplicate callId returns the cached success without another provider call');

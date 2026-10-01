@@ -13,6 +13,7 @@ const diceModuleUrl = process.env.QQBOT_DICE_MODULE
     : new URL('../defaults/qqbot-dice.mjs', import.meta.url).href;
 const diceModule = await import(diceModuleUrl);
 const scopeModule = await import(new URL('./qqbot-document-scope.mjs', diceModuleUrl));
+const recoveryModule = await import(new URL('./qqbot-session-recovery.mjs', diceModuleUrl));
 const {
     parseDiceExpression,
     rollDice,
@@ -23,6 +24,7 @@ const {
     createDiceCommandMiddleware,
     createDiceAwareHistoryBuffer,
 } = diceModule;
+const { advanceHistorySnapshotEpoch, isHistorySnapshotCurrent } = recoveryModule;
 const {
     beginDocumentTurn,
     endDocumentTurn,
@@ -115,6 +117,102 @@ test('group history reads are empty while private history reads and current appe
         ['test-app:group-a', { content: 'current group text' }, 10],
         ['private:peer-a', { content: 'current private text' }, 10],
     ], 'current messages continue to be recorded for both scopes');
+});
+
+test('group history opt-out restores limited store reads, and empty or true environment values keep the default', async () => {
+    const listCalls = [];
+    const appendCalls = [];
+    const clearCalls = [];
+    const sourceStore = {
+        async list(...args) {
+            listCalls.push(args);
+            return [{ senderId: 'prior-peer', content: 'prior group context' }];
+        },
+        async append(...args) { appendCalls.push(args); },
+        async clear(...args) { clearCalls.push(args); },
+    };
+    let wrappedStore;
+    const fakeHistoryBuffer = ({ limit, store }) => {
+        wrappedStore = store;
+        return async (ctx, next) => {
+            const key = ctx.message.kind === 'group'
+                ? `${ctx.bot.appId}:${ctx.message.groupOpenid}`
+                : `private:${ctx.message.senderId}`;
+            ctx.state.history = await store.list(key, limit);
+            await store.append(key, { content: ctx.message.content }, limit);
+            await next();
+        };
+    };
+    const context = (kind = 'group') => ({
+        bot: { appId: 'test-app' },
+        message: {
+            kind, groupOpenid: kind === 'group' ? 'history-toggle' : undefined,
+            senderId: kind === 'group' ? 'member' : 'private-peer', content: `current ${kind} text`,
+        },
+        state: {},
+    });
+
+    for (const env of [{}, { QQBOT_GROUP_CURRENT_ONLY: '' }, { QQBOT_GROUP_CURRENT_ONLY: 'true' }]) {
+        const ctx = context();
+        const wrapped = createDiceAwareHistoryBuffer(fakeHistoryBuffer, { limit: 6, store: sourceStore }, undefined, env);
+        await wrapped(ctx, async () => {});
+        assert.deepEqual(ctx.state.history, [], 'missing, empty, and true values use current-batch-only mode');
+    }
+    assert.deepEqual(listCalls, [], 'the default mode does not read the persisted group history');
+    assert.equal(appendCalls.length, 3, 'default group messages are still appended to persisted history');
+
+    const restored = context();
+    const wrapped = createDiceAwareHistoryBuffer(fakeHistoryBuffer, { limit: 6, store: sourceStore }, undefined,
+        { QQBOT_GROUP_CURRENT_ONLY: 'false' });
+    await wrapped(restored, async () => {});
+    assert.deepEqual(restored.state.history, [{ senderId: 'prior-peer', content: 'prior group context' }]);
+    assert.deepEqual(listCalls, [['test-app:history-toggle', 6]], 'the original history limit reaches the source store');
+    const privateChat = context('c2c');
+    await wrapped(privateChat, async () => {});
+    assert.deepEqual(privateChat.state.history, [{ senderId: 'prior-peer', content: 'prior group context' }],
+        'private history remains available when the group-only setting is false');
+    assert.deepEqual(listCalls, [['test-app:history-toggle', 6], ['private:private-peer', 6]]);
+    assert.deepEqual(appendCalls.slice(-2), [
+        ['test-app:history-toggle', { content: 'current group text' }, 6],
+        ['private:private-peer', { content: 'current c2c text' }, 6],
+    ], 'group and private appends preserve the SDK history middleware contract');
+    await wrappedStore.clear('test-app:history-toggle');
+    assert.deepEqual(clearCalls, [['test-app:history-toggle']], 'history clears continue to reach the source store');
+    assert.throws(() => createDiceAwareHistoryBuffer(fakeHistoryBuffer, { store: sourceStore }, undefined,
+        { QQBOT_GROUP_CURRENT_ONLY: 'yes' }), /QQBOT_GROUP_CURRENT_ONLY must be true or false/u);
+});
+
+test('restored group history snapshots become stale when reset commits during the asynchronous read', async () => {
+    let notifyStarted;
+    const readStarted = new Promise((resolve) => { notifyStarted = resolve; });
+    let releaseRead;
+    const pendingRead = new Promise((resolve) => { releaseRead = resolve; });
+    const sourceStore = {
+        async list() {
+            notifyStarted();
+            return pendingRead;
+        },
+        async append() {},
+    };
+    const fakeHistoryBuffer = ({ store }) => async (ctx, next) => {
+        ctx.state.history = await store.list('test-app:history-reset-race', 8);
+        await next();
+    };
+    const ctx = {
+        bot: { appId: 'test-app' },
+        message: { kind: 'group', groupOpenid: 'history-reset-race', senderId: 'member', content: 'current text' },
+        state: {},
+    };
+    const wrapped = createDiceAwareHistoryBuffer(fakeHistoryBuffer, { store: sourceStore }, undefined,
+        { QQBOT_GROUP_CURRENT_ONLY: 'false' });
+    const running = wrapped(ctx, async () => {});
+    await readStarted;
+    advanceHistorySnapshotEpoch(sourceStore, 'test-app:history-reset-race');
+    releaseRead([{ senderId: 'prior-peer', content: 'stale persisted history' }]);
+    await running;
+    assert.deepEqual(ctx.state.history, [{ senderId: 'prior-peer', content: 'stale persisted history' }]);
+    assert.equal(isHistorySnapshotCurrent(ctx.state.history), false,
+        'the read returns with its pre-reset epoch so recovery can drop its stale context');
 });
 
 test('parses d20, mixed dice and modifiers, and canonicalizes ASCII spacing and case', () => {

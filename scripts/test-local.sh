@@ -30,6 +30,7 @@ partial_recovery_data_volume="dsh-qqbot-test-partial-recovery-data-${suffix}"
 recovery_v1_data_volume="dsh-qqbot-test-recovery-v1-data-${suffix}"
 pre_concurrency_data_volume="dsh-qqbot-test-pre-concurrency-data-${suffix}"
 partial_concurrency_data_volume="dsh-qqbot-test-partial-concurrency-data-${suffix}"
+group_history_invalid_data_volume="dsh-qqbot-test-group-history-invalid-data-${suffix}"
 container="dsh-qqbot-test-${suffix}"
 instructions_file="$(mktemp)"
 incompatible_log="$(mktemp)"
@@ -47,7 +48,7 @@ on_error() {
 cleanup() {
     log "Cleaning up temporary container, volumes, and instruction file"
     docker rm --force "$container" >/dev/null 2>&1 || true
-    docker volume rm "$data_volume" "$workspace_volume" "$override_data_volume" "$legacy_data_volume" "$pre_dice_data_volume" "$incompatible_data_volume" "$media_guard_data_volume" "$search_env_data_volume" "$official_data_volume" "$no_search_data_volume" "$partial_recovery_data_volume" "$recovery_v1_data_volume" "$pre_concurrency_data_volume" "$partial_concurrency_data_volume" >/dev/null 2>&1 || true
+    docker volume rm "$data_volume" "$workspace_volume" "$override_data_volume" "$legacy_data_volume" "$pre_dice_data_volume" "$incompatible_data_volume" "$media_guard_data_volume" "$search_env_data_volume" "$official_data_volume" "$no_search_data_volume" "$partial_recovery_data_volume" "$recovery_v1_data_volume" "$pre_concurrency_data_volume" "$partial_concurrency_data_volume" "$group_history_invalid_data_volume" >/dev/null 2>&1 || true
     rm -f "$instructions_file"
     rm -f "$incompatible_log"
 }
@@ -147,6 +148,7 @@ docker volume create "$partial_recovery_data_volume" >/dev/null
 docker volume create "$recovery_v1_data_volume" >/dev/null
 docker volume create "$pre_concurrency_data_volume" >/dev/null
 docker volume create "$partial_concurrency_data_volume" >/dev/null
+docker volume create "$group_history_invalid_data_volume" >/dev/null
 
 run_profile_probe() {
     local scenario="$1"
@@ -207,6 +209,12 @@ run_profile_probe \
     --env LLM_API_PROTOCOL=openai-responses \
     --env LLM_API_KEY=fixture-chat-key \
     --env LLM_SEARCH_MODEL=fixture-search-without-endpoint
+run_profile_probe \
+    "false restores persisted group history" \
+    "$official_data_volume" \
+    "" \
+    --env DEEPSEEK_API_KEY=fixture-official-key \
+    --env QQBOT_GROUP_CURRENT_ONLY=false
 run_profile_probe \
     "dedicated OpenAI image route defaults its protocol independently" \
     "$official_data_volume" \
@@ -287,6 +295,15 @@ if docker run --rm --network none --volume "${official_data_volume}:/data" \
     exit 1
 fi
 grep -Fq "IMAGE_API_BASE_URL must be a public HTTPS base URL" "$incompatible_log"
+if docker run --rm --network none --volume "${group_history_invalid_data_volume}:/data" \
+    --env DEEPSEEK_API_KEY=fixture-official-key --env QQBOT_GROUP_CURRENT_ONLY=invalid \
+    "$IMAGE" sh -c true >"$incompatible_log" 2>&1; then
+    echo "entrypoint unexpectedly accepted an invalid group-history mode" >&2
+    exit 1
+fi
+grep -Fq "QQBOT_GROUP_CURRENT_ONLY must be true or false" "$incompatible_log"
+docker run --rm --network none --entrypoint sh --volume "${group_history_invalid_data_volume}:/data" "$IMAGE" -ec \
+    'test ! -e /data/.initialized'
 
 log "Checking entrypoint refuses conflicting persistent media paths"
 docker run --rm --network none \
@@ -421,7 +438,7 @@ docker create \
         test "$(grep -A6 -F -- "- id: im-qqbot" "$dump" | grep -Fc "appSecret: __FROM_ENV__")" -eq 1
         node --test /tmp/test-chat-policy.mjs
         QQBOT_DICE_MODULE=/opt/qqbot-defaults/qqbot-dice.mjs node --test /tmp/test-dice.mjs
-        QQBOT_RECOVERY_MODULE=/opt/qqbot-defaults/qqbot-session-recovery.mjs QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-session-recovery.mjs
+        QQBOT_RECOVERY_MODULE=/opt/qqbot-defaults/qqbot-session-recovery.mjs QQBOT_DICE_MODULE=/opt/qqbot-defaults/qqbot-dice.mjs QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-session-recovery.mjs
         QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-provider-errors.mjs
         QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-concurrency.mjs
         QQBOT_GENERATION_MODULE=/opt/qqbot-defaults/qqbot-generation.mjs QQBOT_GENERATION_SCOPE_MODULE=/opt/qqbot-defaults/qqbot-generation-scope.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test --test-timeout=30000 /tmp/test-generation.mjs
@@ -519,7 +536,7 @@ check_pre_dice_upgrade() {
             grep -Fq "Chat-only strict automatic session reset v1." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/session/session-manager.js
             node --check "$middleware"
             QQBOT_DICE_MODULE=/opt/qqbot-defaults/qqbot-dice.mjs node --test /tmp/test-dice.mjs
-            QQBOT_RECOVERY_MODULE=/opt/qqbot-defaults/qqbot-session-recovery.mjs QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-session-recovery.mjs
+            QQBOT_RECOVERY_MODULE=/opt/qqbot-defaults/qqbot-session-recovery.mjs QQBOT_DICE_MODULE=/opt/qqbot-defaults/qqbot-dice.mjs QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-session-recovery.mjs
             QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-provider-errors.mjs
             QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-concurrency.mjs
         '

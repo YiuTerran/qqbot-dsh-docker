@@ -143,6 +143,22 @@ try {
     assert.equal(unavailable.isError, true, 'direct web_search call must fail when search is disabled');
   }
   assert.ok(assembly.sections.some((section) => section.name === 'qqbot:chat-only-policy'), 'chat policy prompt section is missing');
+  const generationPolicy = assembly.sections.find((section) => section.name === 'qqbot:generation-policy');
+  assert.ok(generationPolicy, 'immutable generation policy prompt section is missing');
+  for (const constraint of [
+    '匹配的原始 QQ 请求', '明确引用', '显式主体、风格、文字、数量和禁止项',
+    '不得混入批次内其他用户或历史个人信息', '最多 4000 字符', '不增加模型/API 调用',
+  ]) {
+    assert.ok(generationPolicy.text.includes(constraint), `immutable generation policy is missing ${constraint}`);
+  }
+  if (expectedImageEnabled) {
+    const imageTool = assembly.tools.find((tool) => tool.name === 'qqbot_generate_image');
+    const imageToolSchema = JSON.stringify(imageTool);
+    assert.match(imageToolSchema, /matched original QQ request/u, 'real Cordis image schema carries prompt optimization guidance');
+    assert.match(imageToolSchema, /4000 characters/u, 'real Cordis image schema documents the final prompt limit');
+    assert.match(imageToolSchema, /opaque requestId/u, 'real Cordis image schema retains request ID constraints');
+    assert.match(imageToolSchema, /"maxLength":4000/u, 'real Cordis image schema bounds the prompt field');
+  }
 
   const dangerous = await tools.execute({
     name: 'exit_plan_mode',
