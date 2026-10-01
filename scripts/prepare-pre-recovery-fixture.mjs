@@ -1,9 +1,29 @@
 import { readFile, writeFile } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const root = process.argv[2];
 const recoveryV1Only = process.argv[3] === 'recovery-v1';
 if (!root) throw new Error('usage: prepare-pre-recovery-fixture.mjs <dsh-qqbot-dist-directory>');
+
+// Newer source fixtures include the merge-batch patch. Reverse that layer
+// first so this historical recovery fixture continues to describe the exact
+// pre-recovery layout it was written for. The helper is bind-mounted in image
+// tests; on the host, use the sibling script by default.
+const currentOutbound = await readFile(join(root, 'transport/outbound.js'), 'utf8');
+if (currentOutbound.includes("from '/opt/qqbot-defaults/qqbot-concurrency.mjs';")) {
+    const mountedFixture = '/tmp/prepare-pre-concurrency-fixture.mjs';
+    const concurrencyFixture = process.env.QQBOT_PRE_CONCURRENCY_FIXTURE
+        ?? (existsSync(mountedFixture)
+            ? mountedFixture
+            : fileURLToPath(new URL('./prepare-pre-concurrency-fixture.mjs', import.meta.url)));
+    const result = spawnSync(process.execPath, [concurrencyFixture, root], { stdio: 'inherit' });
+    if (result.error || result.status !== 0) {
+        throw result.error ?? new Error('pre-concurrency fixture failed');
+    }
+}
 
 function replaceOnce(source, before, after, label) {
     const parts = source.split(before);

@@ -10,6 +10,7 @@ const webPagesPolicy = '/opt/qqbot-defaults/qqbot-web-pages.mjs';
 const documentScopePolicy = '/opt/qqbot-defaults/qqbot-document-scope.mjs';
 const sessionRecoveryPolicy = '/opt/qqbot-defaults/qqbot-session-recovery.mjs';
 const providerErrorsPolicy = '/opt/qqbot-defaults/qqbot-provider-errors.mjs';
+const concurrencyPolicy = '/opt/qqbot-defaults/qqbot-concurrency.mjs';
 const imageToolPolicyImport = `import { loadChatImageBytes } from '${policy}';`;
 const imageLoaderV3Marker = '// Chat-only scoped image loader v3.';
 const imageSchemaV3Marker = '// Chat-only image schema: scoped QQ media paths or public HTTPS image URLs v3.';
@@ -36,6 +37,75 @@ await patch('gateway/bootstrap.js', `import { installChatPolicy } from '${policy
         'export async function bootstrapGateway(ctx, agents, config, logger) {\n    installChatPolicy(ctx);', file);
     return replaceOne(content, '    registerSendFileTool(ctx, mediaSender, manager, config, logger);',
         '    // Chat-only deployment: file sending is not registered.', file);
+});
+
+await patch('gateway/bootstrap.js', '// Chat-only merge batch reply adapter v1.', (content, file) => {
+    const senderBlock = [
+        '    const replyLimiter = new ReplyLimiter({ limit: 4 });',
+        '    const sender = {',
+        '        sendMarkdown: (target, content, opts) => sendResolvedMarkdown(bot, resolveReplyTarget(target, replyLimiter, true), content, opts),',
+        '        openStream: (target) => bot.openStream({',
+        '            target: {',
+        '                scope: target.scope,',
+        '                targetId: target.targetId,',
+        '                msgId: target.msgId,',
+        '            },',
+        '        }),',
+        '    };',
+    ].join('\n');
+    const oldBlock = [
+        '    const replyLimiter = new ReplyLimiter({ limit: 4 });',
+        '    const sender = {',
+        '        sendMarkdown: (target, content, opts) => sendResolvedMarkdown(bot, resolveReplyTarget(target, replyLimiter, true), content, opts),',
+        '        openStream: (target) => bot.openStream({',
+        '            target: {',
+        '                scope: target.scope,',
+        '                targetId: target.targetId,',
+        '                msgId: target.msgId,',
+        '            },',
+        '        }),',
+        '    };',
+    ].join('\n');
+    if (!content.includes('// Chat-only merge batch reply adapter v1.')) {
+        content = replaceOne(content, oldBlock, '', file);
+        content = replaceOne(content, '    setupMiddlewares(bot, config, manager, logger);',
+            `    // Chat-only merge batch reply adapter v1.\n${senderBlock}\n    setupMiddlewares(bot, config, manager, logger, sender);`, file);
+    }
+    return content;
+});
+
+await patch('gateway/middleware-setup.js', '// Chat-only serialized merge guard v1.', (content, file) => {
+    const helperImport = `import { createMergeConcurrencyGuard, sendMergeQueueFullNotice } from '${concurrencyPolicy}';`;
+    if (!content.includes(helperImport)) content = `${helperImport}\n${content}`;
+    content = replaceOne(content, ', concurrencyGuard, typingIndicator,', ', typingIndicator,', file);
+    const original = [
+        '    bot.use(concurrencyGuard({',
+        "        strategy: 'merge',",
+        '        maxQueue: config.maxQueue,',
+        '        maxProcessingMs: config.processingTimeoutMs,',
+        '    }));',
+    ].join('\n');
+    const replacement = [
+        '    // Chat-only serialized merge guard v1.',
+        '    bot.use(createMergeConcurrencyGuard({',
+        '        maxQueue: config.maxQueue ?? 20,',
+        '        maxProcessingMs: config.processingTimeoutMs,',
+        '        onDrop: async (droppedCtx) => {',
+        '            try {',
+        '                await sendMergeQueueFullNotice(sender, droppedCtx);',
+        '            }',
+        '            catch {',
+        "                logger.warn('[concurrency:merge] busy notice failed');",
+        '            }',
+        '        },',
+        '    }));',
+    ].join('\n');
+    if (content.includes(original)) content = replaceOne(content, original, replacement, file);
+    else if (!content.includes('// Chat-only serialized merge guard v1.'))
+        throw new Error(`Chat-only patch: expected pinned merge guard in ${file}`);
+    content = replaceOne(content, 'export function setupMiddlewares(bot, config, manager, logger) {',
+        'export function setupMiddlewares(bot, config, manager, logger, sender) {', file);
+    return content;
 });
 
 await patch('gateway/middleware-setup.js', `import {createScopedQuoteRef} from '${policy}';`, (content, file) => {
@@ -118,6 +188,19 @@ if (patchedMiddlewareSetup.split(diceMiddlewareMarker).length !== 2
     || rateLimitPosition <= sanitizerPosition || diceCommandPosition <= rateLimitPosition
     || slashPosition <= diceCommandPosition || attachmentPosition <= slashPosition) {
     throw new Error('Chat-only patch: dice command/history middleware is incomplete or ordered outside the guarded chain');
+}
+const mergeGuardImport = `import { createMergeConcurrencyGuard, sendMergeQueueFullNotice } from '${concurrencyPolicy}';`;
+const mergeGuardPosition = patchedMiddlewareSetup.indexOf('// Chat-only serialized merge guard v1.');
+const answerPosition = patchedMiddlewareSetup.indexOf('bot.use(questionAnswer(manager));');
+const typingPosition = patchedMiddlewareSetup.indexOf('bot.use(typingIndicator());');
+if (patchedMiddlewareSetup.split(mergeGuardImport).length !== 2
+    || patchedMiddlewareSetup.split('// Chat-only serialized merge guard v1.').length !== 2
+    || !patchedMiddlewareSetup.includes('maxQueue: config.maxQueue ?? 20,')
+    || !patchedMiddlewareSetup.includes('onDrop: async (droppedCtx) => {')
+    || !patchedMiddlewareSetup.includes('await sendMergeQueueFullNotice(sender, droppedCtx);')
+    || answerPosition < 0 || mergeGuardPosition <= answerPosition || typingPosition <= mergeGuardPosition
+    || !patchedMiddlewareSetup.includes('setupMiddlewares(bot, config, manager, logger, sender)')) {
+    throw new Error('Chat-only patch: serialized merge middleware, overflow notice, or ordering is incomplete');
 }
 
 await patch('index.js', "export const inject = ['agents', 'tools', 'web', 'systemPrompt'];", (content, file) => {
@@ -211,6 +294,56 @@ await patch('transport/inbound.js', '// Chat-only per-turn document scope v1.', 
     return content;
 });
 
+await patch('transport/inbound.js', '// Chat-only batch cancellation and reply binding v1.', (content, file) => {
+    const helperImport = `import { beginMergeBatch, closeMergeBatch } from '${concurrencyPolicy}';`;
+    if (!content.includes(helperImport)) content = `${helperImport}\n${content}`;
+    const agentBinding = '    const chatOnlyAgent = record.agent;';
+    const scopedAgentBinding = [
+        agentBinding,
+        '    // Chat-only batch cancellation and reply binding v1.',
+        '    const replyBatch = beginMergeBatch(record, replyTarget);',
+        '    const isCurrentRecord = () => typeof manager.getSessionRecord === \'function\' && manager.getSessionRecord(scope, peerId) === record;',
+        '    const cancelCapturedAgent = () => {',
+        '        if (record.agent !== chatOnlyAgent) return;',
+        "        try { chatOnlyAgent.cancel({ kind: 'user' }); }",
+        "        catch { logger.warn('inbound batch agent cancellation failed'); }",
+        '    };',
+        "    ctx.signal?.addEventListener('abort', cancelCapturedAgent, { once: true });",
+        '    if (ctx.signal?.aborted) cancelCapturedAgent();',
+    ].join('\n');
+    if (content.includes(agentBinding) && !content.includes('// Chat-only batch cancellation and reply binding v1.')) {
+        content = replaceOne(content, agentBinding, scopedAgentBinding, file);
+    }
+    const tryStart = '    let documentTurn;\n    try {\n        const documentMetadata = beginDocumentTurn(chatOnlyAgent, msg, mwState.quote);';
+    const guardedTry = [
+        '    let documentTurn;',
+        '    try {',
+        '        if (ctx.signal?.aborted) return;',
+        '        if (!isCurrentRecord() || record.agent !== chatOnlyAgent) return;',
+        '        const documentMetadata = beginDocumentTurn(chatOnlyAgent, msg, mwState.quote);',
+    ].join('\n');
+    if (content.includes(tryStart)) content = replaceOne(content, tryStart, guardedTry, file);
+    else if (!content.includes('if (ctx.signal?.aborted) return;')
+        || !content.includes('isCurrentRecord()')) {
+        throw new Error(`Chat-only patch: expected inbound turn start in ${file}`);
+    }
+    content = replaceOne(content, '    chatOnlyAgent.followup(message);',
+        '    if (ctx.signal?.aborted || !isCurrentRecord() || record.agent !== chatOnlyAgent) return;\n    chatOnlyAgent.followup(message);', file);
+    const oldFinally = [
+        '        clearCurrentImages(chatOnlyAgent, documentTurn);',
+        '        if (documentTurn) endDocumentTurn(chatOnlyAgent, documentTurn);',
+    ].join('\n');
+    const guardedFinally = [
+        oldFinally.split('\n')[0],
+        oldFinally.split('\n')[1],
+        "        ctx.signal?.removeEventListener('abort', cancelCapturedAgent);",
+        '        await closeMergeBatch(replyBatch);',
+    ].join('\n');
+    if (content.includes(oldFinally)) content = replaceOne(content, oldFinally, guardedFinally, file);
+    else if (!content.includes('await closeMergeBatch(replyBatch);')) throw new Error(`Chat-only patch: expected inbound cleanup in ${file}`);
+    return content;
+});
+
 await patch('transport/inbound.js', '// Chat-only group-history epoch guard v1.', (content, file) => {
     const marker = '// Chat-only group-history epoch guard v1.';
     const original = '    const agentBody = assembleAgentBody(msg, mwState, scope, logger);';
@@ -263,6 +396,38 @@ await patch('transport/inbound.js', '// Chat-only content-risk recovery context 
         || importPosition < 0 || turnBindingPosition < 0 || registrationPosition <= turnBindingPosition
         || followupPosition <= registrationPosition || finishPosition <= endTurnPosition) {
         throw new Error(`Chat-only patch: content-risk recovery wiring is incomplete or misordered in ${file}`);
+    }
+    return content;
+});
+
+await patch('transport/inbound.js', '// Chat-only safe batch finalization v1.', (content, file) => {
+    const clearAndEnd = [
+        '        clearCurrentImages(chatOnlyAgent, documentTurn);',
+        '        if (documentTurn) endDocumentTurn(chatOnlyAgent, documentTurn);',
+    ].join('\n');
+    const finish = '        if (documentTurn) await finishContentRiskRecovery(documentTurn);';
+    const removeSignal = "        ctx.signal?.removeEventListener('abort', cancelCapturedAgent);";
+    const closeBatch = '        await closeMergeBatch(replyBatch);';
+    const oldCurrent = [clearAndEnd, finish, removeSignal, closeBatch].join('\n');
+    const oldVolume = [clearAndEnd, removeSignal, closeBatch, finish].join('\n');
+    const safeFinalizer = [
+        clearAndEnd.split('\n')[0],
+        '        try {',
+        '            if (documentTurn) endDocumentTurn(chatOnlyAgent, documentTurn);',
+        '        } finally {',
+        '            // Chat-only safe batch finalization v1.',
+        '            try {',
+        '                if (documentTurn) await finishContentRiskRecovery(documentTurn);',
+        '            } finally {',
+        "                ctx.signal?.removeEventListener('abort', cancelCapturedAgent);",
+        '                await closeMergeBatch(replyBatch);',
+        '            }',
+        '        }',
+    ].join('\n');
+    if (content.includes(oldCurrent)) content = replaceOne(content, oldCurrent, safeFinalizer, file);
+    else if (content.includes(oldVolume)) content = replaceOne(content, oldVolume, safeFinalizer, file);
+    else if (!content.includes('// Chat-only safe batch finalization v1.')) {
+        throw new Error(`Chat-only patch: expected current/old inbound batch cleanup order in ${file}`);
     }
     return content;
 });
@@ -390,6 +555,248 @@ await patch('transport/outbound.js', '// Chat-only friendly provider errors v1.'
     return replaceOne(content,
         '                this.logger.error(`im-qqbot: ${tag} failed: ${err instanceof Error ? err.message : String(err)}`);',
         "                this.logger.error(`im-qqbot: ${tag} failed to send reply`);", file);
+});
+
+await patch('transport/outbound.js', '// Chat-only batch-bound outbound routing v1.', (content, file) => {
+    const bindingImport = `import { captureMergeBatchReply, noteMergeBatchTurnStart, trackMergeBatchSend } from '${concurrencyPolicy}';`;
+    if (!content.includes(bindingImport)) content = `${bindingImport}\n${content}`;
+    const routeStart = content.indexOf('    route(session, raw) {');
+    const routeEnd = content.indexOf('    /** 流式文本增量：累积到会话 buffer */', routeStart);
+    if (routeStart < 0 || routeEnd <= routeStart) throw new Error(`Chat-only patch: expected OutboundRouter.route() in ${file}`);
+    const route = [
+        '    route(session, raw) {',
+        '        // Chat-only content-risk turn recovery v1.',
+        '        // Chat-only batch-bound outbound routing v1.',
+        "        if (raw?.type === 'turn/start') {",
+        '            const sessionId = session.header.id;',
+        '            const startRecord = this.manager.findBySessionId(sessionId);',
+        '            if (!startRecord) return;',
+        '            if (!noteMergeBatchTurnStart(startRecord, { sessionId, turnId: raw.data?.turn, seq: raw.seq })) return;',
+        '            noteRecoveryTurnStart({ record: startRecord, sessionId, turnId: raw.data?.turn });',
+        '            return;',
+        '        }',
+        '        const event = parseEvent(raw);',
+        '        if (event === undefined) return;',
+        '        const sessionId = session.header.id;',
+        '        const record = this.manager.findBySessionId(sessionId);',
+        '        if (record === undefined) return;',
+        '        const binding = captureMergeBatchReply(record, { sessionId, turnId: raw?.data?.turn, seq: raw?.seq });',
+        '        if (!binding) return;',
+        '        const replyRecord = binding.replyRecord;',
+        '        switch (event.type) {',
+        "            case 'assistant/chunk':",
+        '                this.onChunk(sessionId, replyRecord, event);',
+        '                break;',
+        "            case 'assistant/message':",
+        '                this.onMessage(sessionId, replyRecord, event, record);',
+        '                break;',
+        "            case 'tool/call':",
+        '                this.onToolCall(event);',
+        '                break;',
+        "            case 'tool/result':",
+        '                this.onToolResult(replyRecord, event, raw, record);',
+        '                break;',
+        "            case 'turn/end':",
+        '                this.onTurnEnd(sessionId, replyRecord, event, raw.data?.turn, record);',
+        '                break;',
+        '        }',
+        '    }',
+        '',
+    ].join('\n');
+    content = content.slice(0, routeStart) + route + content.slice(routeEnd);
+    content = replaceOne(content,
+        "    onMessage(sessionId, record, event) {",
+        "    onMessage(sessionId, record, event, originRecord = record) {", file);
+    const messageBufferFlush = [
+        '        if (buffer !== undefined && buffer.text.trim()) {',
+        '            void buffer.flush();',
+        '            this.buffers.delete(sessionId);',
+        '            return;',
+        '        }',
+    ].join('\n');
+    const trackedMessageBufferFlush = [
+        '        if (buffer !== undefined && buffer.text.trim()) {',
+        '            trackMergeBatchSend(originRecord, buffer.flush());',
+        '            this.buffers.delete(sessionId);',
+        '            return;',
+        '        }',
+    ].join('\n');
+    content = replaceOne(content, messageBufferFlush, trackedMessageBufferFlush, file);
+    content = replaceOne(content,
+        "        void this.send(record, fullText, 'sendMarkdown');",
+        "        trackMergeBatchSend(originRecord, this.send(record, fullText, 'sendMarkdown'));", file);
+    content = replaceOne(content,
+        '    onToolResult(record, event, raw) {',
+        '    onToolResult(record, event, raw, originRecord = record) {', file);
+    content = replaceOne(content,
+        "            void this.send(record, formatToolFailure(), 'sendToolResultError');",
+        "            trackMergeBatchSend(originRecord, this.send(record, formatToolFailure(), 'sendToolResultError'));", file);
+    content = replaceOne(content,
+        "        void this.send(record, text, 'sendToolResult');",
+        "        trackMergeBatchSend(originRecord, this.send(record, text, 'sendToolResult'));", file);
+    content = replaceOne(content,
+        '    onTurnEnd(sessionId, record, event, turnId) {',
+        '    onTurnEnd(sessionId, record, event, turnId, originRecord = record) {', file);
+    content = replaceOne(content,
+        '                void buffer.flush();',
+        '                trackMergeBatchSend(originRecord, buffer.flush());', file);
+    content = replaceOne(content,
+        '                buffer.cancel();',
+        '                trackMergeBatchSend(originRecord, buffer.cancel());', file);
+    content = replaceOne(content,
+        '                    record,\n                    sessionId,\n                    turnId,',
+        '                    record: originRecord,\n                    sessionId,\n                    turnId,', file);
+    content = replaceOne(content,
+        "                    notify: (text, replyTarget) => this.send({ ...record, replyTarget: replyTarget ?? record.replyTarget }, text, 'sendContentRiskRecovery'),",
+        "                    notify: (text, replyTarget) => trackMergeBatchSend(originRecord, this.send({ ...record, replyTarget: replyTarget ?? record.replyTarget }, text, 'sendContentRiskRecovery')),", file);
+    content = replaceOne(content,
+        "                void this.send(record, formatProviderFailure(failure), 'sendTurnEndError');",
+        "                trackMergeBatchSend(originRecord, this.send(record, formatProviderFailure(failure), 'sendTurnEndError'));", file);
+    return content;
+});
+
+await patch('transport/streaming-writer.js', '// Chat-only awaitable stream cancellation v1.', (content, file) => {
+    const original = [
+        '    abort() {',
+        '        if (this.finished)',
+        '            return;',
+        '        this.finished = true;',
+        '        this.aborted = true;',
+        '        if (this.throttleTimer) {',
+        '            clearTimeout(this.throttleTimer);',
+        '            this.throttleTimer = null;',
+        '        }',
+        '        // 串行 complete（排在 pending update 之后），关闭已打开的流式会话',
+        '        this.chain = this.chain.then(async () => {',
+        '            if (this.session) {',
+        '                try {',
+        '                    await this.session.complete();',
+        '                }',
+        '                catch (err) {',
+        '                    this.deps.logger.error(`im-qqbot: stream abort complete failed: ${err instanceof Error ? err.message : String(err)}`);',
+        '                }',
+        '            }',
+        '        });',
+        '    }',
+    ].join('\n');
+    const replacement = [
+        '    // Chat-only awaitable stream cancellation v1.',
+        '    abort() {',
+        '        if (this.finished)',
+        '            return this.chain;',
+        '        this.finished = true;',
+        '        this.aborted = true;',
+        '        if (this.throttleTimer) {',
+        '            clearTimeout(this.throttleTimer);',
+        '            this.throttleTimer = null;',
+        '        }',
+        '        // 串行 complete（排在 pending update 之后），关闭已打开的流式会话',
+        '        this.chain = this.chain.then(async () => {',
+        '            if (this.session) {',
+        '                try {',
+        '                    await this.session.complete();',
+        '                }',
+        '                catch (err) {',
+        '                    this.deps.logger.error(`im-qqbot: stream abort complete failed: ${err instanceof Error ? err.message : String(err)}`);',
+        '                }',
+        '            }',
+        '        });',
+        '        return this.chain;',
+        '    }',
+    ].join('\n');
+    if (content.includes(original)) return replaceOne(content, original, replacement, file);
+    if (!content.includes('// Chat-only awaitable stream cancellation v1.')
+        || !content.includes('return this.chain;')) throw new Error(`Chat-only patch: expected StreamingWriter.abort() in ${file}`);
+    return content;
+});
+
+await patch('transport/outbound-buffer.js', '// Chat-only awaitable stream cancellation v1.', (content, file) => {
+    const originalFlush = [
+        '    /** 发送所有累积文本：流式优先，降级静态 */',
+        '    async flush() {',
+        '        if (this.flushing || !this.buffer.trim())',
+        '            return;',
+        '        this.flushing = true;',
+        '        try {',
+        '            if (this.writer) {',
+        '                await this.writer.finish();',
+        '                // 流式成功（未降级）→ 直接返回',
+        '                if (!this.writer.shouldFallback)',
+        '                    return;',
+        '            }',
+        '            // 降级：静态发送（writer 不存在 or 流式失败）',
+        '            const chunks = chunkMarkdownText(this.buffer, this.limit);',
+        '            for (const chunk of chunks) {',
+        '                await this.bot.sendMarkdown(this.record.replyTarget, chunk);',
+        '            }',
+        '        }',
+        '        catch (err) {',
+        '            this.logger.error(`im-qqbot: flush failed: ${err instanceof Error ? err.message : String(err)}`);',
+        '        }',
+        '        finally {',
+        "            this.buffer = '';",
+        '            this.flushing = false;',
+        '        }',
+        '    }',
+    ].join('\n');
+    const sharedFlush = [
+        '    /** 发送所有累积文本：流式优先，降级静态 */',
+        '    flush() {',
+        '        if (this.flushPromise)',
+        '            return this.flushPromise;',
+        '        if (!this.buffer.trim())',
+        '            return Promise.resolve();',
+        '        this.flushing = true;',
+        '        const completion = Promise.resolve().then(async () => {',
+        '            try {',
+        '                if (this.writer) {',
+        '                    await this.writer.finish();',
+        '                    // 流式成功（未降级）→ 直接返回',
+        '                    if (!this.writer.shouldFallback)',
+        '                        return;',
+        '                }',
+        '                // 降级：静态发送（writer 不存在 or 流式失败）',
+        '                const chunks = chunkMarkdownText(this.buffer, this.limit);',
+        '                for (const chunk of chunks) {',
+        '                    await this.bot.sendMarkdown(this.record.replyTarget, chunk);',
+        '                }',
+        '            }',
+        '            catch (err) {',
+        '                this.logger.error(`im-qqbot: flush failed: ${err instanceof Error ? err.message : String(err)}`);',
+        '            }',
+        '            finally {',
+        "                this.buffer = '';",
+        '                this.flushing = false;',
+        '                this.flushPromise = undefined;',
+        '            }',
+        '        });',
+        '        this.flushPromise = completion;',
+        '        return completion;',
+        '    }',
+    ].join('\n');
+    if (content.includes(originalFlush)) content = replaceOne(content, originalFlush, sharedFlush, file);
+    else if (!content.includes('this.flushPromise = completion;')
+        || !content.includes('if (this.flushPromise)')) {
+        throw new Error(`Chat-only patch: expected OutboundBuffer.flush() in ${file}`);
+    }
+    const original = [
+        '    cancel() {',
+        '        this.writer?.abort();',
+        "        this.buffer = '';",
+        '    }',
+    ].join('\n');
+    const replacement = [
+        '    // Chat-only awaitable stream cancellation v1.',
+        '    cancel() {',
+        '        const completion = this.writer?.abort();',
+        "        this.buffer = '';",
+        '        return Promise.all([this.flushPromise, completion].filter(Boolean));',
+        '    }',
+    ].join('\n');
+    if (content.includes(original)) return replaceOne(content, original, replacement, file);
+    if (!content.includes('// Chat-only awaitable stream cancellation v1.')
+        || !content.includes('return Promise.all([this.flushPromise, completion].filter(Boolean));')) throw new Error(`Chat-only patch: expected OutboundBuffer.cancel() in ${file}`);
+    return content;
 });
 
 await patch('transport/inbound.js', '// Chat-only safe inbound errors v1.', (content, file) =>
@@ -893,6 +1300,15 @@ function assertOnce(source, marker, label) {
 }
 
 const finalInbound = await finalText('transport/inbound.js');
+const mergeInboundImport = `import { beginMergeBatch, closeMergeBatch } from '${concurrencyPolicy}';`;
+assertOnce(finalInbound, mergeInboundImport, 'inbound merge batch import');
+assertOnce(finalInbound, '// Chat-only batch cancellation and reply binding v1.', 'inbound batch cancellation marker');
+assertOnce(finalInbound, 'const replyBatch = beginMergeBatch(record, replyTarget);', 'inbound target snapshot');
+assertOnce(finalInbound, "const isCurrentRecord = () => typeof manager.getSessionRecord === 'function' && manager.getSessionRecord(scope, peerId) === record;", 'fail-closed current record check');
+assertOnce(finalInbound, "ctx.signal?.addEventListener('abort', cancelCapturedAgent, { once: true });", 'inbound agent cancellation binding');
+assertOnce(finalInbound, 'await closeMergeBatch(replyBatch);', 'inbound send drain');
+assertOnce(finalInbound, '// Chat-only safe batch finalization v1.', 'nested inbound batch cleanup');
+assertOnce(finalInbound, 'if (ctx.signal?.aborted || !isCurrentRecord() || record.agent !== chatOnlyAgent) return;', 'inbound stale/aborted followup check');
 const recoveryInboundImport = `import { finishContentRiskRecovery, getHistorySnapshot, isHistorySnapshotCurrent, registerRecoveryContext } from '${sessionRecoveryPolicy}';`;
 const recoveryInboundMarker = '// Chat-only content-risk recovery context v1.';
 const recoveryInboundRegistration = 'registerRecoveryContext(documentTurn, { manager, scope, peerId, appId: config.appId, record, agent: chatOnlyAgent, sessionId: record.sessionId, replyTarget, historySnapshot, logger });';
@@ -921,13 +1337,29 @@ if (historyGuardPosition > finalInbound.indexOf('const agentBody = assembleAgent
     || inboundImageClearPosition <= inboundIdlePosition
     || inboundDocumentEndPosition <= inboundImageClearPosition
     || inboundRecoveryFinishPosition <= inboundDocumentEndPosition
+    || inboundRecoveryFinishPosition >= finalInbound.indexOf('await closeMergeBatch(replyBatch);')
     || finalInbound.indexOf(recoveryInboundRegistration) < finalInbound.indexOf('documentTurn = getDocumentTurn(chatOnlyAgent);')
     || finalInbound.indexOf(recoveryInboundRegistration) > finalInbound.indexOf('chatOnlyAgent.followup(message);')
     ) {
-    throw new Error('Chat-only patch: inbound recovery wiring is outside the safe turn lifecycle');
+    throw new Error(`Chat-only patch: inbound recovery wiring is outside the safe turn lifecycle (history=${historyGuardPosition}/${historyFilterPosition}, idle=${inboundIdlePosition}, image=${inboundImageClearPosition}, end=${inboundDocumentEndPosition}, recovery=${inboundRecoveryFinishPosition}, close=${finalInbound.indexOf('await closeMergeBatch(replyBatch);')}, registration=${finalInbound.indexOf(recoveryInboundRegistration)}, binding=${finalInbound.indexOf('documentTurn = getDocumentTurn(chatOnlyAgent);')}, followup=${finalInbound.indexOf('chatOnlyAgent.followup(message);')})`);
+}
+const finalBootstrap = await finalText('gateway/bootstrap.js');
+assertOnce(finalBootstrap, '// Chat-only merge batch reply adapter v1.', 'early merge sender adapter');
+assertOnce(finalBootstrap, 'setupMiddlewares(bot, config, manager, logger, sender);', 'merge sender injection');
+if (finalBootstrap.indexOf('// Chat-only merge batch reply adapter v1.') > finalBootstrap.indexOf('setupMiddlewares(bot, config, manager, logger, sender);')
+    || finalBootstrap.includes('const replyLimiter = new ReplyLimiter({ limit: 4 });', finalBootstrap.indexOf('setupMiddlewares(bot, config, manager, logger, sender);'))) {
+    throw new Error('Chat-only patch: merge overflow sender is not initialized before inbound middleware');
 }
 
 const finalOutbound = await finalText('transport/outbound.js');
+const mergeOutboundImport = `import { captureMergeBatchReply, noteMergeBatchTurnStart, trackMergeBatchSend } from '${concurrencyPolicy}';`;
+assertOnce(finalOutbound, mergeOutboundImport, 'outbound merge target import');
+assertOnce(finalOutbound, '// Chat-only batch-bound outbound routing v1.', 'outbound merge routing marker');
+assertOnce(finalOutbound, 'captureMergeBatchReply(record, { sessionId, turnId: raw?.data?.turn, seq: raw?.seq })', 'outbound native event binding');
+if (finalOutbound.split('trackMergeBatchSend(originRecord, buffer.flush());').length !== 3) {
+    throw new Error('Chat-only patch: both message and turn flushes must be tracked exactly once');
+}
+assertOnce(finalOutbound, 'trackMergeBatchSend(originRecord, this.send(record, fullText, \'sendMarkdown\'));', 'outbound text send tracking');
 const finalEvents = await finalText('transport/events.js');
 assertOnce(finalEvents, '// Chat-only structured provider failures v1.', 'structured provider failure marker');
 assertOnce(finalEvents, 'status: detail?.status ?? reason.status,', 'provider status extraction');
@@ -936,10 +1368,10 @@ assertOnce(finalEvents, 'error: detail?.error,', 'provider structured error extr
 const friendlyOutboundImport = `import { formatProviderFailure, formatToolFailure } from '${providerErrorsPolicy}';`;
 assertOnce(finalOutbound, friendlyOutboundImport, 'friendly errors import');
 assertOnce(finalOutbound, '// Chat-only friendly provider errors v1.', 'friendly errors marker');
-assertOnce(finalOutbound, 'this.onToolResult(record, event, raw);', 'raw tool result binding');
-assertOnce(finalOutbound, 'onToolResult(record, event, raw) {', 'safe tool result handler');
-assertOnce(finalOutbound, "void this.send(record, formatToolFailure(), 'sendToolResultError');", 'safe tool failure notice');
-assertOnce(finalOutbound, "void this.send(record, formatProviderFailure(failure), 'sendTurnEndError');", 'safe turn failure notice');
+assertOnce(finalOutbound, 'this.onToolResult(replyRecord, event, raw, record);', 'raw tool result binding');
+assertOnce(finalOutbound, 'onToolResult(record, event, raw, originRecord = record) {', 'safe tool result handler');
+assertOnce(finalOutbound, "trackMergeBatchSend(originRecord, this.send(record, formatToolFailure(), 'sendToolResultError'));", 'safe tool failure notice');
+assertOnce(finalOutbound, "trackMergeBatchSend(originRecord, this.send(record, formatProviderFailure(failure), 'sendTurnEndError'));", 'safe turn failure notice');
 assertOnce(finalOutbound, "block?.type === 'tool-result' && block.isError === true", 'block-only tool failure check');
 assertOnce(finalOutbound, 'this.logger.error(`im-qqbot: ${tag} failed to send reply`);', 'safe QQ send error log');
 if (finalOutbound.includes('${failure.code}') || finalOutbound.includes('${failure.message}')
@@ -949,16 +1381,28 @@ if (finalOutbound.includes('${failure.code}') || finalOutbound.includes('${failu
 const recoveryOutboundImport = `import { isContentRiskFailure, markContentRiskFailure, noteRecoveryTurnStart } from '${sessionRecoveryPolicy}';`;
 assertOnce(finalOutbound, recoveryOutboundImport, 'outbound recovery import');
 assertOnce(finalOutbound, '// Chat-only content-risk turn recovery v1.', 'outbound recovery marker');
-assertOnce(finalOutbound, 'onTurnEnd(sessionId, record, event, turnId) {', 'outbound turn handler');
+assertOnce(finalOutbound, 'onTurnEnd(sessionId, record, event, turnId, originRecord = record) {', 'outbound turn handler');
 assertOnce(finalOutbound, 'if (isContentRiskFailure(failure)) {', 'outbound content risk branch');
 assertOnce(finalOutbound, 'markContentRiskFailure({', 'outbound recovery registration');
 assertOnce(finalOutbound, "if (raw?.type === 'turn/start') {", 'native turn start binding');
-assertOnce(finalOutbound, 'this.onTurnEnd(session.header.id, record, event, raw.data?.turn);', 'native turn end binding');
+assertOnce(finalOutbound, 'this.onTurnEnd(sessionId, replyRecord, event, raw.data?.turn, record);', 'native turn end binding');
 const contentRiskPosition = finalOutbound.indexOf('if (isContentRiskFailure(failure)) {');
 const normalFailurePosition = finalOutbound.indexOf('else if (!SILENT_TURN_ERROR_CODES.has(failure.code)) {', contentRiskPosition);
 const contentRiskBranch = finalOutbound.slice(contentRiskPosition, normalFailurePosition);
 if (normalFailurePosition < 0 || contentRiskBranch.includes('sendTurnEndError') || !contentRiskBranch.includes('markContentRiskFailure({')) {
     throw new Error('Chat-only patch: recognized content-risk failures are not isolated from raw error replies');
+}
+const finalStreamWriter = await finalText('transport/streaming-writer.js');
+const finalOutboundBuffer = await finalText('transport/outbound-buffer.js');
+assertOnce(finalStreamWriter, '// Chat-only awaitable stream cancellation v1.', 'awaitable streaming cancellation');
+assertOnce(finalOutboundBuffer, '// Chat-only awaitable stream cancellation v1.', 'awaitable outbound buffer cancellation');
+if (!finalStreamWriter.includes('return this.chain;')
+    || !finalOutboundBuffer.includes('const completion = Promise.resolve().then(async () => {')
+    || !finalOutboundBuffer.includes('        });\n        this.flushPromise = completion;')
+    || !finalOutboundBuffer.includes('if (this.flushPromise)')
+    || !finalOutboundBuffer.includes('this.flushPromise = completion;')
+    || !finalOutboundBuffer.includes('return Promise.all([this.flushPromise, completion].filter(Boolean));')) {
+    throw new Error('Chat-only patch: streaming cancellation is not awaitable before merge lock handoff');
 }
 
 const finalPrefs = await finalText('model/prefs-store.js');

@@ -16,6 +16,8 @@ const integration = sourceDist ? test : test.skip;
 const enforcer = process.env.QQBOT_ENFORCER_SCRIPT ?? '/usr/local/lib/enforce-chat-only.mjs';
 const fixture = process.env.QQBOT_PRE_RECOVERY_FIXTURE
     ?? fileURLToPath(new URL('./prepare-pre-recovery-fixture.mjs', import.meta.url));
+const concurrencyFixture = process.env.QQBOT_PRE_CONCURRENCY_FIXTURE
+    ?? fileURLToPath(new URL('./prepare-pre-concurrency-fixture.mjs', import.meta.url));
 
 async function run(script, args = []) {
     return execute(process.execPath, [script, ...args], { timeout: 30_000, maxBuffer: 256 * 1024 });
@@ -45,17 +47,39 @@ async function hashes(root, relative = '') {
 
 async function assertCurrentPatch(root) {
     const expected = {
+        'gateway/bootstrap.js': [
+            '// Chat-only merge batch reply adapter v1.',
+            'setupMiddlewares(bot, config, manager, logger, sender);',
+        ],
+        'gateway/middleware-setup.js': [
+            '// Chat-only serialized merge guard v1.',
+            'maxQueue: config.maxQueue ?? 20,',
+            'await sendMergeQueueFullNotice(sender, droppedCtx);',
+        ],
         'transport/inbound.js': [
             '// Chat-only content-risk recovery context v1.',
             '// Chat-only group-history epoch guard v1.',
             '// Chat-only safe inbound errors v1.',
+            '// Chat-only batch cancellation and reply binding v1.',
+            '// Chat-only safe batch finalization v1.',
+            'await closeMergeBatch(replyBatch);',
             'if (documentTurn) await finishContentRiskRecovery(documentTurn);',
         ],
         'transport/outbound.js': [
             '// Chat-only content-risk turn recovery v1.',
             '// Chat-only friendly provider errors v1.',
-            "void this.send(record, formatProviderFailure(failure), 'sendTurnEndError');",
-            "void this.send(record, formatToolFailure(), 'sendToolResultError');",
+            '// Chat-only batch-bound outbound routing v1.',
+            'captureMergeBatchReply(record, { sessionId, turnId: raw?.data?.turn, seq: raw?.seq })',
+            "trackMergeBatchSend(originRecord, this.send(record, formatProviderFailure(failure), 'sendTurnEndError'));",
+            "trackMergeBatchSend(originRecord, this.send(record, formatToolFailure(), 'sendToolResultError'));",
+        ],
+        'transport/streaming-writer.js': [
+            '// Chat-only awaitable stream cancellation v1.',
+        ],
+        'transport/outbound-buffer.js': [
+            '// Chat-only awaitable stream cancellation v1.',
+            'this.flushPromise = completion;',
+            'return Promise.all([this.flushPromise, completion].filter(Boolean));',
         ],
         'transport/events.js': ['// Chat-only structured provider failures v1.'],
         'model/prefs-store.js': ['// Chat-only persistent model prefs v1.'],
@@ -73,10 +97,11 @@ async function assertCurrentPatch(root) {
     }
 }
 
-for (const version of ['pre-recovery', 'recovery-v1']) {
+for (const version of ['pre-concurrency', 'pre-recovery', 'recovery-v1']) {
     integration(`${version} adapter upgrades completely and a second patch pass changes no file hashes`, async (t) => {
         const root = await isolatedAdapter(t);
-        await run(fixture, [root, ...(version === 'recovery-v1' ? ['recovery-v1'] : [])]);
+        if (version === 'pre-concurrency') await run(concurrencyFixture, [root]);
+        else await run(fixture, [root, ...(version === 'recovery-v1' ? ['recovery-v1'] : [])]);
         const before = await hashes(root);
         await run(enforcer, [root]);
         await assertCurrentPatch(root);
@@ -98,6 +123,22 @@ integration('a partial committed callback fails strict validation without changi
     await assert.rejects(run(enforcer, [root]), (error) => {
         assert.notEqual(error.code, 0);
         assert.match(error.stderr, /strict session reset atomic commit ordering is incomplete/u);
+        return true;
+    });
+    assert.deepEqual(await hashes(root), before, 'strict rejection performs zero adapter writes');
+});
+
+integration('a partial overflow guard fails strict validation without changing any dist file', async (t) => {
+    const root = await isolatedAdapter(t);
+    const middlewarePath = join(root, 'gateway/middleware-setup.js');
+    const middleware = await readFile(middlewarePath, 'utf8');
+    const notice = '                await sendMergeQueueFullNotice(sender, droppedCtx);';
+    assert.equal(middleware.split(notice).length, 2, 'fixture begins with exactly one overflow notice call');
+    await writeFile(middlewarePath, middleware.replace(notice, '                // fixture removed required overflow notification'));
+    const before = await hashes(root);
+    await assert.rejects(run(enforcer, [root]), (error) => {
+        assert.notEqual(error.code, 0);
+        assert.match(error.stderr, /serialized merge middleware, overflow notice, or ordering is incomplete/u);
         return true;
     });
     assert.deepEqual(await hashes(root), before, 'strict rejection performs zero adapter writes');

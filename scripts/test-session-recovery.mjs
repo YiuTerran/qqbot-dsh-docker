@@ -14,6 +14,10 @@ const recoveryUrl = process.env.QQBOT_RECOVERY_MODULE
     ? pathToFileURL(resolve(process.env.QQBOT_RECOVERY_MODULE)).href
     : new URL('../defaults/qqbot-session-recovery.mjs', import.meta.url).href;
 const recovery = await import(recoveryUrl);
+const concurrencyUrl = process.env.QQBOT_CONCURRENCY_MODULE
+    ? pathToFileURL(resolve(process.env.QQBOT_CONCURRENCY_MODULE)).href
+    : new URL('../defaults/qqbot-concurrency.mjs', import.meta.url).href;
+const { createMergeConcurrencyGuard } = await import(concurrencyUrl);
 const {
     isContentRiskFailure,
     SUCCESS_NOTICE,
@@ -34,6 +38,12 @@ const qualifying = (id = '1df0771e-5b35-44c7-8b5f-42c8d4a520bd') => ({
     code: 'INVALID_REQUEST',
     message: `OpenAI API error (400): {"message":"Content Exists Risk (requestid: ${id}) (request id: 01M3RXQF9D3ARVN4V1KMS6FEES)","type":"packyinvalidrequesterror","param":"","code":"invalidrequesterror"}`,
 });
+
+function deferred() {
+    let resolve;
+    const promise = new Promise((res) => { resolve = res; });
+    return { promise, resolve };
+}
 
 test('only the exact HTTP 400 Content Exists Risk failure is classified, independent of request IDs', () => {
     for (const id of [
@@ -318,7 +328,7 @@ async function prepareAdapterPeers() {
     adapterPeersPrepared = true;
 }
 
-integration('real inbound waits for turn/end recovery, revokes grants first, and does not replay the rejected prompt', async (t) => {
+integration('real inbound drains the original reply after session removal, revokes grants, and never replays the rejected prompt', async (t) => {
     await prepareAdapterPeers();
     const adapter = `${resolve(adapterDist)}/`;
     const { handleInbound } = await import(`${adapter}transport/inbound.js`);
@@ -339,25 +349,41 @@ integration('real inbound waits for turn/end recovery, revokes grants first, and
     const sent = [];
     const operations = [];
     const active = new Map();
-    const bot = { async sendMarkdown(target, text) { sent.push({ target, text }); } };
+    const noticeStarted = deferred();
+    const releaseNotice = deferred();
+    const bot = { async sendMarkdown(target, text) {
+        sent.push({ target, text });
+        if (text === SUCCESS_NOTICE) {
+            noticeStarted.resolve();
+            await releaseNotice.promise;
+        }
+    } };
     const warns = [];
     const logger = { info() {}, debug() {}, warn(message) { warns.push(message); }, error() {} };
     let followups = 0;
     let oldAgent;
     let currentRecord;
     let eventHandler;
+    let replacementAgent;
+    const followedBodies = [];
     let requestedDocumentId;
     let originalDocumentScope;
-    const peerId = 'peer-a';
-    const replyTarget = { scope: 'c2c', targetId: peerId, msgId: 'inbound-message' };
+    const peerId = 'group-a';
+    const senderId = 'member-a';
+    const replyTarget = { scope: 'group', targetId: peerId, msgId: 'inbound-message' };
     const manager = {
         findBySessionId(id) { return [...active.values()].find((record) => record.sessionId === id); },
         getSessionRecord(scope, peer) { return [...active.values()].find((record) => record.scope === scope && record.peerId === peer); },
         async getOrCreate(scope, peer, _sender, target) {
-            assert.equal(scope, 'c2c');
+            assert.equal(scope, 'group');
             assert.equal(peer, peerId);
+            if (this.replacement) {
+                currentRecord = { ...this.replacement, agent: replacementAgent, replyTarget: target };
+                active.set(currentRecord.sessionId, currentRecord);
+                return currentRecord;
+            }
             currentRecord = {
-                sessionKey: 'qqbot:app:c2c:peer-a', sessionId: 'session-1', scope, peerId,
+                sessionKey: 'qqbot:app:group:group-a', sessionId: 'session-1', scope, peerId,
                 agent: oldAgent, replyTarget: target, handle: { async dispose() {} },
             };
             active.set(currentRecord.sessionId, currentRecord);
@@ -370,7 +396,7 @@ integration('real inbound waits for turn/end recovery, revokes grants first, and
             assert.equal(originalDocumentScope.documents.size, 0);
             assert.equal(originalDocumentScope.diceCalls.size, 0);
             assert.ok(denyUnsafeTool({ name: 'qqbot_describe_image', arguments: { image: imagePath }, agent: oldAgent }));
-            assert.equal(scope, 'c2c');
+            assert.equal(scope, 'group');
             assert.equal(peer, peerId);
             assert.equal(options?.expectedAgent, oldAgent);
             assert.equal(options?.expectedSessionId, 'session-1');
@@ -380,7 +406,7 @@ integration('real inbound waits for turn/end recovery, revokes grants first, and
             active.delete('session-1');
             this.replacement = {
                 sessionKey: currentRecord.sessionKey, sessionId: 'session-2', scope, peerId,
-                agent: {}, replyTarget, handle: { async dispose() {} },
+                agent: replacementAgent, replyTarget, handle: { async dispose() {} },
             };
             active.set('session-2', this.replacement);
             return true;
@@ -392,6 +418,7 @@ integration('real inbound waits for turn/end recovery, revokes grants first, and
     oldAgent = {
         followup(message) {
             followups++;
+            followedBodies.push(message.content[0].text);
             assert.ok(message.content[0].text.includes('rejected prompt'));
             originalDocumentScope = getDocumentTurn(oldAgent);
             requestedDocumentId = [...originalDocumentScope.documents.keys()][0];
@@ -425,33 +452,57 @@ integration('real inbound waits for turn/end recovery, revokes grants first, and
             assert.equal(operations.length, 0);
         },
     };
-    manager.getOrCreate = async (scope, peer, sender, target) => {
-        currentRecord = {
-            sessionKey: 'qqbot:app:c2c:peer-a', sessionId: 'session-1', scope, peerId: peer,
-            agent: oldAgent, replyTarget: target, handle: { async dispose() {} },
-        };
-        active.set(currentRecord.sessionId, currentRecord);
-        return currentRecord;
+    replacementAgent = {
+        followup(message) {
+            followups++;
+            followedBodies.push(message.content[0].text);
+            assert.equal(message.content[0].text, 'next prompt', 'the next queued request is processed as its own batch');
+        },
+        async whenIdle() {},
     };
 
     const message = {
-        kind: 'c2c', senderId: peerId, messageId: 'inbound-message', content: 'rejected prompt',
+        kind: 'group', groupOpenid: peerId, senderId, messageId: 'inbound-message', content: 'rejected prompt',
         attachments: [{ filename: 'note.txt', content_type: 'text/plain', size: 4, url: 'https://files.example/note.txt' }],
     };
-    await handleInbound({
+    const guard = createMergeConcurrencyGuard({ maxQueue: 4, maxProcessingMs: 0 });
+    t.after(() => releaseNotice.resolve());
+    const firstContext = {
         message: {
             ...message,
+            replyTarget,
             attachments: [...message.attachments, { filename: 'fixture.png', content_type: 'image/png', size: 32, url: 'https://files.example/fixture.png' }],
         },
-        state: { downloadedFiles: [{ contentType: 'image', filename: 'fixture.png', localPath: imagePath }] }, bot,
-    }, manager, config, logger);
+        state: { mention: { wasMentioned: true }, downloadedFiles: [{ contentType: 'image', filename: 'fixture.png', localPath: imagePath }] }, bot,
+    };
+    const firstRun = guard(firstContext, () => handleInbound(firstContext, manager, config, logger));
+    await noticeStarted.promise;
+    assert.deepEqual(sent[0], { target: replyTarget, text: SUCCESS_NOTICE },
+        'the recovery notification keeps the original target even though manager.remove replaced the record');
+    assert.equal(manager.getSessionRecord('group', peerId).sessionId, 'session-2',
+        'the original session has been removed before its success notification drains');
+
+    const nextMessage = {
+        kind: 'group', groupOpenid: peerId, senderId: 'member-b', messageId: 'queued-after-recovery', content: 'next prompt', attachments: [],
+        replyTarget: { scope: 'group', targetId: peerId, msgId: 'queued-after-recovery' },
+    };
+    const nextContext = { message: nextMessage, state: { mention: { wasMentioned: true } }, bot };
+    const nextRun = guard(nextContext, () => handleInbound(nextContext, manager, config, logger));
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    assert.equal(followups, 1, 'the next same-key message waits while the original recovery send is pending');
+    assert.equal(sent.length, 1, 'no second notification or model-generated reply starts before the drain');
+    releaseNotice.resolve();
+    await Promise.all([firstRun, nextRun]);
     assert.deepEqual(warns, [], 'the inbound fixture did not fail inside the adapter error handler');
-    assert.equal(followups, 1, 'failed prompt is never submitted again');
+    assert.equal(followups, 2);
+    assert.equal(followedBodies.filter((body) => body.includes('rejected prompt')).length, 1,
+        'the rejected prompt is never resubmitted after the recovery reset');
+    assert.deepEqual(followedBodies, ['rejected prompt', 'next prompt']);
     assert.deepEqual(operations.map(([name]) => name), ['remove'], 'reset is deferred until after whenIdle and inbound cleanup');
     assert.equal(operations[0][3].requirePersisted, true);
     assert.equal(getDocumentTurn(oldAgent), undefined, 'document scope is revoked before reset finishes');
     assert.equal(sent.length, 1);
-    assert.equal(sent[0].target.targetId, peerId);
+    assert.deepEqual(sent[0].target, replyTarget);
     assert.equal(sent[0].text, SUCCESS_NOTICE);
     assert.equal(manager.replacement.sessionId, 'session-2');
     assert.ok(denyUnsafeTool({ name: 'qqbot_read_document', arguments: { attachmentId: requestedDocumentId }, agent: oldAgent }));

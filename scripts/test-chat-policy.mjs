@@ -47,6 +47,20 @@ const logger = { info() {}, warn() {}, debug() {}, error() {} };
 const png = Buffer.from('89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489', 'hex');
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+function currentRecordManager(agent, sessionId) {
+    let record;
+    return {
+        getSessionRecord(scope, peerId) {
+            return record?.scope === scope && record.peerId === peerId ? record : undefined;
+        },
+        async getOrCreate(scope, peerId, senderId, replyTarget) {
+            record ??= { scope, peerId, senderId, replyTarget, sessionId, agent, handle: { async dispose() {} } };
+            record.replyTarget = replyTarget;
+            return record;
+        },
+    };
+}
+
 assert.equal(QQ_MEDIA_ROOT, MEDIA_ROOT, 'policy root must match the pinned adapter media cache');
 
 async function mediaTestDir(prefix) {
@@ -918,6 +932,7 @@ test('QQ inbound binds only current downloaded images and clears them after the 
             },
             async whenIdle() {},
         };
+        const manager = currentRecordManager(agent, `document-grants-${kind}`);
         await handleInbound({
             message: {
                 kind, senderId: 'peer', groupOpenid: 'group', messageId: 'msg', content: '你好',
@@ -930,7 +945,7 @@ test('QQ inbound binds only current downloaded images and clears them after the 
                 quote: { attachments: [{ filename: 'quoted.txt', contentType: 'text/plain', size: 22, url: 'https://files.example.com/quoted?signature=signed-quote' }] },
             },
             bot: {},
-        }, { getOrCreate: async () => ({ agent }) }, { appId: 'fixture' }, logger);
+        }, manager, { appId: 'fixture' }, logger);
         assert.equal(messages, 1);
         assert.equal(getDocumentTurn(agent), undefined, 'the per-turn scope is cleared in the inbound finally block');
         assert.ok(denyUnsafeTool({ name: 'qqbot_read_document', arguments: { attachmentId: documentId }, agent }), 'completed-turn document IDs are unusable');
@@ -958,13 +973,14 @@ test('QQ inbound revokes document and image grants when followup or whenIdle fai
             },
             async whenIdle() { throw new Error('fixture idle failure'); },
         };
+        const manager = currentRecordManager(agent, `failed-document-grants-${failureStage}`);
         await handleInbound({
             message: {
                 kind: 'c2c', senderId: 'peer', messageId: failureStage, content: 'Read the note.',
                 attachments: [{ filename: 'note.txt', content_type: 'text/plain', size: 4, url: 'https://files.example.com/note.txt' }],
             },
             state: { downloadedFiles: [{ contentType: 'image', localPath: image }] }, bot: {},
-        }, { getOrCreate: async () => ({ agent }) }, { appId: 'fixture' }, logger);
+        }, manager, { appId: 'fixture' }, logger);
         assert.equal(getDocumentTurn(agent), undefined, failureStage);
         assert.equal(scope.controller.signal.aborted, true, failureStage);
         assert.equal(scope.documents.size, 0, failureStage);
@@ -1171,11 +1187,12 @@ test('QQ explicitly quoted documents trigger a turn even without new text or att
         },
         async whenIdle() {},
     };
+    const manager = currentRecordManager(agent, 'quote-only-document');
     await handleInbound({
         message: { kind: 'c2c', senderId: 'quote-only-peer', messageId: 'quote-only', content: '' },
         state: { quote: { attachments: [{ filename: 'quoted.md', contentType: 'text/markdown', url: 'https://files.example.com/quoted?private-signature=1' }] } },
         bot: {},
-    }, { async getOrCreate() { return { agent }; } }, { appId: 'fixture' }, logger);
+    }, manager, { appId: 'fixture' }, logger);
     assert.equal(follows, 1);
     assert.equal(getDocumentTurn(agent), undefined);
 });

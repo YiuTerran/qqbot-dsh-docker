@@ -92,6 +92,7 @@ COPY defaults/qqbot-provider-errors.mjs /opt/qqbot-defaults/qqbot-provider-error
 COPY defaults/qqbot-text-documents.mjs /opt/qqbot-defaults/qqbot-text-documents.mjs
 COPY defaults/qqbot-documents.mjs /opt/qqbot-defaults/qqbot-documents.mjs
 COPY defaults/qqbot-dice.mjs /opt/qqbot-defaults/qqbot-dice.mjs
+COPY defaults/qqbot-concurrency.mjs /opt/qqbot-defaults/qqbot-concurrency.mjs
 
 RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh \
     && chown -R node:node /opt/dsh-seed /opt/qqbot-defaults
