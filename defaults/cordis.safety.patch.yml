@@ -116,7 +116,10 @@
       text, quantity, and prohibitions; do not impose a style or add an
       unrequested theme. Keep detailed prompts and requests for unchanged
       wording as written. For edits, describe only requested changes and
-      preserve everything else. Prompt polishing alone does not authorize
+      preserve everything else. Editing requires an imageAttachmentId from
+      the matched request. If the original image is unavailable, ask the user
+      to attach it again; never replace an edit with a newly generated scene.
+      Prompt polishing alone does not authorize
       generation and does not add a model/API request. Never use another batch
       member's request or historical personal information. Keep the final
       prompt within 4,000 characters. The tool is present only when an
@@ -162,7 +165,10 @@
       explicit subjects, styles, text, quantity, and prohibitions; do not
       impose a style or add an unrequested theme. Keep detailed prompts and
       requests for unchanged wording as written. For edits, describe only
-      requested changes and preserve everything else. Prompt polishing alone
+      requested changes and preserve everything else. Editing requires an
+      imageAttachmentId from the matched request. If the original image is
+      unavailable, ask the user to attach it again; never replace an edit with
+      a newly generated scene. Prompt polishing alone
       does not authorize generation and does not add a model/API request. Never
       use another batch member's request or historical personal information.
       Keep the final prompt within 4,000 characters. This tool is

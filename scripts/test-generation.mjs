@@ -21,7 +21,7 @@ const generationScopeModule = await import(pathToFileURL(join(generationDir, 'qq
 const documentScopeModule = await import(pathToFileURL(join(generationDir, 'qqbot-document-scope.mjs')).href);
 const senderModule = await import(pathToFileURL(join(generationDir, 'qqbot-generation-sender.mjs')).href);
 const chatPolicyModule = await import(pathToFileURL(join(generationDir, 'qqbot-chat-policy.mjs')).href);
-const { beginGenerationTurn, endGenerationTurn, getGenerationRequest } = generationScopeModule;
+const { beginGenerationTurn, endGenerationTurn, getGenerationRequest, getGenerationTurn, generationRequestMetadata } = generationScopeModule;
 const { beginDocumentTurn, endDocumentTurn, getDocumentTurn, runInDocumentExecution, bindDocumentExecution } = documentScopeModule;
 const { setCurrentImages, clearCurrentImages } = chatPolicyModule;
 const { createGenerationSender } = senderModule;
@@ -849,6 +849,100 @@ test('registered native image tool uses same-source attachment bytes, user quota
     assert.equal(notices.length, 0);
     await endGenerationTurn(agent, scope);
     endDocumentTurn(agent, documentScope);
+});
+
+test('cached group quote passes the original image bytes through inbound and the native editing tool', async (t) => {
+    const adapter = '/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/';
+    const { setupMiddlewares } = await import(`${adapter}gateway/middleware-setup.js`);
+    const { handleInbound } = await import(`${adapter}transport/inbound.js`);
+    const { PublicHttpProvider } = await import(pathToFileURL(join(generationDir, 'qqbot-web-pages.mjs')).href);
+    const originalRequestOnce = PublicHttpProvider.prototype.requestOnce;
+    PublicHttpProvider.prototype.requestOnce = async function () {
+        return { response: new Response(png, { headers: { 'content-type': 'image/png' } }), close: async () => {} };
+    };
+    t.after(() => { PublicHttpProvider.prototype.requestOnce = originalRequestOnce; });
+    const providerCalls = [];
+    const sent = [];
+    const service = makeImageService({ onRequest: async (request) => {
+        providerCalls.push(request);
+        return responseImage(png);
+    } });
+    const { ctx } = await nativeGenerationRuntime(t, {
+        route: route(), quota: makeQuota(), markdownEnabled: false,
+        imageService: service,
+        sender: {
+            async sendImage(request, bytes) { sent.push({ target: request.replyTarget, bytes }); return { sent: true }; },
+            async sendNotice() { return { sent: true }; },
+        },
+    });
+    let pending;
+    let calls = 0;
+    const agent = {
+        followup() {
+            calls++;
+            if (calls === 1) return;
+            const [request] = generationRequestMetadata(getGenerationTurn(agent));
+            assert.equal(request.images.length, 1, 'the actual quote download produces an imageAttachmentId');
+            pending = nativeCall(ctx, GENERATE_IMAGE_TOOL, {
+                requestId: request.requestId, imageAttachmentId: request.images[0].imageAttachmentId,
+                prompt: 'Add a blue whale in the river; preserve the original scene.',
+            }, agent, 'cached-quote-edit');
+        },
+        async whenIdle() {
+            if (pending) {
+                const result = await pending;
+                assert.equal(result.isError, false, JSON.stringify(result));
+                assert.equal(result.value.status, 'sent');
+            }
+        },
+    };
+    let record;
+    const manager = {
+        questionChannel: { tryAnswer() { return false; } },
+        getSessionRecord(scope, peerId) { return record?.scope === scope && record.peerId === peerId ? record : undefined; },
+        async getOrCreate(scope, peerId, senderId, replyTarget) {
+            record ??= { scope, peerId, senderId, agent, sessionId: 'native-cached-quote', handle: { async dispose() {} } };
+            record.replyTarget = replyTarget;
+            return record;
+        },
+    };
+    const config = {
+        appId: 'native-quote-bot', debug: false, requireMention: true,
+        access: { c2cMode: 'open', c2cAllow: [], groupMode: 'open', groupAllow: [] },
+        historyLimit: 10, maxQueue: 4, processingTimeoutMs: 0, media: { enabled: true, maxMB: 10 },
+        textChunkLimit: 2000, streaming: false,
+    };
+    const logger = { info() {}, debug() {}, warn() {}, error() {} };
+    const layers = [];
+    setupMiddlewares({ use(layer) { layers.push(layer); } }, config, manager, logger);
+    layers.push((mwCtx) => handleInbound(mwCtx, manager, config, logger));
+    const run = async (message) => {
+        const mwCtx = {
+            message: { kind: 'group', groupOpenid: 'native-quote-group', senderId: 'native-quote-member',
+                attachments: [], timestamp: new Date().toISOString(), ...message,
+                replyTarget: { scope: 'group', targetId: 'native-quote-group', msgId: message.messageId } },
+            state: {}, log: logger, bot: { appId: config.appId, async sendMarkdown() {} },
+            replyTarget: { scope: 'group', targetId: 'native-quote-group', msgId: message.messageId },
+            stop() {},
+        };
+        let index = 0;
+        const next = async () => { const layer = layers[index++]; if (layer) await layer(mwCtx, next); };
+        await next();
+        for (const file of [...(mwCtx.state.downloadedFiles ?? []), ...(mwCtx.state.downloadedQuoteFiles ?? []), ...(mwCtx.state.downloadedGenerationQuoteFiles ?? [])]) {
+            t.after(() => rm(file.localPath, { force: true }));
+        }
+    };
+    await run({ messageId: 'native-original', msgIdx: 'native-original-ref', content: `<@!${config.appId}> 看图`,
+        attachments: [{ content_type: 'image/png', filename: 'original.png', url: 'https://example.com/native-original.png' }] });
+    await run({ messageId: 'ROBOT1.0.AB+/cd==', refMsgIdx: 'native-original-ref', content: `<@!${config.appId}> 在江里加一条蓝色鲸鱼` });
+    assert.equal(calls, 2);
+    assert.equal(providerCalls.length, 1);
+    assert.equal(requestUrl(providerCalls[0]), 'https://image-api.example.test/v1/images/edits', 'the request uses editing, not new generation');
+    assert.deepEqual(Buffer.from(await providerCalls[0].body.get('image').arrayBuffer()), png,
+        'the actual edit request contains the exact original bytes');
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].target.msgId, 'ROBOT1.0.AB+/cd==');
+    assert.equal(getGenerationTurn(agent), undefined, 'edit grants are revoked at turn completion');
 });
 
 test('native Markdown remains available in document mode, validates UTF-8, and falls back once on the same request', async (t) => {

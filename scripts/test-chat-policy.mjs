@@ -14,6 +14,7 @@ import { createScopedQuoteRef, installChatPolicy, setCurrentImages, clearCurrent
 import { WebPageProvider, PublicHttpProvider, downloadCurrentQQImage } from '/opt/qqbot-defaults/qqbot-web-pages.mjs';
 import { beginDocumentTurn, endDocumentTurn, getDocumentTurn, isDocumentTurnActive, isTurnUrlAllowed, runInDocumentExecution, recordSuccessfulSearchSources, authorizeTurnProviderUrl, runWithProviderAuthorization, assertProviderRequestUrl } from '/opt/qqbot-defaults/qqbot-document-scope.mjs';
 import { readChatDocument } from '/opt/qqbot-defaults/qqbot-documents.mjs';
+import { getGenerationTurn, generationRequestMetadata } from '/opt/qqbot-defaults/qqbot-generation-scope.mjs';
 import { resolveTextDocumentType, decodeTextDocumentBytes, isBinaryDocumentBytes } from '/opt/qqbot-defaults/qqbot-text-documents.mjs';
 
 const dshRoot = '/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/';
@@ -292,8 +293,8 @@ test('the patched QQ middleware chain handles only the current guarded .r messag
     };
     const layers = captureMiddlewareChain(config, manager);
     assert.equal(layers.length, 15, 'the real patched gateway chain is installed');
-    assert.match(layers[6].toString(), /rate-limit/, 'the SDK rate limiter precedes direct dice handling');
-    assert.match(layers[7].toString(), /isDiceCommandCandidate/, 'direct command handling follows rate limiting');
+    assert.match(layers[7].toString(), /rate-limit/, 'the SDK rate limiter precedes direct dice handling');
+    assert.match(layers[8].toString(), /isDiceCommandCandidate/, 'direct command handling follows rate limiting');
     const mergeGuardIndex = layers.findIndex((middleware) => middleware.name === 'mergeConcurrencyGuard');
     assert.ok(mergeGuardIndex > 8, 'slash command handling remains upstream of the idle group notice gate');
     let terminalCalls = 0;
@@ -1160,6 +1161,7 @@ test('quote references are isolated by c2c peer and group, including overlapping
     // middleware fibers overlap while exercising the AsyncLocalStorage scope.
     await Promise.all(sources.map((source, index) => run({
         ...source,
+        attachments: [{ content_type: 'image/png', filename: `peer-${index}.png`, url: `https://example.com/peer-${index}.png` }],
         msgIdx: 'shared-ref',
         messageId: `source-${index}`,
     }, (index % 3) + 1)));
@@ -1170,8 +1172,9 @@ test('quote references are isolated by c2c peer and group, including overlapping
         refMsgIdx: 'shared-ref',
         messageId: `quote-${index}`,
     }, (sources.length - index) * 2)));
-    assert.deepEqual(quotes.map((state) => state.quote?.text), sources.map((source) => source.content));
+    assert.deepEqual(quotes.map((state) => state.quote?.rawContent), sources.map((source) => source.content));
     assert.deepEqual(quotes.map((state) => state.quote?.source), sources.map(() => 'store'));
+    assert.deepEqual(quotes.map((state) => state.quote?.attachments?.[0]?.filename), sources.map((_, index) => `peer-${index}.png`));
 
     // A missing peer never enters the shared store, but QQ's trusted current
     // msg_elements fallback still preserves explicit quoted image metadata.
@@ -1198,6 +1201,92 @@ test('quote references are isolated by c2c peer and group, including overlapping
     assert.deepEqual(unknownSource, {});
     const unknownKindQuote = await run({ kind: 'unknown', senderId: 'ghost', refMsgIdx: 'unknown-kind', messageId: 'unknown-quote' });
     assert.equal(unknownKindQuote.quote?.source, 'none');
+});
+
+test('group image quotes recover cached original attachments through the production middleware chain', async (t) => {
+    const originalRequestOnce = PublicHttpProvider.prototype.requestOnce;
+    const downloads = [];
+    PublicHttpProvider.prototype.requestOnce = async function (url) {
+        downloads.push(url.href ?? String(url));
+        return { response: new Response(png, { headers: { 'content-type': 'image/png' } }), close: async () => {} };
+    };
+    t.after(() => { PublicHttpProvider.prototype.requestOnce = originalRequestOnce; });
+    const config = {
+        appId: 'quote-cache-test', debug: false,
+        access: { c2cMode: 'open', c2cAllow: [], groupMode: 'open', groupAllow: [] },
+        requireMention: true, historyLimit: 10, maxQueue: 4, processingTimeoutMs: 0,
+        media: { enabled: true, maxMB: 10 }, textChunkLimit: 2000, streaming: false,
+    };
+    const followups = [];
+    const agent = {
+        followup(body) {
+            followups.push({ body, metadata: generationRequestMetadata(getGenerationTurn(agent)) });
+        },
+        async whenIdle() {},
+    };
+    const records = new Map();
+    const manager = {
+        questionChannel: { tryAnswer() { return false; } },
+        getSessionRecord(scope, peerId) { return records.get(`${scope}:${peerId}`); },
+        async getOrCreate(scope, peerId, senderId, replyTarget) {
+            const key = `${scope}:${peerId}`;
+            if (!records.has(key)) records.set(key, { scope, peerId, senderId, replyTarget,
+                sessionId: `quote-cache-${peerId}`, agent, handle: { async dispose() {} } });
+            const record = records.get(key);
+            record.replyTarget = replyTarget;
+            return record;
+        },
+    };
+    const layers = captureMiddlewareChain(config, manager);
+    layers.push((ctx) => handleInbound(ctx, manager, config, logger));
+    const sourceUrl = 'https://example.com/original-river.png';
+    const run = async ({ messageId, content, attachments = [], refMsgIdx, msgElements, groupOpenid = 'quote-cache-group' }) => {
+        const ctx = {
+            message: {
+                kind: 'group', groupOpenid, senderId: 'quote-cache-member', messageId, msgIdx: messageId,
+                content, attachments, refMsgIdx, msgElements, timestamp: new Date().toISOString(),
+                replyTarget: { scope: 'group', targetId: groupOpenid, msgId: messageId },
+            },
+            state: {}, log: logger,
+            bot: { appId: config.appId, async sendMarkdown() {}, async sendText() {} },
+            replyTarget: { scope: 'group', targetId: groupOpenid, msgId: messageId },
+            stop(reason) { ctx.stopped = true; ctx.stopReason = reason; },
+        };
+        await runMiddlewareChain(layers, ctx);
+        for (const file of [...(ctx.state.downloadedFiles ?? []), ...(ctx.state.downloadedQuoteFiles ?? []), ...(ctx.state.downloadedGenerationQuoteFiles ?? [])]) {
+            t.after(() => rm(file.localPath, { force: true }));
+        }
+        return ctx;
+    };
+    for (const mentioned of [true, false]) {
+        const sourceId = `river-source-${mentioned}`;
+        const before = followups.length;
+        await run({ messageId: sourceId, content: mentioned ? `<@!${config.appId}> 看图` : '江景',
+            attachments: [{ content_type: 'image/png', filename: 'river.png', url: sourceUrl }] });
+        assert.equal(followups.length, before + (mentioned ? 1 : 0), 'unmentioned source is cached without model work');
+        const quote = await run({ messageId: `river-edit-${mentioned}`, refMsgIdx: sourceId,
+            content: `<@!${config.appId}> 在江里加一条蓝色鲸鱼` });
+        assert.equal(quote.state.quote?.source, 'store');
+        assert.equal(quote.state.quote?.attachments?.[0]?.url, sourceUrl, 'explicit reference restores the actual original URL');
+        assert.deepEqual(await readFile(quote.state.downloadedQuoteFiles[0].localPath), png);
+        const modelInput = followups.at(-1);
+        assert.equal(modelInput.metadata[0].images.length, 1, 'the quoted original receives an edit grant');
+        assert.equal(modelInput.metadata[0].images[0].quoted, true);
+        assert.match(JSON.stringify(modelInput.body), /imageAttachmentId/);
+        assert.doesNotMatch(JSON.stringify(modelInput.body), /https:\/\/example\.com\/original-river/);
+        assert.doesNotMatch(JSON.stringify(modelInput.body), /Chat history begins/);
+
+        const textOnly = await run({ messageId: `river-text-only-${mentioned}`, refMsgIdx: sourceId,
+            content: `<@!${config.appId}> 改这张图`, msgElements: [{ content: '江景' }] });
+        assert.equal(textOnly.state.quote.source, 'msg_elements');
+        assert.equal(textOnly.state.quote.attachments[0].url, sourceUrl, 'text-only QQ elements retain cached attachments for the exact reference');
+        assert.equal(followups.at(-1).metadata[0].images.length, 1);
+    }
+    const foreign = await run({ messageId: 'foreign-group-quote', refMsgIdx: 'river-source-true',
+        groupOpenid: 'other-group', content: `<@!${config.appId}> 改图` });
+    assert.equal(foreign.state.quote.source, 'none');
+    assert.equal(followups.at(-1).metadata[0].images.length, 0, 'another group cannot retrieve cached image metadata');
+    assert.ok(downloads.length >= 4);
 });
 
 test('prepared native executions cannot adopt grants from a newer QQ turn', async (t) => {
@@ -1785,4 +1874,14 @@ test('current QQ image downloader validates bytes, bounds, redirects, and quoted
     assert.equal(state.downloadedQuoteFiles[0].filename, 'quoted.png');
     assert.deepEqual(await readFile(state.downloadedQuoteFiles[0].localPath), png);
     t.after(() => rm(state.downloadedQuoteFiles[0].localPath, { force: true }));
+
+    const mergedState = {
+        qqbotGenerationQuoteAttachments: [{ content_type: 'image/png', filename: 'later-quoted.png', url: 'https://example.com/later.png' }],
+    };
+    await attachmentProcessor({ media: { enabled: true, maxMB: 10 } }, logger)({
+        message: { attachments: [] }, state: mergedState,
+    }, async () => {});
+    assert.equal(mergedState.downloadedGenerationQuoteFiles.length, 1, 'a later merged quote downloads when the first message has no quote');
+    assert.deepEqual(await readFile(mergedState.downloadedGenerationQuoteFiles[0].localPath), png);
+    t.after(() => rm(mergedState.downloadedGenerationQuoteFiles[0].localPath, { force: true }));
 });

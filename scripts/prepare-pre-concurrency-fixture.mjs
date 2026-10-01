@@ -126,6 +126,14 @@ await edit('transport/outbound.js', (source) => {
 });
 
 await edit('middleware/attachment.js', (source) => {
+    const independentMarker = '            // Chat-only independent merged quote downloads v2.';
+    if (source.includes(independentMarker)) {
+        const start = source.indexOf(independentMarker);
+        const lastLine = '                : [];';
+        const end = source.indexOf(lastLine, start);
+        if (end < start) throw new Error('pre-concurrency fixture found partial independent quote downloads');
+        return replaceOnce(source, source.slice(start, end + lastLine.length) + '\n', '', 'independent quote downloads');
+    }
     if (!source.includes('// Chat-only generation quote image downloads v1.')) {
         if (source.includes('downloadedGenerationQuoteFiles') || source.includes('generationQuoteAttachments'))
             throw new Error('pre-concurrency fixture found partial generation quote downloads');

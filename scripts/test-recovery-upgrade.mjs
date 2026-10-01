@@ -95,6 +95,7 @@ async function assertCurrentPatch(root) {
         'middleware/attachment.js': [
             '// Chat-only quoted-image downloads v2.',
             '// Chat-only generation quote image downloads v1.',
+            '// Chat-only independent merged quote downloads v2.',
             'ctx.state.downloadedGenerationQuoteFiles = rawGenerationQuote.length > 0',
         ],
         'transport/streaming-writer.js': [

@@ -752,6 +752,8 @@ docker run --rm --network none --entrypoint node --volume "${legacy_data_volume}
         "gateway/middleware-setup.js": [
             ["import {createScopedQuoteRef} from \x27/opt/qqbot-defaults/qqbot-chat-policy.mjs\x27;\n", ""],
             ["    // Chat-only scoped quote references prevent cross-peer message-key collisions.\n", ""],
+            ["    // Chat-only generation quote capture v1.\n", ""],
+            ["    // Chat-only quoted attachment cache v2.\n", ""],
             ["import { createDiceCommandMiddleware, createDiceAwareHistoryBuffer } from \x27/opt/qqbot-defaults/qqbot-chat-policy.mjs\x27;\n", ""],
             ["    // Chat-only dice command middleware v1.\n", ""],
             ["    bot.use(createDiceCommandMiddleware());\n", ""],

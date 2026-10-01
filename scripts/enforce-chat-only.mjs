@@ -197,6 +197,18 @@ await patch('gateway/middleware-setup.js', '// Chat-only generation quote captur
         + content.slice(nextGuardPosition);
 });
 
+await patch('gateway/middleware-setup.js', '// Chat-only quoted attachment cache v2.', (content, file) => {
+    const quoteBlock = [
+        '    // Chat-only generation quote capture v1.',
+        '    // Chat-only scoped quote references prevent cross-peer message-key collisions.',
+        '    bot.use(createScopedQuoteRef(quoteRef));',
+    ].join('\n');
+    content = replaceOne(content, quoteBlock, '', file);
+    const mentionCall = '    bot.use(mentionGate({';
+    return replaceOne(content, mentionCall,
+        '    // Chat-only quoted attachment cache v2.\n' + quoteBlock + '\n' + mentionCall, file);
+});
+
 await patch('gateway/middleware-setup.js', '// Chat-only dice command middleware v1.', (content, file) => {
     const diceImport = `import { createDiceCommandMiddleware, createDiceAwareHistoryBuffer } from '${policy}';`;
     if (!content.includes(diceImport)) content = `${diceImport}\n${content}`;
@@ -307,8 +319,8 @@ if (patchedMiddlewareSetup.split(mergeGuardImport).length !== 2
     || !patchedMiddlewareSetup.includes('await sendMergeQueueFullNotice(sender, droppedCtx);')
     || accessPosition < 0 || mentionPosition <= accessPosition || rateLimitPosition <= mentionPosition
     || diceCommandPosition <= rateLimitPosition || slashPosition <= diceCommandPosition
-    || answerPosition <= slashPosition || generationQuotePosition <= answerPosition
-    || scopedQuoteCallPosition <= generationQuotePosition || mergeGuardPosition <= scopedQuoteCallPosition
+    || generationQuotePosition <= accessPosition || scopedQuoteCallPosition <= generationQuotePosition
+    || mentionPosition <= scopedQuoteCallPosition || answerPosition <= slashPosition || mergeGuardPosition <= answerPosition
     || thinkingNoticePosition <= mergeGuardPosition || onStartPosition <= thinkingNoticePosition
     || thinkingSendPosition <= onStartPosition || onDropPosition <= thinkingSendPosition
     || attachmentPosition <= mergeGuardEndPosition || typingPosition <= mergeGuardEndPosition
@@ -316,6 +328,7 @@ if (patchedMiddlewareSetup.split(mergeGuardImport).length !== 2
     throw new Error('Chat-only patch: serialized merge middleware, overflow notice, or ordering is incomplete');
 }
 if (patchedMiddlewareSetup.split('// Chat-only generation quote capture v1.').length !== 2
+    || patchedMiddlewareSetup.split('// Chat-only quoted attachment cache v2.').length !== 2
     || patchedMiddlewareSetup.split('bot.use(createScopedQuoteRef(quoteRef));').length !== 2) {
     throw new Error('Chat-only patch: generation quote provenance is missing or duplicated');
 }
@@ -1387,6 +1400,17 @@ await patch('middleware/attachment.js', '// Chat-only generation quote image dow
         throw new Error('Chat-only patch: generation quote image download path is missing in ' + file);
     }
     return content;
+});
+
+await patch('middleware/attachment.js', '// Chat-only independent merged quote downloads v2.', (content, file) => {
+    const start = content.indexOf('                // Chat-only generation quote image downloads v1.');
+    const lastLine = '                    : [];';
+    const end = content.indexOf(lastLine, start);
+    if (start < 0 || end < start) throw new Error('Chat-only patch: missing legacy generation quote download block in ' + file);
+    const block = content.slice(start, end + lastLine.length);
+    const independent = block.split('\n').map((line) => line.slice(4)).join('\n');
+    return replaceOne(content, block + '\n            }',
+        '            }\n            // Chat-only independent merged quote downloads v2.\n' + independent, file);
 });
 
 await patch('media/vision-tool.js', '        timeoutMs: vision.timeoutMs,', (content, file) =>

@@ -870,7 +870,7 @@ function imageToolSchema() {
                 maxLength: MAX_PROMPT_CHARS,
                 description: 'Final image prompt (at most 4000 characters). Before calling, use the matched original QQ request and its explicit quote only: clarify short or vague visual descriptions with concise subject, composition, lighting, palette, and style details; preserve every explicit subject, style, text, quantity, and prohibition, add no unrequested theme or style, leave detailed prompts or requests to keep wording unchanged as written, and for edits describe only requested changes while preserving everything else. Prompt polishing alone does not authorize image generation.',
             },
-            imageAttachmentId: { type: 'string', minLength: 1, maxLength: 64, description: 'Optional opaque imageAttachmentId from that same original request.' },
+            imageAttachmentId: { type: 'string', minLength: 1, maxLength: 64, description: 'Required for editing: opaque imageAttachmentId from that same original request. Omit only for a requested new image. If an edit has no authorized base image, ask the user to attach it again instead of generating a replacement scene.' },
         },
         required: ['requestId', 'prompt'],
         additionalProperties: false,
