@@ -930,6 +930,42 @@ await patch('transport/outbound.js', '// Chat-only generation outbound v1.', (co
     return content;
 });
 
+await patch('transport/outbound.js', '// Chat-only deferred tool failures v1.', (content, file) => {
+    content = replaceOne(content,
+        '    toolCalls = new Map();',
+        '    toolCalls = new Map();\n    // Chat-only deferred tool failures v1.\n    toolFailureTurns = new WeakMap();', file);
+    content = replaceOne(content,
+        '            noteRecoveryTurnStart({ record: startRecord, sessionId, turnId: raw.data?.turn });',
+        '            this.toolFailureTurns.delete(startRecord);\n            noteRecoveryTurnStart({ record: startRecord, sessionId, turnId: raw.data?.turn });', file);
+    content = replaceOne(content,
+        "            case 'assistant/chunk':\n                this.onChunk(sessionId, replyRecord, event);",
+        "            case 'assistant/chunk':\n                if (this.toolFailureTurns.get(record)?.toolFailed) this.toolFailureTurns.get(record).streamAfterFailure = true;\n                this.onChunk(sessionId, replyRecord, event);", file);
+    content = replaceOne(content,
+        "            case 'tool/call':\n                this.onToolCall(event);",
+        "            case 'tool/call':\n                if (this.toolFailureTurns.get(record)?.toolFailed) this.toolFailureTurns.get(record).streamAfterFailure = false;\n                this.onToolCall(event);", file);
+    content = replaceOne(content,
+        '        const buffer = this.buffers.get(sessionId);\n        if (buffer !== undefined && buffer.text.trim()) {',
+        '        const turn = this.toolFailureTurns.get(originRecord);\n        if (turn?.toolFailed) {\n            if (event.content.some((block) => block?.type === \'tool-call\')) turn.streamAfterFailure = false;\n            else if (event.content.some((block) => block?.type === \'text\' && typeof block.text === \'string\' && block.text.trim())) turn.hasAnswer = true;\n        }\n        const buffer = this.buffers.get(sessionId);\n        if (buffer !== undefined && buffer.text.trim()) {', file);
+    content = replaceOne(content,
+        '            enqueueMergeBatchSend(originRecord, () => this.send(record, formatToolFailure(), \'sendToolResultError\'));',
+        '            this.toolFailureTurns.set(originRecord, { toolFailed: true, hasAnswer: false, streamAfterFailure: false });', file);
+    content = replaceOne(content,
+        '    onTurnEnd(sessionId, record, event, turnId, originRecord = record) {\n        const buffer = this.buffers.get(sessionId);',
+        '    onTurnEnd(sessionId, record, event, turnId, originRecord = record) {\n        const turn = this.toolFailureTurns.get(originRecord);\n        this.toolFailureTurns.delete(originRecord);\n        const buffer = this.buffers.get(sessionId);\n        const completedStreamAnswer = !!(turn?.streamAfterFailure && buffer?.text.trim());', file);
+    content = replaceOne(content,
+        '        const failure = extractTurnError(event.reason);',
+        '        if (event.reason.kind === \'completed\' && turn?.toolFailed && !turn.hasAnswer && !completedStreamAnswer)\n            enqueueMergeBatchSend(originRecord, () => this.send(record, formatToolFailure(), \'sendToolResultError\'));\n        const failure = extractTurnError(event.reason);', file);
+    for (const invariant of [
+        '// Chat-only deferred tool failures v1.',
+        'this.toolFailureTurns.delete(startRecord);',
+        'this.toolFailureTurns.delete(originRecord);',
+        "event.reason.kind === 'completed'",
+    ]) {
+        if (content.split(invariant).length !== 2) throw new Error(`Chat-only patch: missing deferred tool failure invariant in ${file}: ${invariant}`);
+    }
+    return content;
+});
+
 await patch('transport/streaming-writer.js', '// Chat-only awaitable stream cancellation v1.', (content, file) => {
     const original = [
         '    abort() {',
@@ -1781,6 +1817,18 @@ const toolFailureTracking = [
 ];
 if (!toolFailureTracking.some((value) => finalOutbound.split(value).length === 2))
     throw new Error('Chat-only patch: safe tool failure notice is missing or duplicated');
+assertOnce(finalOutbound, '// Chat-only deferred tool failures v1.', 'deferred tool failures marker');
+for (const [value, label] of [
+    ['toolFailureTurns = new WeakMap();', 'per-record deferred failure state'],
+    ['this.toolFailureTurns.delete(startRecord);', 'deferred failure turn start reset'],
+    ['this.toolFailureTurns.set(originRecord, { toolFailed: true, hasAnswer: false, streamAfterFailure: false });', 'deferred failure capture'],
+    ["if (event.content.some((block) => block?.type === 'tool-call')) turn.streamAfterFailure = false;", 'tool-call preamble guard'],
+    ['this.toolFailureTurns.delete(originRecord);', 'deferred failure turn end cleanup'],
+    ["event.reason.kind === 'completed' && turn?.toolFailed && !turn.hasAnswer && !completedStreamAnswer", 'completed unanswered failure condition'],
+]) assertOnce(finalOutbound, value, label);
+const deferredResultBranch = finalOutbound.slice(finalOutbound.indexOf('        if (failed) {'), finalOutbound.indexOf('        // Chat-only generation outbound v1.'));
+if (deferredResultBranch.includes('formatToolFailure()') || deferredResultBranch.includes('sendToolResultError'))
+    throw new Error('Chat-only patch: a tool failure still sends an immediate generic notice');
 const turnFailureTracking = [
     "trackMergeBatchSend(originRecord, this.send(record, formatProviderFailure(failure), 'sendTurnEndError'));",
     "enqueueMergeBatchSend(originRecord, () => this.send(record, formatProviderFailure(failure), 'sendTurnEndError'));",

@@ -137,6 +137,7 @@ export function logContextInbound(ctx, mergedRequests, assembledBody) {
         const message = ctx?.message;
         const state = ctx?.state;
         const quote = state?.quote;
+        const quoteFilter = state?.quoteFilter;
         const requests = Array.isArray(mergedRequests) ? mergedRequests : [];
         const rawElements = message?.raw?.msg_elements ?? ctx?.raw?.msg_elements;
         emit('inbound', {
@@ -147,6 +148,22 @@ export function logContextInbound(ctx, mergedRequests, assembledBody) {
             msgElements: elementSummary(message?.msgElements, message?.refMsgIdx),
             rawMsgElements: elementSummary(rawElements, message?.refMsgIdx),
             explicitQuote: Boolean(message?.refMsgIdx || quote?.refKey || quote?.entry),
+            quoteFilter: quoteFilter ? {
+                mode: choice(quoteFilter.mode, ['current-only', 'history'], 'unknown'),
+                reason: choice(quoteFilter.reason, ['history-enabled', 'not-group', 'not-qq-quote-type',
+                    'not-message-elements', 'indexed-element', 'no-rendered-bundle',
+                    'explicit-rendered-reference', 'selected-rendered-reference',
+                    'unparsed-rendered-reference', 'automatic-rendered-context'], 'unknown'),
+                accepted: quoteFilter.accepted === true,
+                counts: {
+                    inputRecords: Number.isSafeInteger(quoteFilter.counts?.inputRecords)
+                        ? quoteFilter.counts.inputRecords : 0,
+                    retainedRecords: Number.isSafeInteger(quoteFilter.counts?.retainedRecords)
+                        ? quoteFilter.counts.retainedRecords : 0,
+                    droppedRecords: Number.isSafeInteger(quoteFilter.counts?.droppedRecords)
+                        ? quoteFilter.counts.droppedRecords : 0,
+                },
+            } : null,
             quote: {
                 source: choice(quote?.source, ['msg_elements', 'store', 'none'], 'unknown'),
                 text: textSummary(quote?.text),

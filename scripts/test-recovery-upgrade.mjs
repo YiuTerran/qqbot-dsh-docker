@@ -92,10 +92,12 @@ async function assertCurrentPatch(root) {
             '// Chat-only friendly provider errors v1.',
             '// Chat-only batch-bound outbound routing v1.',
             '// Chat-only generation outbound v1.',
+            '// Chat-only deferred tool failures v1.',
             "import { captureMergeBatchReply, enqueueMergeBatchSend, noteMergeBatchTurnStart } from '/opt/qqbot-defaults/qqbot-concurrency.mjs';",
             'captureMergeBatchReply(record, { sessionId, turnId: raw?.data?.turn, seq: raw?.seq })',
             "enqueueMergeBatchSend(originRecord, () => this.send(record, formatProviderFailure(failure), 'sendTurnEndError'));",
-            "enqueueMergeBatchSend(originRecord, () => this.send(record, formatToolFailure(), 'sendToolResultError'));",
+            'this.toolFailureTurns.set(originRecord, { toolFailed: true, hasAnswer: false, streamAfterFailure: false });',
+            "event.reason.kind === 'completed' && turn?.toolFailed && !turn.hasAnswer && !completedStreamAnswer",
         ],
         'transport/attachment.js': [
             '// Chat-only current-image downloads v2.',
@@ -179,6 +181,22 @@ integration('a partial overflow guard fails strict validation without changing a
     await assert.rejects(run(enforcer, [root]), (error) => {
         assert.notEqual(error.code, 0);
         assert.match(error.stderr, /serialized merge middleware, overflow notice, or ordering is incomplete/u);
+        return true;
+    });
+    assert.deepEqual(await hashes(root), before, 'strict rejection performs zero adapter writes');
+});
+
+integration('a marked but incomplete deferred failure handler fails before any adapter write', async (t) => {
+    const root = await isolatedAdapter(t);
+    const outboundPath = join(root, 'transport/outbound.js');
+    const outbound = await readFile(outboundPath, 'utf8');
+    const capture = '            this.toolFailureTurns.set(originRecord, { toolFailed: true, hasAnswer: false, streamAfterFailure: false });';
+    assert.equal(outbound.split(capture).length, 2, 'fixture begins with one deferred failure capture');
+    await writeFile(outboundPath, outbound.replace(capture, '            // fixture removed deferred failure capture'));
+    const before = await hashes(root);
+    await assert.rejects(run(enforcer, [root]), (error) => {
+        assert.notEqual(error.code, 0);
+        assert.match(error.stderr, /deferred failure capture/u);
         return true;
     });
     assert.deepEqual(await hashes(root), before, 'strict rejection performs zero adapter writes');

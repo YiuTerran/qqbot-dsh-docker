@@ -160,15 +160,119 @@ export function createScopedQuoteRef(quoteRef) {
         if (message?.kind === 'group' && message.groupOpenid) return JSON.stringify(['group', message.groupOpenid]);
         return undefined;
     };
+    const analyzeRenderedQuote = (text) => {
+        const lines = typeof text === 'string' ? text.split(/\r?\n/u) : [];
+        const headers = [];
+        const contentRecords = lines.filter((line) => /^\[消息内容\](?:\s|$)/u.test(line)).length;
+        const referenceRecords = lines.filter((line) => /^\[消息类型\]\s+引用消息\s*$/u.test(line)).length;
+        for (let index = 0; index < lines.length; index++) {
+            const match = /^=== 消息 ([1-9]\d*) ===$/u.exec(lines[index]);
+            if (match) headers.push({ index, number: Number(match[1]) });
+        }
+        const records = headers.length > 0 ? headers.map((header, index) => {
+            const end = headers[index + 1]?.index ?? lines.length;
+            const recordLines = lines.slice(header.index, end);
+            return { text: recordLines.join('\n'), lines: recordLines };
+        }) : [];
+        return { lines, headers, contentRecords, referenceRecords, records };
+    };
+    const completeAttachmentUrls = (lines) => {
+        const urls = new Set();
+        const attachmentLine = /^\[附件[1-9]\d{0,2}\] +类型:\S+ +文件名:.{1,512}?(?: +尺寸:\S+)?(?: +大小:\S+)? +URL:(\S{1,8192})$/u;
+        for (const line of lines) {
+            const match = attachmentLine.exec(line.trim());
+            if (match) urls.add(match[1]);
+        }
+        return urls;
+    };
     return (ctx, next) => scopes.run(scopeFor(ctx?.message), () => middleware(ctx, async () => {
-        const quote = ctx.state.quote;
+        let quote = ctx.state.quote;
+        let selectedAttachmentUrls;
+        const message = ctx.message;
+        if (quote) {
+            const currentOnly = process.env.QQBOT_GROUP_CURRENT_ONLY !== 'false';
+            const msgType = message?.msgType ?? message?.raw?.message_type;
+            const elements = Array.isArray(message?.msgElements) ? message.msgElements : [];
+            const hasIndexedElement = elements.some((element) => typeof element?.msg_idx === 'string'
+                && element.msg_idx.length > 0);
+            const rendered = analyzeRenderedQuote(quote.rawContent ?? quote.text);
+            const candidate = currentOnly && message?.kind === 'group' && msgType === 103
+                && quote.source === 'msg_elements' && !hasIndexedElement
+                && (rendered.contentRecords > 0 || rendered.referenceRecords > 0 || rendered.headers.length > 0);
+            let accepted = true;
+            let reason;
+            let inputRecords = 0;
+            let retainedRecords = 0;
+            let droppedRecords = 0;
+            if (!currentOnly) reason = 'history-enabled';
+            else if (message?.kind !== 'group') reason = 'not-group';
+            else if (msgType !== 103) reason = 'not-qq-quote-type';
+            else if (quote.source !== 'msg_elements') reason = 'not-message-elements';
+            else if (hasIndexedElement) reason = 'indexed-element';
+            else if (!candidate) reason = 'no-rendered-bundle';
+            else if (rendered.headers.length > 0) {
+                inputRecords = rendered.records.length;
+                const selected = rendered.records.filter((record) => record.lines
+                    .some((line) => /^\[消息类型\]\s+引用消息\s*$/u.test(line)));
+                retainedRecords = selected.length;
+                droppedRecords = inputRecords - retainedRecords;
+                if (selected.length > 0) {
+                    reason = 'selected-rendered-reference';
+                    const selectedText = selected.map((record) => record.text).join('\n');
+                    quote.rawContent = selectedText;
+                    if (inputRecords > 1) {
+                        selectedAttachmentUrls = completeAttachmentUrls(selected.flatMap((record) => record.lines));
+                        quote.attachments = Object.freeze((quote.attachments ?? [])
+                            .filter((attachment) => selectedAttachmentUrls.has(attachment.url)));
+                    }
+                    const markers = (quote.attachments ?? []).map((attachment) => {
+                        const type = (attachment.content_type ?? attachment.contentType ?? '').toLowerCase();
+                        const filename = typeof attachment.filename === 'string' ? attachment.filename : '';
+                        if (type === 'audio' || type.startsWith('audio/')) {
+                            const asrText = attachment.asrText ?? attachment.asr_text;
+                            return typeof asrText === 'string' && asrText
+                                ? `[voice: ${asrText}]` : '[voice]';
+                        }
+                        const kind = type === 'image' || type.startsWith('image/') ? 'image'
+                            : type === 'video' || type.startsWith('video/') ? 'video' : 'file';
+                        return filename ? `[${kind}: ${filename}]` : `[${kind}]`;
+                    });
+                    quote.text = [selectedText, ...markers].filter(Boolean).join('\n');
+                } else {
+                    accepted = false;
+                    reason = 'automatic-rendered-context';
+                }
+            } else {
+                // No independent record boundary: preserve the full explicit quote as opaque input.
+                inputRecords = 1;
+                if (rendered.referenceRecords > 0) {
+                    retainedRecords = 1;
+                    reason = 'unparsed-rendered-reference';
+                } else {
+                    accepted = false;
+                    droppedRecords = 1;
+                    reason = 'automatic-rendered-context';
+                }
+            }
+            ctx.state.quoteFilter = {
+                mode: currentOnly ? 'current-only' : 'history',
+                reason,
+                accepted,
+                counts: { inputRecords, retainedRecords, droppedRecords },
+            };
+            if (!accepted) {
+                delete ctx.state.quote;
+                quote = undefined;
+            }
+        }
         if (ctx.message.refMsgIdx && quote?.refKey === ctx.message.refMsgIdx
             && !quote.attachments?.length) {
             const entry = await store.get(ctx.message.refMsgIdx);
-            if (entry?.attachments?.length) {
-                quote.attachments = entry.attachments;
+            const cachedAttachments = entry?.attachments;
+            if (cachedAttachments?.length) {
+                quote.attachments = cachedAttachments;
                 quote.rawContent ??= entry.content ?? '';
-                const markers = entry.attachments.map((attachment) => {
+                const markers = cachedAttachments.map((attachment) => {
                     const type = attachment.contentType.toLowerCase();
                     const kind = type === 'image' || type.startsWith('image/') ? 'image' : 'file';
                     return attachment.filename ? `[${kind}: ${attachment.filename}]` : `[${kind}]`;

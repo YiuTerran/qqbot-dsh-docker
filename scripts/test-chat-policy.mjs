@@ -1243,6 +1243,12 @@ test('quote references are isolated by c2c peer and group, including overlapping
 });
 
 test('group image quotes recover cached original attachments through the production middleware chain', async (t) => {
+    const previousCurrentOnly = process.env.QQBOT_GROUP_CURRENT_ONLY;
+    process.env.QQBOT_GROUP_CURRENT_ONLY = 'true';
+    t.after(() => {
+        if (previousCurrentOnly === undefined) delete process.env.QQBOT_GROUP_CURRENT_ONLY;
+        else process.env.QQBOT_GROUP_CURRENT_ONLY = previousCurrentOnly;
+    });
     const originalRequestOnce = PublicHttpProvider.prototype.requestOnce;
     const downloads = [];
     PublicHttpProvider.prototype.requestOnce = async function (url) {
@@ -1280,16 +1286,19 @@ test('group image quotes recover cached original attachments through the product
     const layers = captureMiddlewareChain(config, manager);
     layers.push((ctx) => handleInbound(ctx, manager, config, logger));
     const sourceUrl = 'https://example.com/original-river.png';
-    const run = async ({ messageId, content, attachments = [], refMsgIdx, msgElements, groupOpenid = 'quote-cache-group' }) => {
+    const run = async ({ messageId, content, attachments = [], refMsgIdx, msgElements, msgType, raw,
+        kind = 'group', senderId = 'quote-cache-member', groupOpenid = 'quote-cache-group' }) => {
+        const peerId = kind === 'group' ? groupOpenid : senderId;
+        const replyTarget = { scope: kind, targetId: peerId, msgId: messageId };
         const ctx = {
             message: {
-                kind: 'group', groupOpenid, senderId: 'quote-cache-member', messageId, msgIdx: messageId,
-                content, attachments, refMsgIdx, msgElements, timestamp: new Date().toISOString(),
-                replyTarget: { scope: 'group', targetId: groupOpenid, msgId: messageId },
+                kind, groupOpenid: kind === 'group' ? groupOpenid : undefined, senderId, messageId, msgIdx: messageId,
+                content, attachments, refMsgIdx, msgElements, msgType, raw, timestamp: new Date().toISOString(),
+                replyTarget,
             },
             state: {}, log: logger,
             bot: { appId: config.appId, async sendMarkdown() {}, async sendText() {} },
-            replyTarget: { scope: 'group', targetId: groupOpenid, msgId: messageId },
+            replyTarget,
             stop(reason) { ctx.stopped = true; ctx.stopReason = reason; },
         };
         await runMiddlewareChain(layers, ctx);
@@ -1326,7 +1335,134 @@ test('group image quotes recover cached original attachments through the product
         groupOpenid: 'other-group', content: `<@!${config.appId}> 改图` });
     assert.equal(foreign.state.quote.source, 'none');
     assert.equal(followups.at(-1).metadata[0].images.length, 0, 'another group cannot retrieve cached image metadata');
-    assert.equal(downloads.length, 1, 'only the original message explicitly attached to a mentioned bot downloads; quotes do not');
+
+    const attachmentLine = (index) => `[附件${index}] 类型:图片 文件名:record-${index}.png 尺寸:100x100 大小:1KB URL:https://example.com/record-${index}.png`;
+    const bundle = (marked, includeImages = true) => Array.from({ length: 5 }, (_, index) => {
+        const number = index + 1;
+        const lines = [`=== 消息 ${number} ===`, `[消息内容] record-${number}`];
+        if (includeImages) lines.push(attachmentLine(number));
+        if (number === marked) lines.push('[消息类型] 引用消息');
+        return lines.join('\n');
+    }).join('\n');
+    const automatic = await run({ messageId: 'bundle-automatic', refMsgIdx: 'unresolved-bundle-ref',
+        msgType: 103, raw: { message_type: 103 }, content: `<@!${config.appId}> 只看当前图`,
+        attachments: [{ content_type: 'image/png', filename: 'current.png', url: 'https://example.com/current.png' }],
+        msgElements: [{ content: bundle(0) }] });
+    assert.equal(automatic.state.quote, undefined, 'an unindexed automatic bundle is removed before attachment recovery');
+    assert.deepEqual(automatic.state.quoteFilter, { mode: 'current-only', reason: 'automatic-rendered-context',
+        accepted: false, counts: { inputRecords: 5, retainedRecords: 0, droppedRecords: 5 } });
+    const automaticModelInput = followups.at(-1);
+    assert.match(JSON.stringify(automaticModelInput.body), /只看当前图/);
+    assert.doesNotMatch(JSON.stringify(automaticModelInput.body), /record-[1-5]|Quoted message begins/u);
+    assert.equal(automaticModelInput.metadata[0].images.length, 1, 'the current attachment remains authorized');
+    assert.equal(automaticModelInput.metadata[0].images[0].quoted, false);
+    assert.equal(automaticModelInput.metadata[0].images[0].filename, 'current.png');
+    assert.equal(typeof automaticModelInput.metadata[0].images[0].imageAttachmentId, 'string');
+
+    const nativeAttachments = Array.from({ length: 5 }, (_, index) => ({
+        content_type: 'image/png', filename: `record-${index + 1}.png`,
+        url: `https://example.com/record-${index + 1}.png`,
+    }));
+    const explicit = await run({ messageId: 'bundle-explicit', refMsgIdx: 'unresolved-explicit-ref',
+        msgType: 103, raw: { message_type: 103 }, content: `<@!${config.appId}> 编辑引用图片`,
+        msgElements: [{ content: bundle(4), attachments: nativeAttachments }] });
+    assert.equal(explicit.state.quoteFilter.reason, 'selected-rendered-reference');
+    assert.deepEqual(explicit.state.quoteFilter.counts, { inputRecords: 5, retainedRecords: 1, droppedRecords: 4 });
+    assert.match(explicit.state.quote.rawContent, /=== 消息 4 ===[\s\S]*\[消息类型\] 引用消息/u);
+    assert.doesNotMatch(explicit.state.quote.rawContent, /record-[1235](?:\.png)?/u);
+    assert.deepEqual(explicit.state.quote.attachments.map((attachment) => attachment.url),
+        ['https://example.com/record-4.png'], 'native bundle attachments are matched only to the selected record');
+    const explicitModelInput = followups.at(-1);
+    assert.match(JSON.stringify(explicitModelInput.body), /record-4/);
+    assert.doesNotMatch(JSON.stringify(explicitModelInput.body), /record-[1235](?:\.png)?/u);
+    assert.equal(explicitModelInput.metadata[0].images.length, 1);
+    assert.equal(explicitModelInput.metadata[0].images[0].quoted, true);
+    assert.equal(explicitModelInput.metadata[0].images[0].filename, 'record-4.png');
+    assert.equal(typeof explicitModelInput.metadata[0].images[0].imageAttachmentId, 'string');
+    for (const number of [1, 2, 3, 5]) {
+        assert.doesNotMatch(JSON.stringify(explicitModelInput.body), new RegExp(`https://example\\.com/record-${number}\\.png`, 'u'));
+    }
+
+    const cachedExplicit = await run({ messageId: 'bundle-cache-explicit', refMsgIdx: 'river-source-false',
+        msgType: 103, raw: { message_type: 103 }, content: `<@!${config.appId}> 编辑缓存引用`,
+        msgElements: [{ content: bundle(4, false), attachments: nativeAttachments }] });
+    assert.equal(cachedExplicit.state.quoteFilter.reason, 'selected-rendered-reference');
+    assert.deepEqual(cachedExplicit.state.quote.attachments.map((attachment) => attachment.url), [sourceUrl],
+        'the explicit same-group message cache may restore its own attachment when the selected rendered record has no URL');
+    assert.match(cachedExplicit.state.quote.rawContent, /=== 消息 4 ===[\s\S]*\[消息类型\] 引用消息/u);
+    assert.doesNotMatch(cachedExplicit.state.quote.rawContent, /record-[1235](?:\.png)?/u);
+    const cachedModelInput = followups.at(-1);
+    assert.equal(cachedModelInput.metadata[0].images.length, 1);
+    assert.equal(cachedModelInput.metadata[0].images[0].quoted, true);
+    assert.equal(cachedModelInput.metadata[0].images[0].filename, 'river.png');
+    assert.equal(typeof cachedModelInput.metadata[0].images[0].imageAttachmentId, 'string');
+
+    const singleRecord = await run({ messageId: 'single-rendered-record', refMsgIdx: 'single-record-ref',
+        msgType: 103, raw: { message_type: 103 }, content: 'single record quote',
+        msgElements: [{ content: 'unrelated preamble\n=== 消息 1 ===\n[消息内容] selected document\n[消息类型] 引用消息\n[附件1] 类型:文件 文件名:notes.txt URL:https://example.com/notes.txt',
+            attachments: [{ content_type: 'text/plain', filename: 'notes.txt', url: 'https://example.com/notes.txt' }] }] });
+    assert.equal(singleRecord.state.quoteFilter.reason, 'selected-rendered-reference');
+    assert.match(singleRecord.state.quote.rawContent, /^=== 消息 1 ===/u);
+    assert.doesNotMatch(singleRecord.state.quote.rawContent, /unrelated preamble/u);
+    assert.match(singleRecord.state.quote.text, /^=== 消息 1 ===/u);
+    assert.doesNotMatch(singleRecord.state.quote.text, /unrelated preamble/u);
+    assert.deepEqual(singleRecord.state.quote.attachments.map((attachment) => attachment.url),
+        ['https://example.com/notes.txt'], 'selected document attachments do not require image dimensions');
+    const audioRecord = await run({ messageId: 'single-audio-record', refMsgIdx: 'single-audio-ref',
+        msgType: 103, raw: { message_type: 103 }, content: 'single audio quote',
+        msgElements: [{ content: '=== 消息 1 ===\n[消息类型] 引用消息', attachments: [
+            { content_type: 'audio/ogg', filename: 'voice.ogg', asr_refer_text: '你好主人', asrText: '你好主人' },
+        ] }] });
+    assert.match(audioRecord.state.quote.text, /\[voice: 你好主人\]/u,
+        'a single explicit audio quote retains the SDK voice transcription marker');
+
+    const unparsed = await run({ messageId: 'unparsed-rendered-record', refMsgIdx: 'unparsed-ref',
+        msgType: 103, raw: { message_type: 103 }, content: 'unparsed quote',
+        msgElements: [{ content: '[消息内容] preserve safely\n[消息类型] 引用消息' }] });
+    assert.equal(unparsed.state.quoteFilter.reason, 'unparsed-rendered-reference');
+    assert.equal(unparsed.state.quoteFilter.accepted, true);
+    assert.match(unparsed.state.quote.rawContent, /preserve safely/u);
+
+    const sparseNumbering = await run({ messageId: 'sparse-numbering', refMsgIdx: 'sparse-ref',
+        msgType: 103, raw: { message_type: 103 }, content: 'select sparse record',
+        msgElements: [{ content: '=== 消息 2 ===\n[消息内容] sparse-2\n=== 消息 4 ===\n[消息内容] sparse-4\n[消息类型] 引用消息\n=== 消息 7 ===\n[消息内容] sparse-7' }] });
+    assert.equal(sparseNumbering.state.quoteFilter.reason, 'selected-rendered-reference');
+    assert.deepEqual(sparseNumbering.state.quoteFilter.counts, { inputRecords: 3, retainedRecords: 1, droppedRecords: 2 });
+    assert.match(sparseNumbering.state.quote.rawContent, /^=== 消息 4 ===[\s\S]*sparse-4/u);
+    assert.doesNotMatch(sparseNumbering.state.quote.rawContent, /sparse-[27]/u);
+
+    const privateQuote = await run({ kind: 'c2c', senderId: 'private-peer', messageId: 'private-rendered',
+        refMsgIdx: 'private-ref', msgType: 103, content: 'private message', msgElements: [{ content: bundle(0) }] });
+    assert.equal(privateQuote.state.quoteFilter.reason, 'not-group');
+    assert.match(privateQuote.state.quote.rawContent, /record-1[\s\S]*record-5/u);
+    const previousCurrentOnlySetting = process.env.QQBOT_GROUP_CURRENT_ONLY;
+    process.env.QQBOT_GROUP_CURRENT_ONLY = 'false';
+    let historyQuote;
+    try {
+        historyQuote = await run({ messageId: 'history-rendered', refMsgIdx: 'history-ref',
+            msgType: 103, content: 'history-enabled', msgElements: [{ content: bundle(0) }] });
+    } finally {
+        if (previousCurrentOnlySetting === undefined) delete process.env.QQBOT_GROUP_CURRENT_ONLY;
+        else process.env.QQBOT_GROUP_CURRENT_ONLY = previousCurrentOnlySetting;
+    }
+    assert.equal(historyQuote.state.quoteFilter.reason, 'history-enabled');
+    assert.match(historyQuote.state.quote.rawContent, /record-1[\s\S]*record-5/u);
+    const indexedQuote = await run({ messageId: 'indexed-rendered', refMsgIdx: 'indexed-ref',
+        msgType: 103, content: 'indexed reference',
+        msgElements: [{ content: bundle(0), msg_idx: 'indexed-ref' }] });
+    assert.equal(indexedQuote.state.quoteFilter.reason, 'indexed-element');
+    assert.match(indexedQuote.state.quote.rawContent, /record-1[\s\S]*record-5/u);
+    const bareQuote = await run({ messageId: 'bare-rendered', refMsgIdx: 'bare-ref', msgType: 103,
+        content: 'bare reference', msgElements: [{ content: 'plain quoted text' }] });
+    assert.equal(bareQuote.state.quoteFilter.reason, 'no-rendered-bundle');
+    assert.equal(bareQuote.state.quote.rawContent, 'plain quoted text');
+    const anchoredQuote = await run({ messageId: 'anchored-rendered', refMsgIdx: 'anchored-ref', msgType: 103,
+        content: 'anchored test', msgElements: [{ content: 'body prefix [消息内容] remains body' }] });
+    assert.equal(anchoredQuote.state.quoteFilter.reason, 'no-rendered-bundle');
+    assert.equal(anchoredQuote.state.quote.rawContent, 'body prefix [消息内容] remains body');
+
+    assert.ok(downloads.every((url) => !/record-[1-5]\.png/u.test(url)),
+        'URLs from dropped or unselected rendered records are never downloaded');
 });
 
 test('QQ rendered image records recover only complete HTTPS images from the current explicit quote', () => {

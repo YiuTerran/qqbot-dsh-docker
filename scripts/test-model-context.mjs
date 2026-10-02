@@ -249,7 +249,10 @@ test('diagnostics bound merged and quote-source records and return immediately w
                 ext: ['ref_msg_idx=SENSITIVE_REF', 'voice_wav_url=https://private.example/SENSITIVE_AUDIO'] },
             msg_elements: [{ content: source }, { content: source, msg_idx: 'SENSITIVE_REF' }] },
         }, state: { history: Array.from({ length: 3 }, () => ({})),
-            quote: { source: 'store', text: quoteText } } },
+            quote: { source: 'store', text: quoteText },
+            quoteFilter: { mode: 'current-only', reason: 'selected-rendered-reference', accepted: true,
+                counts: { inputRecords: 5, retainedRecords: 1, droppedRecords: 4 },
+                ignored: 'SENSITIVE_FILTER_VALUE' } } },
         Array.from({ length: 20 }, () => ({ text: source })),
         `[Chat history begins]x[Chat history ends][Quoted message begins]x[Quoted message ends]`
         + `[Quoted message begins]${quoteText}[Quoted message ends]`);
@@ -278,6 +281,8 @@ test('diagnostics bound merged and quote-source records and return immediately w
         assert.equal(entry.quote.text.qqRelated, 1);
         assert.equal(entry.quote.text.qqContent, 2);
         assert.equal(entry.quote.text.qqNumbered, 2);
+        assert.deepEqual(entry.quoteFilter, { mode: 'current-only', reason: 'selected-rendered-reference', accepted: true,
+            counts: { inputRecords: 5, retainedRecords: 1, droppedRecords: 4 } });
         assert.equal(entry.assembledBody.qqNumbered, 2);
         assert.equal(entry.current.hmac, entry.mergedRequests[0].hmac, 'same in-process text has a stable keyed digest');
         assert.doesNotMatch(lines[0], /SENSITIVE_|private\.example/u);

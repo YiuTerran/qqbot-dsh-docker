@@ -189,7 +189,7 @@ integration('native turn failures use fixed notices and do not leak raw API erro
     assert.equal(resets, 0, 'friendly presentation must not broaden automatic reset criteria');
 });
 
-integration('native tool error events and isError content blocks never present raw payloads, including with tool results enabled', async () => {
+integration('native tool error events and isError blocks defer one safe notice until an unanswered completed turn', async () => {
     await prepareAdapterPeers();
     const { createOutboundHandler } = await import(`${resolve(adapterDist)}/transport/outbound.js`);
     for (const showToolResults of [false, true]) {
@@ -216,10 +216,194 @@ integration('native tool error events and isError content blocks never present r
                 },
             });
             await new Promise((resolvePromise) => setImmediate(resolvePromise));
-            assert.equal(sent.length, index + 1, 'an explicit tool failure is presented even when result display is off');
-            assertSafe(sent[index]);
-            assert.equal(sent[index], formatToolFailure());
+            assert.equal(sent.length, 0, 'tool failure is pending until the turn finishes');
         }
+        handler({ header: { id: record.sessionId } }, {
+            type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } },
+        });
+        await new Promise((resolvePromise) => setImmediate(resolvePromise));
+        assert.deepEqual(sent, [formatToolFailure()], 'multiple failures produce one fixed notice');
+        assertSafe(sent[0]);
+    }
+});
+
+integration('a tool retry followed by the final answer suppresses the pending failure for both result-display settings', async () => {
+    await prepareAdapterPeers();
+    const { createOutboundHandler } = await import(`${resolve(adapterDist)}/transport/outbound.js`);
+    for (const showToolResults of [false, true]) {
+        const sent = [];
+        const record = { sessionId: `retry-${showToolResults}`, agent: {}, replyTarget: { scope: 'c2c', targetId: 'peer' } };
+        const handler = createOutboundHandler({ findBySessionId() { return record; } }, {
+            async sendMarkdown(_target, text) { sent.push(text); },
+        }, { textChunkLimit: 2000, streaming: false, showToolResults }, {
+            info() {}, debug() {}, warn() {}, error() {},
+        }, {});
+        const sendResult = (callId, error) => {
+            handler({ header: { id: record.sessionId } }, { type: 'tool/call', data: { callId, name: 'web_search', arguments: '{}' } });
+            handler({ header: { id: record.sessionId } }, { type: 'tool/result', data: {
+                error,
+                message: { source: { callId }, content: [{ type: 'tool-result', isError: !!error, content: [{ type: 'text', text: error ? sensitive : 'found' }] }] },
+            } });
+        };
+        sendResult('first', { code: 'UNKNOWN', message: sensitive });
+        sendResult('retry', undefined);
+        handler({ header: { id: record.sessionId } }, {
+            type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '最终回答' }] } },
+        });
+        handler({ header: { id: record.sessionId } }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } });
+        await new Promise((resolvePromise) => setImmediate(resolvePromise));
+        assert.equal(sent.at(-1), '最终回答');
+        assert.equal(sent.filter((text) => text === formatToolFailure()).length, 0);
+        assert.equal(sent.filter((text) => text.startsWith('🔧')).length, showToolResults ? 1 : 0);
+    }
+});
+
+integration('tool-call preamble and earlier stream chunks do not hide an unanswered completed failure', async () => {
+    await prepareAdapterPeers();
+    const { createOutboundHandler } = await import(`${resolve(adapterDist)}/transport/outbound.js`);
+    const sent = [];
+    const record = { sessionId: 'preamble', agent: {}, replyTarget: { scope: 'c2c', targetId: 'peer' } };
+    const handler = createOutboundHandler({ findBySessionId() { return record; } }, {
+        async sendMarkdown(_target, text) { sent.push(text); },
+    }, { textChunkLimit: 2000, streaming: false, showToolResults: false }, {
+        info() {}, debug() {}, warn() {}, error() {},
+    }, {});
+    handler({ header: { id: record.sessionId } }, { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: '先查一下' } } });
+    handler({ header: { id: record.sessionId } }, { type: 'assistant/message', data: { message: { content: [
+        { type: 'text', text: '先查一下' }, { type: 'tool-call', name: 'web_search' },
+    ] } } });
+    handler({ header: { id: record.sessionId } }, { type: 'tool/call', data: { callId: 'failed', name: 'web_search' } });
+    handler({ header: { id: record.sessionId } }, { type: 'tool/result', data: {
+        error: { code: 'UNKNOWN', message: sensitive }, message: { source: { callId: 'failed' }, content: [] },
+    } });
+    handler({ header: { id: record.sessionId } }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } });
+    await new Promise((resolvePromise) => setImmediate(resolvePromise));
+    assert.equal(sent.length, 2);
+    assert.deepEqual(new Set(sent), new Set(['先查一下', formatToolFailure()]));
+    sent.length = 0;
+    handler({ header: { id: record.sessionId } }, { type: 'tool/call', data: { callId: 'second', name: 'web_search' } });
+    handler({ header: { id: record.sessionId } }, { type: 'tool/result', data: {
+        error: { code: 'UNKNOWN', message: sensitive }, message: { source: { callId: 'second' }, content: [] },
+    } });
+    handler({ header: { id: record.sessionId } }, { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: '再查一次' } } });
+    handler({ header: { id: record.sessionId } }, { type: 'assistant/message', data: { message: { content: [
+        { type: 'text', text: '再查一次' }, { type: 'tool-call', name: 'web_search' },
+    ] } } });
+    handler({ header: { id: record.sessionId } }, { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } });
+    await new Promise((resolvePromise) => setImmediate(resolvePromise));
+    assert.equal(sent.filter((text) => text === formatToolFailure()).length, 1,
+        'a streamed tool-call preamble is not a final answer');
+});
+
+integration('terminal streamed answer suppresses a pending failure; provider error and cancellation do not add a generic tool notice', async () => {
+    await prepareAdapterPeers();
+    const { createOutboundHandler } = await import(`${resolve(adapterDist)}/transport/outbound.js`);
+    for (const ending of ['completed', 'error', 'cancelled']) {
+        const sent = [];
+        const record = { sessionId: `terminal-${ending}`, agent: {}, replyTarget: { scope: 'c2c', targetId: 'peer' } };
+        const handler = createOutboundHandler({ findBySessionId() { return record; } }, {
+            async sendMarkdown(_target, text) { sent.push(text); },
+        }, { textChunkLimit: 2000, streaming: false, showToolResults: false }, {
+            info() {}, debug() {}, warn() {}, error() {},
+        }, {});
+        handler({ header: { id: record.sessionId } }, { type: 'tool/call', data: { callId: 'failed', name: 'web_search' } });
+        handler({ header: { id: record.sessionId } }, { type: 'tool/result', data: {
+            error: { code: 'UNKNOWN', message: sensitive }, message: { source: { callId: 'failed' }, content: [] },
+        } });
+        if (ending === 'completed') handler({ header: { id: record.sessionId } }, {
+            type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: '稍后重试即可' } },
+        });
+        handler({ header: { id: record.sessionId } }, { type: 'turn/end', data: { turn: 1, reason:
+            ending === 'error' ? { kind: 'error', error: apiFailure(503) } : { kind: ending },
+        } });
+        await new Promise((resolvePromise) => setImmediate(resolvePromise));
+        assert.deepEqual(sent, ending === 'completed' ? ['稍后重试即可'] : ending === 'error' ? [formatProviderFailure(apiFailure(503))] : []);
+    }
+});
+
+integration('bound turns isolate pending failures by record, target, and accepted native turn', async () => {
+    await prepareAdapterPeers();
+    const [{ createOutboundHandler }, { beginMergeBatch, closeMergeBatch }] = await Promise.all([
+        import(`${resolve(adapterDist)}/transport/outbound.js`),
+        import(process.env.QQBOT_CONCURRENCY_MODULE ?? '/opt/qqbot-defaults/qqbot-concurrency.mjs'),
+    ]);
+    const sent = [];
+    const records = new Map();
+    const recordA = { sessionId: 'bound-a', agent: {}, replyTarget: { scope: 'group', targetId: 'mutable', msgId: 'mutable' } };
+    const recordB = { sessionId: 'bound-b', agent: {}, replyTarget: { scope: 'group', targetId: 'mutable', msgId: 'mutable' } };
+    records.set(recordA.sessionId, recordA);
+    records.set(recordB.sessionId, recordB);
+    const handler = createOutboundHandler({ findBySessionId(id) { return records.get(id); } }, {
+        async sendMarkdown(target, text) { sent.push({ target, text }); },
+    }, { textChunkLimit: 2000, streaming: false, showToolResults: false }, {
+        info() {}, debug() {}, warn() {}, error() {},
+    }, {});
+    const targetA = { scope: 'group', targetId: 'group-a', msgId: 'message-a' };
+    const targetB = { scope: 'group', targetId: 'group-b', msgId: 'message-b' };
+    const batchA = beginMergeBatch(recordA, targetA);
+    const batchB = beginMergeBatch(recordB, targetB);
+    const send = (record, type, turn, seq, data = {}) => handler({ header: { id: record.sessionId } }, {
+        type, seq, data: { turn, ...data },
+    });
+    send(recordA, 'turn/start', 1, 1);
+    send(recordB, 'turn/start', 1, 1);
+    send(recordA, 'tool/call', 1, 2, { callId: 'a', name: 'web_search' });
+    send(recordA, 'tool/result', 1, 3, { error: { code: 'UNKNOWN', message: sensitive }, message: { source: { callId: 'a' }, content: [] } });
+    send(recordB, 'assistant/message', 1, 2, { message: { content: [{ type: 'text', text: 'B 的回答' }] } });
+    send(recordB, 'turn/end', 1, 3, { reason: { kind: 'completed' } });
+    send(recordA, 'turn/end', 1, 4, { reason: { kind: 'completed' } });
+    await Promise.all([closeMergeBatch(batchA), closeMergeBatch(batchB)]);
+    assert.deepEqual(sent, [
+        { target: targetB, text: 'B 的回答' },
+        { target: targetA, text: formatToolFailure() },
+    ]);
+
+    const replacement = { sessionId: recordA.sessionId, agent: {}, replyTarget: { scope: 'group', targetId: 'wrong', msgId: 'wrong' } };
+    records.set(recordA.sessionId, replacement);
+    const nextTarget = { scope: 'group', targetId: 'group-next', msgId: 'message-next' };
+    const nextBatch = beginMergeBatch(replacement, nextTarget);
+    send(replacement, 'turn/start', 2, 10);
+    send(replacement, 'turn/end', 1, 5, { reason: { kind: 'completed' } });
+    send(replacement, 'assistant/message', 2, 11, { message: { content: [{ type: 'text', text: '新会话回答' }] } });
+    send(replacement, 'turn/end', 2, 12, { reason: { kind: 'completed' } });
+    await closeMergeBatch(nextBatch);
+    assert.deepEqual(sent.at(-1), { target: nextTarget, text: '新会话回答' });
+    assert.equal(sent.filter(({ text }) => text === formatToolFailure()).length, 1,
+        'delayed old turn events and record replacement cannot replay or retarget a pending notice');
+});
+
+integration('streaming writer sends a final answer without generic notice, while a streamed tool-call preamble leaves the notice pending', async () => {
+    await prepareAdapterPeers();
+    const { createOutboundHandler } = await import(`${resolve(adapterDist)}/transport/outbound.js`);
+    for (const preamble of [false, true]) {
+        const updates = [];
+        const staticSends = [];
+        let completions = 0;
+        const record = { sessionId: `writer-${preamble}`, agent: {}, replyTarget: { scope: 'c2c', targetId: 'peer', msgId: `source-${preamble}` } };
+        const handler = createOutboundHandler({ findBySessionId() { return record; } }, {
+            openStream(target) {
+                assert.deepEqual(target, record.replyTarget);
+                return { async update(text) { updates.push(text); }, async complete() { completions++; } };
+            },
+            async sendMarkdown(_target, text) { staticSends.push(text); },
+        }, { textChunkLimit: 2000, streaming: true, showToolResults: false }, {
+            info() {}, debug() {}, warn() {}, error() {},
+        }, {});
+        handler({ header: { id: record.sessionId } }, { type: 'tool/call', data: { callId: 'failed', name: 'web_search' } });
+        handler({ header: { id: record.sessionId } }, { type: 'tool/result', data: {
+            error: { code: 'UNKNOWN', message: sensitive }, message: { source: { callId: 'failed' }, content: [] },
+        } });
+        handler({ header: { id: record.sessionId } }, { type: 'assistant/chunk', data: {
+            chunk: { type: 'text-delta', text: preamble ? '再查一次' : '最终回答' },
+        } });
+        if (preamble) handler({ header: { id: record.sessionId } }, { type: 'assistant/message', data: { message: { content: [
+            { type: 'text', text: '再查一次' }, { type: 'tool-call', name: 'web_search' },
+        ] } } });
+        handler({ header: { id: record.sessionId } }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } });
+        await new Promise((resolvePromise) => setImmediate(resolvePromise));
+        assert.deepEqual(updates, [preamble ? '再查一次' : '最终回答']);
+        assert.equal(completions, 1);
+        assert.deepEqual(staticSends, preamble ? [formatToolFailure()] : []);
     }
 });
 
