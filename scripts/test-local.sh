@@ -5,7 +5,7 @@ IMAGE="${IMAGE:-dsh-qqbot:test-local}"
 repo_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 chat_policy_test="${repo_root}/scripts/test-chat-policy.mjs"
 model_context_test="${repo_root}/scripts/test-model-context.mjs"
-dice_policy_test="${repo_root}/scripts/test-dice.mjs"
+group_history_test="${repo_root}/scripts/test-group-history.mjs"
 recovery_policy_test="${repo_root}/scripts/test-session-recovery.mjs"
 provider_errors_test="${repo_root}/scripts/test-provider-errors.mjs"
 concurrency_test="${repo_root}/scripts/test-concurrency.mjs"
@@ -21,7 +21,7 @@ data_volume="dsh-qqbot-test-data-${suffix}"
 workspace_volume="dsh-qqbot-test-workspace-${suffix}"
 override_data_volume="dsh-qqbot-test-override-data-${suffix}"
 legacy_data_volume="dsh-qqbot-test-legacy-data-${suffix}"
-pre_dice_data_volume="dsh-qqbot-test-pre-dice-data-${suffix}"
+dice_legacy_data_volume="dsh-qqbot-test-dice-legacy-data-${suffix}"
 incompatible_data_volume="dsh-qqbot-test-incompatible-data-${suffix}"
 media_guard_data_volume="dsh-qqbot-test-media-guard-data-${suffix}"
 search_env_data_volume="dsh-qqbot-test-search-env-data-${suffix}"
@@ -49,7 +49,7 @@ on_error() {
 cleanup() {
     log "Cleaning up temporary container, volumes, and instruction file"
     docker rm --force "$container" >/dev/null 2>&1 || true
-    docker volume rm "$data_volume" "$workspace_volume" "$override_data_volume" "$legacy_data_volume" "$pre_dice_data_volume" "$incompatible_data_volume" "$media_guard_data_volume" "$search_env_data_volume" "$official_data_volume" "$no_search_data_volume" "$partial_recovery_data_volume" "$recovery_v1_data_volume" "$pre_concurrency_data_volume" "$partial_concurrency_data_volume" "$group_history_invalid_data_volume" >/dev/null 2>&1 || true
+    docker volume rm "$data_volume" "$workspace_volume" "$override_data_volume" "$legacy_data_volume" "$dice_legacy_data_volume" "$incompatible_data_volume" "$media_guard_data_volume" "$search_env_data_volume" "$official_data_volume" "$no_search_data_volume" "$partial_recovery_data_volume" "$recovery_v1_data_volume" "$pre_concurrency_data_volume" "$partial_concurrency_data_volume" "$group_history_invalid_data_volume" >/dev/null 2>&1 || true
     rm -f "$instructions_file"
     rm -f "$incompatible_log"
 }
@@ -71,8 +71,8 @@ if [[ ! -r "$model_context_test" ]]; then
     exit 66
 fi
 
-if [[ ! -r "$dice_policy_test" ]]; then
-    echo "missing dice policy regression script: $dice_policy_test" >&2
+if [[ ! -r "$group_history_test" ]]; then
+    echo "missing group history regression script: $group_history_test" >&2
     exit 66
 fi
 
@@ -144,7 +144,7 @@ docker volume create "$data_volume" >/dev/null
 docker volume create "$workspace_volume" >/dev/null
 docker volume create "$override_data_volume" >/dev/null
 docker volume create "$legacy_data_volume" >/dev/null
-docker volume create "$pre_dice_data_volume" >/dev/null
+docker volume create "$dice_legacy_data_volume" >/dev/null
 docker volume create "$incompatible_data_volume" >/dev/null
 docker volume create "$media_guard_data_volume" >/dev/null
 docker volume create "$search_env_data_volume" >/dev/null
@@ -365,7 +365,7 @@ docker create \
     --volume "${workspace_volume}:/workspace" \
     --mount "type=bind,src=${chat_policy_test},dst=/tmp/test-chat-policy.mjs,readonly" \
     --mount "type=bind,src=${model_context_test},dst=/tmp/test-model-context.mjs,readonly" \
-    --mount "type=bind,src=${dice_policy_test},dst=/tmp/test-dice.mjs,readonly" \
+    --mount "type=bind,src=${group_history_test},dst=/tmp/test-group-history.mjs,readonly" \
     --mount "type=bind,src=${recovery_policy_test},dst=/tmp/test-session-recovery.mjs,readonly" \
     --mount "type=bind,src=${provider_errors_test},dst=/tmp/test-provider-errors.mjs,readonly" \
     --mount "type=bind,src=${concurrency_test},dst=/tmp/test-concurrency.mjs,readonly" \
@@ -410,8 +410,10 @@ docker create \
         middleware_setup=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/gateway/middleware-setup.js
         grep -Fq "createScopedQuoteRef" "$middleware_setup"
         grep -Fq "bot.use(createScopedQuoteRef(quoteRef));" "$middleware_setup"
-        grep -Fq "bot.use(createDiceCommandMiddleware());" "$middleware_setup"
-        grep -Fq "createDiceAwareHistoryBuffer(historyBuffer" "$middleware_setup"
+        grep -Fq "import { createGroupHistoryBuffer } from '\''/opt/qqbot-defaults/qqbot-group-history.mjs'\'';" "$middleware_setup"
+        grep -Fq "bot.use(createGroupHistoryBuffer(historyBuffer, {" "$middleware_setup"
+        ! grep -Fq "createDiceCommandMiddleware" "$middleware_setup"
+        ! grep -Fq "createDiceAwareHistoryBuffer" "$middleware_setup"
         node --check "$middleware_setup"
         node --check /opt/qqbot-defaults/qqbot-session-recovery.mjs
         node --check /opt/qqbot-defaults/qqbot-model-context.mjs
@@ -420,7 +422,7 @@ docker create \
         node --check /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-compaction-basic/lib/index.js
         node --check /opt/qqbot-defaults/qqbot-provider-errors.mjs
         node --check /opt/qqbot-defaults/qqbot-concurrency.mjs
-        node --check /opt/qqbot-defaults/qqbot-dice.mjs
+        node --check /opt/qqbot-defaults/qqbot-group-history.mjs
         node --check /opt/qqbot-defaults/qqbot-generation.mjs
         node --check /opt/qqbot-defaults/qqbot-generation-sender.mjs
         node --check /opt/qqbot-defaults/qqbot-generation-scope.mjs
@@ -450,8 +452,8 @@ docker create \
         test "$(grep -A6 -F -- "- id: im-qqbot" "$dump" | grep -Fc "appSecret: __FROM_ENV__")" -eq 1
         node --test /tmp/test-chat-policy.mjs
         QQBOT_MODEL_CONTEXT_MODULE=/opt/qqbot-defaults/qqbot-model-context.mjs QQBOT_SESSION_MODULE=/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-session/lib/index.js QQBOT_LLM_MODULE=/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm/lib/index.js QQBOT_RUNTIME_ROOT=/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist QQBOT_COMPACTION_MODULE=/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-compaction-basic/lib/index.js node --test /tmp/test-model-context.mjs
-        QQBOT_DICE_MODULE=/opt/qqbot-defaults/qqbot-dice.mjs node --test /tmp/test-dice.mjs
-        QQBOT_RECOVERY_MODULE=/opt/qqbot-defaults/qqbot-session-recovery.mjs QQBOT_DICE_MODULE=/opt/qqbot-defaults/qqbot-dice.mjs QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-session-recovery.mjs
+        QQBOT_GROUP_HISTORY_MODULE=/opt/qqbot-defaults/qqbot-group-history.mjs node --test /tmp/test-group-history.mjs
+        QQBOT_RECOVERY_MODULE=/opt/qqbot-defaults/qqbot-session-recovery.mjs QQBOT_GROUP_HISTORY_MODULE=/opt/qqbot-defaults/qqbot-group-history.mjs QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-session-recovery.mjs
         QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-provider-errors.mjs
         QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-concurrency.mjs
         QQBOT_GENERATION_MODULE=/opt/qqbot-defaults/qqbot-generation.mjs QQBOT_GENERATION_SCOPE_MODULE=/opt/qqbot-defaults/qqbot-generation-scope.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test --test-timeout=30000 /tmp/test-generation.mjs
@@ -494,51 +496,55 @@ docker run --rm --network none --entrypoint sh --volume "${data_volume}:/data" "
     test -s /data/qqbot-media/cache-persistence-fixture.png
 '
 
-log "Preparing a pre-recovery volume with existing document and quote policies"
-docker run --rm --network none --entrypoint sh --volume "${pre_dice_data_volume}:/data" "$IMAGE" -ec '
+log "Preparing a legacy dice-patched volume to verify the removal migration"
+docker run --rm --network none --entrypoint sh --volume "${dice_legacy_data_volume}:/data" "$IMAGE" -ec '
     cp -a /opt/dsh-seed/. /data/
     : > /data/.initialized
-    printf "pre-dice user instructions\n" > /data/AGENTS.md
+    printf "legacy dice user instructions\n" > /data/AGENTS.md
 '
-docker run --rm --network none --entrypoint node --volume "${pre_dice_data_volume}:/data" "$IMAGE" -e '
+docker run --rm --network none --entrypoint node --volume "${dice_legacy_data_volume}:/data" "$IMAGE" -e '
     const fs = require("node:fs");
     const path = "/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/gateway/middleware-setup.js";
     let source = fs.readFileSync(path, "utf8");
     const replaceExactlyOnce = (before, after, label) => {
         const parts = source.split(before);
-        if (parts.length !== 2) throw new Error(`pre-dice fixture expected one ${label}`);
+        if (parts.length !== 2) throw new Error(`legacy dice fixture expected one ${label}`);
         source = parts[0] + after + parts[1];
     };
-    replaceExactlyOnce("import { createDiceCommandMiddleware, createDiceAwareHistoryBuffer } from \x27/opt/qqbot-defaults/qqbot-chat-policy.mjs\x27;\n", "", "dice import");
-    replaceExactlyOnce("    // Chat-only dice command middleware v1.\n    bot.use(createDiceCommandMiddleware());\n", "", "dice command middleware");
-    replaceExactlyOnce("bot.use(createDiceAwareHistoryBuffer(historyBuffer, {", "bot.use(historyBuffer({", "wrapped group history buffer");
-    replaceExactlyOnce("    }, contentSanitizer));", "    }));", "history buffer closure");
+    replaceExactlyOnce("import { createGroupHistoryBuffer } from \x27/opt/qqbot-defaults/qqbot-group-history.mjs\x27;\n", "import { createDiceCommandMiddleware, createDiceAwareHistoryBuffer } from \x27/opt/qqbot-defaults/qqbot-chat-policy.mjs\x27;\n", "group history import");
+    replaceExactlyOnce("    // Chat-only group history buffer v1.\n", "", "group history marker");
+    replaceExactlyOnce("bot.use(createGroupHistoryBuffer(historyBuffer, {", "bot.use(createDiceAwareHistoryBuffer(historyBuffer, {", "group history wrapper");
+    replaceExactlyOnce("            return historyGroupKey(config.appId, gid);\n        },\n    }));", "            return historyGroupKey(config.appId, gid);\n        },\n    }, contentSanitizer));", "history buffer closure");
+    replaceExactlyOnce("    bot.use(rateLimiter());\n", "    bot.use(rateLimiter());\n    // Chat-only dice command middleware v1.\n    bot.use(createDiceCommandMiddleware());\n\n", "dice command middleware");
     fs.writeFileSync(path, source);
 '
 docker run --rm --network none --entrypoint node \
-    --volume "${pre_dice_data_volume}:/data" \
+    --volume "${dice_legacy_data_volume}:/data" \
     --mount "type=bind,src=${pre_concurrency_fixture},dst=/tmp/prepare-pre-concurrency-fixture.mjs,readonly" \
     "$IMAGE" /tmp/prepare-pre-concurrency-fixture.mjs /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
 docker run --rm --network none --entrypoint node \
-    --volume "${pre_dice_data_volume}:/data" \
+    --volume "${dice_legacy_data_volume}:/data" \
     --mount "type=bind,src=${pre_recovery_fixture},dst=/tmp/prepare-pre-recovery-fixture.mjs,readonly" \
     "$IMAGE" /tmp/prepare-pre-recovery-fixture.mjs /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
-check_pre_dice_upgrade() {
+check_dice_legacy_upgrade() {
     docker run --rm --network none \
-        --volume "${pre_dice_data_volume}:/data" \
-        --mount "type=bind,src=${repo_root}/scripts/test-dice.mjs,dst=/tmp/test-dice.mjs,readonly" \
+        --volume "${dice_legacy_data_volume}:/data" \
+        --mount "type=bind,src=${group_history_test},dst=/tmp/test-group-history.mjs,readonly" \
         --mount "type=bind,src=${recovery_policy_test},dst=/tmp/test-session-recovery.mjs,readonly" \
         --mount "type=bind,src=${provider_errors_test},dst=/tmp/test-provider-errors.mjs,readonly" \
         --mount "type=bind,src=${concurrency_test},dst=/tmp/test-concurrency.mjs,readonly" \
         --mount "type=bind,src=${pre_recovery_fixture},dst=/tmp/prepare-pre-recovery-fixture.mjs,readonly" \
         "$IMAGE" sh -ec '
-            test "$(cat /data/AGENTS.md)" = "pre-dice user instructions"
+            test "$(cat /data/AGENTS.md)" = "legacy dice user instructions"
             middleware=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/gateway/middleware-setup.js
             inbound=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/transport/inbound.js
+            ! grep -Fq "createDiceCommandMiddleware" "$middleware"
+            ! grep -Fq "createDiceAwareHistoryBuffer" "$middleware"
+            ! grep -Fq "qqbot-dice" "$middleware"
+            grep -Fq "import { createGroupHistoryBuffer } from '\''/opt/qqbot-defaults/qqbot-group-history.mjs'\'';" "$middleware"
+            grep -Fq "bot.use(createGroupHistoryBuffer(historyBuffer, {" "$middleware"
+            grep -Fq "// Chat-only group history buffer v1." "$middleware"
             grep -Fq "createScopedQuoteRef" "$middleware"
-            grep -Fq "createDiceCommandMiddleware" "$middleware"
-            grep -Fq "bot.use(createDiceCommandMiddleware());" "$middleware"
-            grep -Fq "createDiceAwareHistoryBuffer(historyBuffer, {" "$middleware"
             grep -Fq "Chat-only per-turn document scope v1." "$inbound"
             grep -Fq "Chat-only content-risk recovery context v1." "$inbound"
             grep -Fq "Chat-only group-history epoch guard v1." "$inbound"
@@ -548,14 +554,14 @@ check_pre_dice_upgrade() {
             grep -Fq "Chat-only strict sessionId persistence v1." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/model/model-resolver.js
             grep -Fq "Chat-only strict automatic session reset v1." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/session/session-manager.js
             node --check "$middleware"
-            QQBOT_DICE_MODULE=/opt/qqbot-defaults/qqbot-dice.mjs node --test /tmp/test-dice.mjs
-            QQBOT_RECOVERY_MODULE=/opt/qqbot-defaults/qqbot-session-recovery.mjs QQBOT_DICE_MODULE=/opt/qqbot-defaults/qqbot-dice.mjs QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-session-recovery.mjs
+            QQBOT_GROUP_HISTORY_MODULE=/opt/qqbot-defaults/qqbot-group-history.mjs node --test /tmp/test-group-history.mjs
+            QQBOT_RECOVERY_MODULE=/opt/qqbot-defaults/qqbot-session-recovery.mjs QQBOT_GROUP_HISTORY_MODULE=/opt/qqbot-defaults/qqbot-group-history.mjs QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-session-recovery.mjs
             QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-provider-errors.mjs
             QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-concurrency.mjs
         '
 }
-check_pre_dice_upgrade
-check_pre_dice_upgrade
+check_dice_legacy_upgrade
+check_dice_legacy_upgrade
 
 log "Checking recovery-v1 upgrade and repeated startup"
 docker run --rm --network none --entrypoint sh --volume "${recovery_v1_data_volume}:/data" "$IMAGE" -ec '
@@ -767,11 +773,9 @@ docker run --rm --network none --entrypoint node --volume "${legacy_data_volume}
             ["    // Chat-only scoped quote references prevent cross-peer message-key collisions.\n", ""],
             ["    // Chat-only generation quote capture v1.\n", ""],
             ["    // Chat-only quoted attachment cache v2.\n", ""],
-            ["import { createDiceCommandMiddleware, createDiceAwareHistoryBuffer } from \x27/opt/qqbot-defaults/qqbot-chat-policy.mjs\x27;\n", ""],
-            ["    // Chat-only dice command middleware v1.\n", ""],
-            ["    bot.use(createDiceCommandMiddleware());\n", ""],
-            ["bot.use(createDiceAwareHistoryBuffer(historyBuffer, {", "bot.use(historyBuffer({"],
-            ["    }, contentSanitizer));", "    }));"],
+            ["import { createGroupHistoryBuffer } from \x27/opt/qqbot-defaults/qqbot-group-history.mjs\x27;\n", ""],
+            ["    // Chat-only group history buffer v1.\n", ""],
+            ["bot.use(createGroupHistoryBuffer(historyBuffer, {", "bot.use(historyBuffer({"],
             [
                 [
                     "    bot.use(createScopedQuoteRef(quoteRef));",
@@ -945,9 +949,8 @@ docker run --rm --network none --entrypoint node --volume "${legacy_data_volume}
         ["gateway/bootstrap.js", "Chat-only deployment: file sending is not registered."],
         ["gateway/middleware-setup.js", "createScopedQuoteRef"],
         ["gateway/middleware-setup.js", "Chat-only scoped quote references prevent cross-peer message-key collisions."],
-        ["gateway/middleware-setup.js", "createDiceCommandMiddleware"],
-        ["gateway/middleware-setup.js", "Chat-only dice command middleware v1."],
-        ["gateway/middleware-setup.js", "createDiceAwareHistoryBuffer"],
+        ["gateway/middleware-setup.js", "createGroupHistoryBuffer"],
+        ["gateway/middleware-setup.js", "Chat-only group history buffer v1."],
         ["index.js", "export const inject = [\x27agents\x27, \x27tools\x27, \x27web\x27, \x27systemPrompt\x27];"],
         ["transport/inbound.js", "Chat-only current-and-quoted image scope v2."],
         ["transport/inbound.js", "Chat-only per-turn document scope v1."],
@@ -979,7 +982,7 @@ docker run --rm \
     --network none \
     --volume "${legacy_data_volume}:/data" \
     --mount "type=bind,src=${chat_policy_test},dst=/tmp/test-chat-policy.mjs,readonly" \
-    --mount "type=bind,src=${dice_policy_test},dst=/tmp/test-dice.mjs,readonly" \
+    --mount "type=bind,src=${group_history_test},dst=/tmp/test-group-history.mjs,readonly" \
     "$IMAGE" \
     sh -ec '
     test -f /data/.initialized
@@ -997,9 +1000,8 @@ docker run --rm \
     grep -Fq "import { installChatPolicy } from '\''/opt/qqbot-defaults/qqbot-chat-policy.mjs'\'';" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/gateway/bootstrap.js
     grep -Fq "import {createScopedQuoteRef} from '\''/opt/qqbot-defaults/qqbot-chat-policy.mjs'\'';" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/gateway/middleware-setup.js
     grep -Fq "bot.use(createScopedQuoteRef(quoteRef));" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/gateway/middleware-setup.js
-    grep -Fq "createDiceCommandMiddleware" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/gateway/middleware-setup.js
-    grep -Fq "bot.use(createDiceCommandMiddleware());" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/gateway/middleware-setup.js
-    grep -Fq "createDiceAwareHistoryBuffer(historyBuffer, {" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/gateway/middleware-setup.js
+    grep -Fq "import { createGroupHistoryBuffer } from '\''/opt/qqbot-defaults/qqbot-group-history.mjs'\'';" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/gateway/middleware-setup.js
+    grep -Fq "bot.use(createGroupHistoryBuffer(historyBuffer, {" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/gateway/middleware-setup.js
     grep -Fq "Chat-only current-image downloads v2." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/transport/attachment.js
     grep -Fq "Chat-only quoted-image downloads v2." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/middleware/attachment.js
     grep -Fq "timeoutMs: vision.timeoutMs" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/vision-tool.js
@@ -1009,7 +1011,7 @@ docker run --rm \
     grep -Fq "// Chat-only persistent media root v1." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/media-cleaner.js
     grep -Fq "export const MEDIA_ROOT = '\''/data/qqbot-media'\'';" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/media-cleaner.js
     node --test /tmp/test-chat-policy.mjs
-    QQBOT_DICE_MODULE=/opt/qqbot-defaults/qqbot-dice.mjs node --test /tmp/test-dice.mjs
+    QQBOT_GROUP_HISTORY_MODULE=/opt/qqbot-defaults/qqbot-group-history.mjs node --test /tmp/test-group-history.mjs
 '
 
 log "Checking incompatible QQ plugin version fails closed"

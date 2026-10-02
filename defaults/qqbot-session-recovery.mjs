@@ -198,7 +198,7 @@ function commitGroupHistoryReset(context) {
     }
 }
 
-/** Finish recovery only after inbound has revoked image/document/dice grants. */
+/** Finish recovery only after inbound has revoked image/document grants. */
 export async function finishContentRiskRecovery(documentTurn) {
     if (!objectLike(documentTurn)) return 'not-pending';
     const context = contextsByDocumentTurn.get(documentTurn);

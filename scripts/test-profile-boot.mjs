@@ -122,7 +122,7 @@ try {
   assert.equal(registryNames.includes('qqbot_generate_image'), expectedImageEnabled, 'image generation registration does not match the dedicated image route');
   assert.equal(registryNames.includes('qqbot_create_markdown'), expectedMarkdownEnabled, 'Markdown export registration does not match QQBOT_MARKDOWN_ENABLED');
   const expectedTools = [
-    'qqbot_describe_image', 'qqbot_read_document', 'qqbot_roll_dice',
+    'qqbot_describe_image', 'qqbot_read_document',
     ...(expectedImageEnabled ? ['qqbot_generate_image'] : []),
     ...(expectedMarkdownEnabled ? ['qqbot_create_markdown'] : []),
     'web_fetch',
@@ -130,7 +130,6 @@ try {
   ].sort();
   assert.deepEqual(modelNames, expectedTools, 'model-facing chat tool catalog does not match configured search and generation availability');
   assert.ok(registryNames.includes('qqbot_read_document'), 'QQ document reader must be registered');
-  assert.ok(registryNames.includes('qqbot_roll_dice'), 'TRPG dice tool must be registered');
   if (!searchEnabled) {
     assert.ok(!registryNames.includes('web_search'), 'web_search must not be registered when native search is disabled');
     const unavailable = await tools.execute({

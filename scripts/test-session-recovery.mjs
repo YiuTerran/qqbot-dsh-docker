@@ -351,10 +351,10 @@ test('restored group history stays hidden while an asynchronous recovery clear i
     assert.equal(isHistoryStoreSuppressed(historyStore, key), true,
         'an unresolved asynchronous clear keeps the exact group hidden');
 
-    const diceUrl = process.env.QQBOT_DICE_MODULE
-        ? pathToFileURL(resolve(process.env.QQBOT_DICE_MODULE)).href
-        : new URL('../defaults/qqbot-dice.mjs', import.meta.url).href;
-    const { createDiceAwareHistoryBuffer } = await import(diceUrl);
+    const groupHistoryUrl = process.env.QQBOT_GROUP_HISTORY_MODULE
+        ? pathToFileURL(resolve(process.env.QQBOT_GROUP_HISTORY_MODULE)).href
+        : new URL('../defaults/qqbot-group-history.mjs', import.meta.url).href;
+    const { createGroupHistoryBuffer } = await import(groupHistoryUrl);
     const fakeHistoryBuffer = ({ store }) => async (ctx, next) => {
         ctx.state.history = await store.list(key, 16);
         await next();
@@ -364,7 +364,7 @@ test('restored group history stays hidden while an asynchronous recovery clear i
         message: { kind: 'group', groupOpenid: 'group-a', senderId: 'member', content: 'current request' },
         state: {},
     };
-    const wrapped = createDiceAwareHistoryBuffer(fakeHistoryBuffer, { store: historyStore }, undefined,
+    const wrapped = createGroupHistoryBuffer(fakeHistoryBuffer, { store: historyStore },
         { QQBOT_GROUP_CURRENT_ONLY: 'false' });
     await wrapped(ctx, async () => {});
     assert.deepEqual(ctx.state.history, [], 'the opt-out path respects recovery suppression until clearing finishes');
@@ -486,7 +486,7 @@ integration('real inbound drains the original reply after session removal, revok
             assert.equal(getDocumentTurn(oldAgent), undefined, 'image/document grants are revoked before removal');
             assert.equal(originalDocumentScope.controller.signal.aborted, true);
             assert.equal(originalDocumentScope.documents.size, 0);
-            assert.equal(originalDocumentScope.diceCalls.size, 0);
+            assert.equal(originalDocumentScope.allowedUrls.size, 0);
             assert.equal(getGenerationTurn(oldAgent), undefined, 'generation grants are revoked before removal');
             assert.equal(originalGenerationScope.controller.signal.aborted, true);
             assert.equal(originalGenerationScope.requests.size, 0);
@@ -645,9 +645,9 @@ integration('real queued group history drops a pre-reset snapshot but keeps curr
     const { createOutboundHandler } = await import(`${adapter}transport/outbound.js`);
     const { historyGroupKey } = await import(`${adapter}features/history-store.js`);
     const sdkMiddleware = '/data/profiles/qqbot/node_modules/@tencent-connect/qqbot-nodejs/dist/middleware/history-buffer.js';
-    const [{ historyBuffer, MemoryHistoryStore }, { createDiceAwareHistoryBuffer }, { getDocumentTurn }] = await Promise.all([
+    const [{ historyBuffer, MemoryHistoryStore }, { createGroupHistoryBuffer }, { getDocumentTurn }] = await Promise.all([
         import(pathToFileURL(sdkMiddleware).href),
-        import(pathToFileURL(resolve(process.env.QQBOT_DICE_MODULE ?? '/opt/qqbot-defaults/qqbot-dice.mjs')).href),
+        import(pathToFileURL(resolve(process.env.QQBOT_GROUP_HISTORY_MODULE ?? '/opt/qqbot-defaults/qqbot-group-history.mjs')).href),
         import(pathToFileURL(resolve(process.env.QQBOT_DOCUMENT_SCOPE_MODULE ?? '/opt/qqbot-defaults/qqbot-document-scope.mjs')).href),
     ]);
 
@@ -661,7 +661,7 @@ integration('real queued group history drops a pre-reset snapshot but keeps curr
     sourceStore.append(groupKey, { senderId: 'old-peer', content: 'old buffered history', messageId: 'old-a' }, 16);
     sourceStore.append(otherGroupKey, { senderId: 'other', content: 'other group history', messageId: 'other-group' }, 16);
     sourceStore.append(otherAppKey, { senderId: 'other-app', content: 'other app history', messageId: 'other-app' }, 16);
-    const wrappedHistory = createDiceAwareHistoryBuffer(historyBuffer, {
+    const wrappedHistory = createGroupHistoryBuffer(historyBuffer, {
         limit: 16,
         store: sourceStore,
         recordOnSkip: true,
@@ -807,9 +807,9 @@ integration('false group-history mode supplies persisted history while the adapt
     const { handleInbound } = await import(`${adapter}transport/inbound.js`);
     const { historyGroupKey } = await import(`${adapter}features/history-store.js`);
     const sdkMiddleware = '/data/profiles/qqbot/node_modules/@tencent-connect/qqbot-nodejs/dist/middleware/history-buffer.js';
-    const [{ historyBuffer, MemoryHistoryStore }, { createDiceAwareHistoryBuffer }] = await Promise.all([
+    const [{ historyBuffer, MemoryHistoryStore }, { createGroupHistoryBuffer }] = await Promise.all([
         import(pathToFileURL(sdkMiddleware).href),
-        import(pathToFileURL(resolve(process.env.QQBOT_DICE_MODULE ?? '/opt/qqbot-defaults/qqbot-dice.mjs')).href),
+        import(pathToFileURL(resolve(process.env.QQBOT_GROUP_HISTORY_MODULE ?? '/opt/qqbot-defaults/qqbot-group-history.mjs')).href),
     ]);
 
     const appId = 'history-opt-out-app';
@@ -818,14 +818,14 @@ integration('false group-history mode supplies persisted history while the adapt
     const sourceStore = new MemoryHistoryStore();
     const priorMessage = { senderId: 'prior-peer', content: 'persisted group history', messageId: 'prior-message' };
     await sourceStore.append(key, priorMessage, 16);
-    const wrappedHistory = createDiceAwareHistoryBuffer(historyBuffer, {
+    const wrappedHistory = createGroupHistoryBuffer(historyBuffer, {
         limit: 16,
         store: sourceStore,
         recordOnSkip: true,
         groupKey: (ctx) => ctx.message.kind === 'group' && ctx.message.groupOpenid
             ? historyGroupKey(appId, ctx.message.groupOpenid)
             : undefined,
-    }, undefined, { QQBOT_GROUP_CURRENT_ONLY: 'false' });
+    }, { QQBOT_GROUP_CURRENT_ONLY: 'false' });
 
     const fixture = fixtureAssertions();
     let followedInput;

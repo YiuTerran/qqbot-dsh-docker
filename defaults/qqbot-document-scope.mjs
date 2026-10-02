@@ -83,8 +83,6 @@ function cancelTurn(scope) {
     scope.readPromises.clear();
     scope.attemptedIds.clear();
     scope.allowedUrls.clear();
-    scope.diceCalls?.clear();
-    scope.diceCount = 0;
 }
 
 /** Create an in-memory scope for exactly one QQ message and its explicit quote. */
@@ -105,8 +103,6 @@ export function beginDocumentTurn(agent, message, quote) {
         attemptedIds: new Set(),
         allowedUrls: new Set(),
         outputChars: 0,
-        diceCalls: new Map(),
-        diceCount: 0,
     };
     addUrlsFromText(scope.allowedUrls, message?.content);
 

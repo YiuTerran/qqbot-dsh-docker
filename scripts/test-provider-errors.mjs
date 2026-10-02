@@ -417,7 +417,7 @@ integration('native successful assistant text remains unchanged instead of being
     }, { textChunkLimit: 2000, streaming: false, showToolResults: false }, {
         info() {}, debug() {}, warn() {}, error() {},
     }, {});
-    const text = '主人，骰点是 18。你刚才提到的是 insufficient_quota 错误。';
+    const text = '主人，答案是 18。你刚才提到的是 insufficient_quota 错误。';
     handler({ header: { id: record.sessionId } }, {
         type: 'assistant/message', data: { message: { content: [{ type: 'text', text }] } },
     });
@@ -437,9 +437,9 @@ integration('native successful tool results retain their existing display behavi
             info() {}, debug() {}, warn() {}, error() {},
         }, {});
         const callId = 'successful-call';
-        const text = 'd20: d20[18] = 18';
+        const text = 'Example page text';
         handler({ header: { id: record.sessionId } }, {
-            type: 'tool/call', data: { callId, name: 'qqbot_roll_dice', arguments: '{"expression":"d20"}' },
+            type: 'tool/call', data: { callId, name: 'web_fetch', arguments: '{"url":"https://example.com/"}' },
         });
         handler({ header: { id: record.sessionId } }, {
             type: 'tool/result', data: { message: {
@@ -447,7 +447,7 @@ integration('native successful tool results retain their existing display behavi
             } },
         });
         await new Promise((resolvePromise) => setImmediate(resolvePromise));
-        assert.deepEqual(sent, showToolResults ? [`🔧 \`qqbot_roll_dice\` 完成\n${text}`] : []);
+        assert.deepEqual(sent, showToolResults ? [`🔧 \`web_fetch\` 完成\n${text}`] : []);
     }
 });
 

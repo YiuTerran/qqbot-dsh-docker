@@ -53,6 +53,9 @@ async function assertCurrentPatch(root) {
         ],
         'gateway/middleware-setup.js': [
             "import { createMergeConcurrencyGuard, sendMergeQueueFullNotice, sendMergeThinkingNotice } from '/opt/qqbot-defaults/qqbot-concurrency.mjs';",
+            "import { createGroupHistoryBuffer } from '/opt/qqbot-defaults/qqbot-group-history.mjs';",
+            '// Chat-only group history buffer v1.',
+            'bot.use(createGroupHistoryBuffer(historyBuffer, {',
             '// Chat-only serialized merge guard v1.',
             '// Chat-only idle group thinking notice v1.',
             'onStart: async (startedCtx) => {',

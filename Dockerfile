@@ -107,7 +107,7 @@ COPY defaults/qqbot-session-recovery.mjs /opt/qqbot-defaults/qqbot-session-recov
 COPY defaults/qqbot-provider-errors.mjs /opt/qqbot-defaults/qqbot-provider-errors.mjs
 COPY defaults/qqbot-text-documents.mjs /opt/qqbot-defaults/qqbot-text-documents.mjs
 COPY defaults/qqbot-documents.mjs /opt/qqbot-defaults/qqbot-documents.mjs
-COPY defaults/qqbot-dice.mjs /opt/qqbot-defaults/qqbot-dice.mjs
+COPY defaults/qqbot-group-history.mjs /opt/qqbot-defaults/qqbot-group-history.mjs
 COPY defaults/qqbot-concurrency.mjs /opt/qqbot-defaults/qqbot-concurrency.mjs
 COPY defaults/qqbot-generation.mjs /opt/qqbot-defaults/qqbot-generation.mjs
 COPY defaults/qqbot-image-input.mjs /opt/qqbot-defaults/qqbot-image-input.mjs

@@ -6,6 +6,7 @@ if (!root) throw new Error('usage: enforce-chat-only.mjs <dsh-qqbot-dist-directo
 const manifest = JSON.parse(await readFile(join(root, '..', 'package.json'), 'utf8'));
 if (manifest.version !== '0.5.0') throw new Error('Chat-only patches require dsh-qqbot 0.5.0; refusing an unverified adapter.');
 const policy = '/opt/qqbot-defaults/qqbot-chat-policy.mjs';
+const groupHistoryPolicy = '/opt/qqbot-defaults/qqbot-group-history.mjs';
 const webPagesPolicy = '/opt/qqbot-defaults/qqbot-web-pages.mjs';
 const documentScopePolicy = '/opt/qqbot-defaults/qqbot-document-scope.mjs';
 const sessionRecoveryPolicy = '/opt/qqbot-defaults/qqbot-session-recovery.mjs';
@@ -211,9 +212,14 @@ await patch('gateway/middleware-setup.js', '// Chat-only quoted attachment cache
         '    // Chat-only quoted attachment cache v2.\n' + quoteBlock + '\n' + mentionCall, file);
 });
 
-await patch('gateway/middleware-setup.js', '// Chat-only dice command middleware v1.', (content, file) => {
-    const diceImport = `import { createDiceCommandMiddleware, createDiceAwareHistoryBuffer } from '${policy}';`;
-    if (!content.includes(diceImport)) content = `${diceImport}\n${content}`;
+await patch('gateway/middleware-setup.js', '// Chat-only group history buffer v1.', (content, file) => {
+    const newImport = `import { createGroupHistoryBuffer } from '${groupHistoryPolicy}';`;
+    const legacyImport = `import { createDiceCommandMiddleware, createDiceAwareHistoryBuffer } from '${policy}';`;
+    const legacyCommandBlock = [
+        '    // Chat-only dice command middleware v1.',
+        '    bot.use(createDiceCommandMiddleware());',
+        '',
+    ].join('\n');
     const originalHistory = [
         '    bot.use(historyBuffer({',
         '        limit: config.historyLimit,',
@@ -228,7 +234,7 @@ await patch('gateway/middleware-setup.js', '// Chat-only dice command middleware
         '    }));',
     ].join('\n');
     const wrappedHistory = [
-        '    bot.use(createDiceAwareHistoryBuffer(historyBuffer, {',
+        '    bot.use(createGroupHistoryBuffer(historyBuffer, {',
         '        limit: config.historyLimit,',
         '        store: getHistoryStore(),',
         '        recordOnSkip: true,',
@@ -238,45 +244,66 @@ await patch('gateway/middleware-setup.js', '// Chat-only dice command middleware
         '                return undefined;',
         '            return historyGroupKey(config.appId, gid);',
         '        },',
-        '    }, contentSanitizer));',
+        '    }));',
     ].join('\n');
+    // A persistent /data volume may still carry the removed dice middleware and
+    // its named imports. Rewrite those before the gateway can import them.
+    if (content.includes(legacyCommandBlock)) content = replaceOne(content, legacyCommandBlock, '', file);
+    if (content.includes(legacyImport)) content = replaceOne(content, legacyImport, newImport, file);
+    else if (!content.includes(newImport)) content = `${newImport}\n${content}`;
     if (content.includes(originalHistory)) content = replaceOne(content, originalHistory, wrappedHistory, file);
-    else if (!content.includes(wrappedHistory)) throw new Error(`Chat-only patch: expected the pinned group history middleware in ${file}`);
-
-    const originalRateMarker = '    bot.use(rateLimiter());\n';
-    const diceCommandBlock = [
-        '    bot.use(rateLimiter());',
-        '    // Chat-only dice command middleware v1.',
-        '    bot.use(createDiceCommandMiddleware());',
-        '',
-    ].join('\n');
-    if (content.includes(originalRateMarker)) content = replaceOne(content, originalRateMarker, `${diceCommandBlock}\n`, file);
-    else if (!content.includes('    bot.use(createDiceCommandMiddleware());')) {
-        throw new Error(`Chat-only patch: expected rate limiter insertion point in ${file}`);
+    else if (content.includes('bot.use(createDiceAwareHistoryBuffer(historyBuffer, {')) {
+        content = replaceOne(content, 'bot.use(createDiceAwareHistoryBuffer(historyBuffer, {',
+            'bot.use(createGroupHistoryBuffer(historyBuffer, {', file);
+        if (content.includes('    }, contentSanitizer));')) {
+            content = replaceOne(content, '    }, contentSanitizer));', '    }));', file);
+        }
+    }
+    else if (!content.includes(wrappedHistory)) {
+        throw new Error(`Chat-only patch: expected the pinned group history middleware in ${file}`);
+    }
+    if (!content.includes('// Chat-only group history buffer v1.')) {
+        content = replaceOne(content, '    bot.use(createGroupHistoryBuffer(historyBuffer, {',
+            '    // Chat-only group history buffer v1.\n    bot.use(createGroupHistoryBuffer(historyBuffer, {', file);
     }
     return content;
 });
 
 const middlewareSetupPath = join(root, 'gateway/middleware-setup.js');
 const patchedMiddlewareSetup = updates.get(middlewareSetupPath) ?? await readFile(middlewareSetupPath, 'utf8');
-const diceMiddlewareMarker = '// Chat-only dice command middleware v1.';
-const diceMiddlewareImport = `import { createDiceCommandMiddleware, createDiceAwareHistoryBuffer } from '${policy}';`;
+const groupHistoryMarker = '// Chat-only group history buffer v1.';
+const groupHistoryImport = `import { createGroupHistoryBuffer } from '${groupHistoryPolicy}';`;
+const legacyDiceImport = `import { createDiceCommandMiddleware, createDiceAwareHistoryBuffer } from '${policy}';`;
+const canonicalGroupHistory = [
+    '    // Chat-only group history buffer v1.',
+    '    bot.use(createGroupHistoryBuffer(historyBuffer, {',
+    '        limit: config.historyLimit,',
+    '        store: getHistoryStore(),',
+    '        recordOnSkip: true,',
+    '        groupKey: (ctx) => {',
+    '            const gid = ctx.message.groupOpenid;',
+    '            if (ctx.message.kind !== \'group\' || !gid)',
+    '                return undefined;',
+    '            return historyGroupKey(config.appId, gid);',
+    '        },',
+    '    }));',
+].join('\n');
 const rateLimitPosition = patchedMiddlewareSetup.indexOf('    bot.use(rateLimiter());');
-const diceCommandPosition = patchedMiddlewareSetup.indexOf('    bot.use(createDiceCommandMiddleware());');
 const slashPosition = patchedMiddlewareSetup.indexOf('    const slash = slashCommand({');
 const accessPosition = patchedMiddlewareSetup.indexOf('    bot.use(accessPolicy({');
 const mentionPosition = patchedMiddlewareSetup.indexOf('    bot.use(mentionGate({');
 const sanitizerPosition = patchedMiddlewareSetup.indexOf('    bot.use(contentSanitizer({');
 const attachmentPosition = patchedMiddlewareSetup.indexOf('    bot.use(attachmentProcessor(config, logger));');
-if (patchedMiddlewareSetup.split(diceMiddlewareMarker).length !== 2
-    || patchedMiddlewareSetup.split(diceMiddlewareImport).length !== 2
-    || patchedMiddlewareSetup.split('bot.use(createDiceAwareHistoryBuffer(historyBuffer, {').length !== 2
-    || patchedMiddlewareSetup.split('    }, contentSanitizer));').length !== 2
-    || patchedMiddlewareSetup.split('bot.use(createDiceCommandMiddleware());').length !== 2
+if (patchedMiddlewareSetup.split(groupHistoryMarker).length !== 2
+    || patchedMiddlewareSetup.split(groupHistoryImport).length !== 2
+    || patchedMiddlewareSetup.split(canonicalGroupHistory).length !== 2
+    || patchedMiddlewareSetup.includes(legacyDiceImport)
+    || patchedMiddlewareSetup.includes('createDiceCommandMiddleware')
+    || patchedMiddlewareSetup.includes('createDiceAwareHistoryBuffer')
     || accessPosition < 0 || mentionPosition <= accessPosition || sanitizerPosition <= mentionPosition
-    || rateLimitPosition <= sanitizerPosition || diceCommandPosition <= rateLimitPosition
-    || slashPosition <= diceCommandPosition || attachmentPosition <= slashPosition) {
-    throw new Error('Chat-only patch: dice command/history middleware is incomplete or ordered outside the guarded chain');
+    || rateLimitPosition <= sanitizerPosition
+    || slashPosition <= rateLimitPosition || attachmentPosition <= slashPosition) {
+    throw new Error('Chat-only patch: group history middleware is incomplete or ordered outside the guarded chain');
 }
 const mergeGuardImport = `import { createMergeConcurrencyGuard, sendMergeQueueFullNotice, sendMergeThinkingNotice } from '${concurrencyPolicy}';`;
 const oldMergeGuardImport = `import { createMergeConcurrencyGuard, sendMergeQueueFullNotice } from '${concurrencyPolicy}';`;
@@ -320,7 +347,7 @@ if (patchedMiddlewareSetup.split(mergeGuardImport).length !== 2
     || !patchedMiddlewareSetup.includes('onDrop: async (droppedCtx) => {')
     || !patchedMiddlewareSetup.includes('await sendMergeQueueFullNotice(sender, droppedCtx);')
     || accessPosition < 0 || mentionPosition <= accessPosition || rateLimitPosition <= mentionPosition
-    || diceCommandPosition <= rateLimitPosition || slashPosition <= diceCommandPosition
+    || slashPosition <= rateLimitPosition
     || generationQuotePosition <= accessPosition || scopedQuoteCallPosition <= generationQuotePosition
     || mentionPosition <= scopedQuoteCallPosition || answerPosition <= slashPosition || mergeGuardPosition <= answerPosition
     || thinkingNoticePosition <= mergeGuardPosition || onStartPosition <= thinkingNoticePosition
