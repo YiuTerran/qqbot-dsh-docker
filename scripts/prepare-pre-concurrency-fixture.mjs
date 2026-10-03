@@ -44,6 +44,37 @@ if (thinkingOnly) {
 // Reverse the newer generation layers before reproducing the historical
 // concurrency layout. Thinking-only fixtures keep these current layers.
 await edit('transport/inbound.js', (source) => {
+    if (source.includes('// Chat-only OneBot provenance v1.')) {
+        source = replaceOnce(source,
+            "import { beginOnebotTurn, endOnebotTurn, renderOnebotRequestMetadata } from '/opt/qqbot-defaults/qqbot-onebot-scope.mjs';\n",
+            '', 'OneBot scope import');
+        source = replaceOnce(source,
+            "import { setCurrentImages, clearCurrentImages, isOnebotToolAvailable } from '/opt/qqbot-defaults/qqbot-chat-policy.mjs';",
+            "import { setCurrentImages, clearCurrentImages } from '/opt/qqbot-defaults/qqbot-chat-policy.mjs';",
+            'OneBot availability import');
+        source = replaceOnce(source,
+            '    let documentTurn;\n    let generationTurn;\n    let onebotTurn;',
+            '    let documentTurn;\n    let generationTurn;', 'OneBot turn declaration');
+        source = replaceOnce(source, [
+            '        // Chat-only OneBot provenance v1.',
+            '        if (isOnebotToolAvailable()) onebotTurn = beginOnebotTurn(',
+            '            chatOnlyAgent,',
+            '            getMergedGenerationRequests(ctx),',
+            '            { appId: config.appId, signal: ctx.signal, isCurrentRecord, record, documentScope: documentTurn },',
+            '        );',
+            "        const onebotMetadata = onebotTurn ? renderOnebotRequestMetadata(onebotTurn) : '';",
+        ].join('\n') + '\n', '', 'OneBot request binding');
+        source = replaceOnce(source,
+            "        const requestBody = [documentBody, generationMetadata, onebotMetadata].filter(Boolean).join('\\n\\n');\n",
+            "        const requestBody = [documentBody, generationMetadata].filter(Boolean).join('\\n\\n');\n",
+            'OneBot request body');
+        source = replaceOnce(source,
+            '                // Chat-only OneBot scope cleanup v1.\n                if (onebotTurn) await endOnebotTurn(chatOnlyAgent, onebotTurn);\n',
+            '', 'OneBot scope cleanup');
+    }
+    else if (source.includes('beginOnebotTurn') || source.includes('onebotMetadata')) {
+        throw new Error('pre-concurrency fixture found partial OneBot provenance');
+    }
     if (source.includes('// Chat-only context diagnostics v1.')) {
         source = replaceOnce(source,
             "import { logContextInbound, logContextBinding } from '/opt/qqbot-defaults/qqbot-context-diagnostics.mjs';\n",

@@ -1,0 +1,295 @@
+#!/usr/bin/env python3
+"""Real container MCP -> native SeaDice regression. Synthetic identities only."""
+import argparse
+import concurrent.futures
+import json
+import os
+from pathlib import Path
+import subprocess
+import time
+import urllib.error
+import urllib.request
+import uuid
+
+
+def docker(*args):
+    return subprocess.check_output(["docker", *args], text=True).strip()
+
+
+class Client:
+    def __init__(self, origin, token):
+        self.origin, self.token, self.session = origin, token, None
+        self.counter = 0
+
+    def http(self, path, data=None, token=None):
+        headers = {"Authorization": "Bearer " + (token or self.token),
+                   "Accept": "application/json, text/event-stream"}
+        if self.session:
+            headers["Mcp-Session-Id"] = self.session
+        if data is not None:
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(self.origin + path,
+                                     data=None if data is None else json.dumps(data).encode(),
+                                     headers=headers)
+        with urllib.request.urlopen(req, timeout=45) as response:
+            if response.headers.get("Mcp-Session-Id"):
+                self.session = response.headers["Mcp-Session-Id"]
+            body = response.read(256 * 1024 + 1)
+            assert len(body) <= 256 * 1024, "oversized MCP response"
+            if not body:
+                return None
+            if "text/event-stream" in response.headers.get("Content-Type", ""):
+                frames = [line[5:].strip() for line in body.decode().splitlines() if line.startswith("data:")]
+                assert frames, "empty MCP SSE response"
+                return json.loads(frames[-1])
+            return json.loads(body)
+
+    def rpc(self, method, params=None, notification=False):
+        request = {"jsonrpc": "2.0", "method": method, "params": params or {}}
+        if not notification:
+            self.counter += 1
+            request["id"] = self.counter
+        result = self.http("/mcp", request)
+        if notification:
+            return None
+        assert isinstance(result, dict) and "error" not in result, result
+        return result["result"]
+
+    def initialize(self):
+        self.rpc("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
+                                "clientInfo": {"name": "qqbot-container-regression", "version": "1"}})
+        self.rpc("notifications/initialized", notification=True)
+        assert any(tool["name"] == "call_ws" for tool in self.rpc("tools/list")["tools"])
+
+    def command(self, command, user="11001", group="22001", invocation=None):
+        args = {"backend_id": "sealdice", "request_id": invocation or str(uuid.uuid4()),
+                "audience": "group", "payload": command, "user_id": int(user), "group_id": int(group)}
+        result = self.rpc("tools/call", {"name": "call_ws", "arguments": args})
+        assert not result.get("isError"), result
+        texts = [item["text"] for item in result.get("content", []) if item.get("type") == "text"]
+        assert len(texts) == 1, result
+        parsed = json.loads(texts[0])
+        assert parsed["status"] == "ok", parsed
+        assert parsed["request_id"] == args["request_id"] and parsed["backend_id"] == "sealdice"
+        assert all(item["audience"] == "group" and item["target_id"] == int(group) for item in parsed["outputs"])
+        return parsed
+
+
+def text(result):
+    return "\n".join(item["message"] for item in result["outputs"])
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--bridge-image", default=os.environ.get("GENSOKYO_TEST_IMAGE", "qqbot-gensokyo:integration"))
+    parser.add_argument("--sealdice-image", default=os.environ.get("SEALDICE_TEST_IMAGE", "qqbot-sealdice:integration"))
+    parser.add_argument("--qqbot-image", default=os.environ.get("QQBOT_TEST_IMAGE", "dsh-qqbot:onebot-integration"))
+    parser.add_argument("--evidence", default="/tmp/qqbot-onebot-integration.json")
+    args = parser.parse_args()
+    suffix = uuid.uuid4().hex[:12]
+    network, sea, bridge = ("qqbot-trpg-" + suffix + part for part in ("-net", "-sea", "-bridge"))
+    control_network = "qqbot-trpg-" + suffix + "-control"
+    volumes = ["qqbot-trpg-" + suffix + part for part in ("-sea-data", "-bridge-data")]
+    token, private_token, ws_token = (uuid.uuid4().hex for _ in range(3))
+    evidence = {"synthetic_only": True, "checks": [], "results": []}
+    try:
+        docker("network", "create", "--internal", network)
+        # Docker does not publish ports on an internal-only network. The test
+        # client uses loopback on a separate control network; SeaDice remains
+        # attached only to the isolated OneBot network.
+        docker("network", "create", control_network)
+        for volume in volumes:
+            docker("volume", "create", volume)
+        docker("run", "-d", "--name", bridge, "--network", control_network,
+               "-p", "127.0.0.1::8090", "-v", volumes[1] + ":/data",
+               "-e", "LLM_BRIDGE_ENABLED=true", "-e", "LLM_BRIDGE_DATA_DIR=/data",
+               "-e", "LLM_BRIDGE_MCP_TOKEN=" + token, "-e", "LLM_BRIDGE_INTERNAL_TOKEN=" + private_token,
+               "-e", "ONEBOT_WS_TOKEN=" + ws_token, "-e", "ONEBOT_BACKEND_ID=sealdice",
+               "-e", "ONEBOT_WS_URL=ws://sealdice:18081/ws", args.bridge_image)
+        docker("network", "connect", "--alias", "gensokyo-mcp", network, bridge)
+        address = docker("port", bridge, "8090/tcp").splitlines()[0]
+        client = Client("http://" + address, token)
+        startup_deadline = time.monotonic() + 20
+        while True:
+            try:
+                initial = client.http("/internal/backends", token=private_token)["backends"]
+                assert initial and not any(item["ready"] for item in initial)
+                break
+            except (OSError, KeyError, ValueError):
+                assert time.monotonic() < startup_deadline, "bridge HTTP was blocked by unavailable backend"
+                time.sleep(0.25)
+        client.rpc("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
+                                  "clientInfo": {"name": "startup-regression", "version": "1"}})
+        client.rpc("notifications/initialized", notification=True)
+        assert not any(item["name"] == "call_ws" for item in client.rpc("tools/list")["tools"])
+        # Exceed the original one-shot startup retry window before bringing
+        # the backend online. Readiness must recover without a bridge restart.
+        time.sleep(6)
+        docker("run", "-d", "--name", sea, "--network", network, "--network-alias", "sealdice",
+               "-v", volumes[0] + ":/app/data", "-e", "SEALDICE_LLM_BRIDGE_ENABLED=true",
+               "-e", "SEALDICE_ONEBOT_BIND=0.0.0.0:18081", "-e", "ONEBOT_WS_TOKEN=" + ws_token,
+               args.sealdice_image)
+        client = Client(client.origin, token)
+        evidence["checks"].append("bridge HTTP starts without backend and hides tools until negotiation")
+        deadline = time.monotonic() + 90
+        while True:
+            try:
+                backends = client.http("/internal/backends", token=private_token)["backends"]
+                if any(item["id"] == "sealdice" and item["ready"] and item["version"] == 1 for item in backends):
+                    break
+            except (OSError, KeyError, ValueError):
+                pass
+            if time.monotonic() > deadline:
+                for name in (sea, bridge):
+                    diagnostic = subprocess.run(["docker", "logs", "--tail", "50", name],
+                                                capture_output=True, text=True)
+                    startup_log = diagnostic.stdout + diagnostic.stderr
+                    for credential in (token, private_token, ws_token):
+                        startup_log = startup_log.replace(credential, "[redacted]")
+                    print(name, startup_log, flush=True)
+                raise AssertionError("native SeaDice registration did not become ready")
+            time.sleep(0.25)
+        client.initialize()
+        roll = client.command(".r 1d1")
+        assert "1d1" in text(roll) and "1" in text(roll), roll
+        evidence["checks"].append("native registration and r1d1")
+        evidence["results"].append(roll)
+        for forbidden in [".master", ".rhd 1d1", ".set help"]:
+            rejected = client.rpc("tools/call", {"name": "call_ws", "arguments": {
+                "backend_id": "sealdice", "request_id": str(uuid.uuid4()), "audience": "group",
+                "payload": forbidden, "user_id": 11001, "group_id": 22001}})
+            assert not rejected.get("isError"), rejected
+            terminal = json.loads(rejected["content"][0]["text"])
+            assert terminal["status"] == "failed" and not terminal["outputs"], terminal
+        assert client.command(".r 1d1")["status"] == "ok"
+        evidence["checks"].append("native whitelist rejects management, hidden aliases and non-rule set without blocking next request")
+        for user, group, value in [("11001", "22001", 31), ("11002", "22001", 47),
+                                   ("11001", "22002", 73), ("11002", "22002", 89)]:
+            client.command(".set coc7", user, group)
+            client.command(".st 力量" + str(value), user, group)
+            queried = client.command(".st show 力量", user, group)
+            assert str(value) in text(queried), queried
+            evidence["results"].append(queried)
+        evidence["checks"].append("two users by two groups isolated native state")
+        def parallel_query(pair):
+            user, group, value = pair
+            parallel = Client(client.origin, token)
+            parallel.initialize()
+            result = parallel.command(".st show 力量", user, group)
+            assert str(value) in text(result), result
+            return result
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            evidence["results"].extend(pool.map(parallel_query, [
+                ("11001", "22001", 31), ("11002", "22001", 47),
+                ("11001", "22002", 73), ("11002", "22002", 89)]))
+        evidence["checks"].append("concurrent calls and same user across groups remain isolated")
+        invocation = str(uuid.uuid4())
+        first = client.command(".r 1d1", invocation=invocation)
+        second = client.command(".r 1d1", invocation=invocation)
+        assert first == second, "dedup result changed"
+        evidence["checks"].append("repeat invocation returns identical completed result")
+        conflicting = client.rpc("tools/call", {"name": "call_ws", "arguments": {
+            "backend_id": "sealdice", "request_id": invocation, "audience": "group",
+            "payload": ".r 2d1", "user_id": 11001, "group_id": 22001}})
+        assert conflicting.get("isError"), "same invocation accepted different command parameters"
+        evidence["checks"].append("same invocation with different parameters is rejected")
+        hidden = client.command(".rh 1d1")
+        assert hidden.get("private_count", 0) > 0 and hidden.get("private_receipt"), hidden
+        assert "1d1" not in text(hidden), "private dice content leaked in public result"
+        claim = client.http("/internal/private/claim", {"backend_id": "sealdice",
+                            "request_id": hidden["request_id"], "receipt": hidden["private_receipt"]}, private_token)
+        assert claim["outputs"] and all(item["target_id"] == 11001 for item in claim["outputs"])
+        assert "1d1" in "\n".join(item["message"] for item in claim["outputs"])
+        # Inspect actual runtime logs without persisting private bodies in the
+        # evidence. The virtual send must not leak its full dark-roll reply.
+        for name in (sea, bridge):
+            runtime_log = subprocess.check_output(["docker", "logs", name], stderr=subprocess.STDOUT, text=True)
+            assert all(item["message"] not in runtime_log for item in claim["outputs"]), "private reply entered runtime logs"
+        try:
+            client.http("/internal/private/claim", {"backend_id": "sealdice",
+                        "request_id": hidden["request_id"], "receipt": hidden["private_receipt"]}, private_token)
+        except urllib.error.HTTPError as error:
+            assert error.code in (400, 404, 409, 410), error.code
+        else:
+            raise AssertionError("private receipt was claimed twice")
+        client.http("/internal/private/ack", {"delivery_id": claim["delivery_id"], "status": "sent"}, private_token)
+        evidence["checks"].append("native rh public/private split, log privacy and claim/ack")
+        # Persist both game data and dedup state, but never replay an uncertain command.
+        docker("restart", "-t", "30", sea)
+        docker("restart", "-t", "30", bridge)
+        # HostPort was allocated dynamically for this fixture. Some engines
+        # allocate a new loopback port on restart; rediscover its current URL.
+        address = docker("port", bridge, "8090/tcp").splitlines()[0]
+        client.origin = "http://" + address
+        client.session = None
+        deadline = time.monotonic() + 90
+        restart_backends = None
+        restart_error = None
+        while True:
+            try:
+                restart_backends = client.http("/internal/backends", token=private_token)["backends"]
+                if any(item["ready"] for item in restart_backends):
+                    break
+            except (OSError, ValueError, KeyError) as error:
+                restart_error = {"type": type(error).__name__, "http_status": getattr(error, "code", None)}
+            if time.monotonic() >= deadline:
+                evidence["restart_backends"] = restart_backends
+                evidence["restart_error"] = restart_error
+                raise AssertionError("restart did not negotiate fresh connection")
+            time.sleep(0.25)
+        client.initialize()
+        for user, group, value in [("11001", "22001", 31), ("11002", "22001", 47),
+                                   ("11001", "22002", 73), ("11002", "22002", 89)]:
+            assert str(value) in text(client.command(".st show 力量", user, group))
+        assert client.command(".r 1d1", invocation=invocation) == first
+        evidence["checks"].append("restart preserves game and completed dedup state")
+        # Exercise the remaining approved native handlers in a separate card,
+        # so growth and sanity changes cannot alter the isolation fixtures.
+        for command in [".set coc7", ".st 力量50 理智50", ".ra 力量", ".rc 力量",
+                        ".sc 0/0", ".en 力量", ".pc list"]:
+            native = client.command(command, "11003", "22003")
+            assert native["outputs"], (command, native)
+            evidence["results"].append(native)
+        evidence["checks"].append("native ra rc sc en pc command handlers")
+        wrapper_probe = str(Path(__file__).resolve().with_name("test-onebot-wrapper.mjs"))
+        wrapper_output = docker("run", "--rm", "--network", network, "--entrypoint", "node",
+            "--mount", "type=bind,src=" + wrapper_probe + ",dst=/tmp/test-onebot-wrapper.mjs,readonly",
+            "-e", "QQBOT_ONEBOT_ENABLED=true", "-e", "QQBOT_ONEBOT_HIDDEN_ENABLED=false",
+            "-e", "QQBOT_ONEBOT_BACKENDS=sealdice", "-e", "QQBOT_ONEBOT_MCP_URL=http://gensokyo-mcp:8090/mcp",
+            "-e", "QQBOT_ONEBOT_MCP_TOKEN=" + token, "-e", "QQBOT_ONEBOT_INTERNAL_TOKEN=" + private_token,
+            args.qqbot_image, "/tmp/test-onebot-wrapper.mjs")
+        wrapper_result = json.loads(wrapper_output)
+        assert wrapper_result["result"] == "PASS", wrapper_result
+        evidence["results"].append(wrapper_result)
+        evidence["checks"].append("production qq-bot wrapper authorization to real native backend")
+        evidence["result"] = "PASS"
+        print("OneBot native container integration PASS:", len(evidence["checks"]), "checks")
+    except BaseException:
+        # SeaDice flushes its log queue asynchronously. Give terminal-stage
+        # diagnostics time to reach stdout before collecting/removing fixtures.
+        time.sleep(1)
+        for name in (sea, bridge):
+            diagnostic = subprocess.run(["docker", "logs", "--tail", "80", name],
+                                        capture_output=True, text=True)
+            runtime_log = diagnostic.stdout + diagnostic.stderr
+            secrets = [token, private_token, ws_token]
+            if isinstance(locals().get("claim"), dict):
+                secrets.extend(item["message"] for item in claim.get("outputs", []))
+            for value in secrets:
+                runtime_log = runtime_log.replace(value, "[redacted]")
+            print(name, runtime_log, flush=True)
+        raise
+    finally:
+        with open(args.evidence, "w", encoding="utf-8") as output:
+            json.dump(evidence, output, ensure_ascii=False, indent=2)
+        for name in (bridge, sea):
+            subprocess.run(["docker", "rm", "-f", name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        for volume in volumes:
+            subprocess.run(["docker", "volume", "rm", volume], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["docker", "network", "rm", network], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(["docker", "network", "rm", control_network], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+if __name__ == "__main__":
+    main()

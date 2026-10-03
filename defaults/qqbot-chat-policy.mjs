@@ -24,6 +24,13 @@ import {
     readImageRouteConfig,
     validateGenerationToolCall,
 } from './qqbot-generation.mjs';
+import { ONEBOT_COMMAND_TOOL, validateOnebotCommand } from './qqbot-onebot.mjs';
+import {
+    getBoundOnebotExecution,
+    getOnebotRequestSignal,
+    onebotExecutionFailure,
+    runInOnebotExecution,
+} from './qqbot-onebot-scope.mjs';
 
 const imageTool = 'qqbot_describe_image';
 const documentTool = 'qqbot_read_document';
@@ -32,14 +39,24 @@ const allowedTools = new Set([
     documentTool,
     GENERATE_IMAGE_TOOL,
     CREATE_MARKDOWN_TOOL,
+    ONEBOT_COMMAND_TOOL,
     'web_fetch',
     'web_search',
 ]);
 let generationRoute;
+let onebotToolAvailable = false;
 const currentImages = new WeakMap();
 const currentImageTurns = new WeakMap();
 export const QQ_MEDIA_ROOT = '/data/qqbot-media';
 const MAX_CURRENT_IMAGE_BYTES = 10 * 1024 * 1024;
+
+export function setOnebotToolAvailable(available) {
+    onebotToolAvailable = available === true;
+}
+
+export function isOnebotToolAvailable() {
+    return onebotToolAvailable;
+}
 
 function isWithin(root, candidate) {
     const path = relative(root, candidate);
@@ -325,6 +342,17 @@ export function clearCurrentImages(agent, expectedTurn) {
 }
 
 export function denyUnsafeTool(exec) {
+    if (exec.name === ONEBOT_COMMAND_TOOL) {
+        if (!onebotToolAvailable) return 'The optional OneBot command backend is unavailable.';
+        const args = exec.arguments;
+        if (!args || typeof args !== 'object' || Object.keys(args).length !== 3
+            || typeof args.requestId !== 'string' || !/^[A-Za-z0-9_-]{16,64}$/u.test(args.requestId)
+            || typeof args.backend !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/u.test(args.backend)
+            || !validateOnebotCommand(args.command)) {
+            return 'OneBot commands require a matching requestId, configured backend, and one safe command.';
+        }
+        return onebotExecutionFailure(exec);
+    }
     if (allowedTools.has(exec.name)) {
         const scopeFailure = documentExecutionFailure(exec);
         if (scopeFailure) return scopeFailure;
@@ -459,6 +487,7 @@ export async function loadChatImageBytes(image, maxBytes, exec, requestSignal) {
 
 export function installChatPolicy(ctx) {
     generationRoute = readImageRouteConfig();
+    onebotToolAvailable = false;
     const tools = ctx.get('tools');
     if (typeof tools?.guard !== 'function') {
         throw new Error('Chat-only policy requires the pinned dsh tools.guard API; refusing to start QQ.');
@@ -477,24 +506,45 @@ export function installChatPolicy(ctx) {
     // Capture the same native execution object at preparation and dispatch.
     // AsyncLocalStorage carries its immutable turn binding into the actual
     // provider request, even when different QQ conversations run concurrently.
-    ctx.on('tools/execute', async (exec, next) => runInDocumentExecution(exec, async () => {
-        const reason = denyUnsafeTool(exec);
-        if (reason) throw new Error(reason);
-        const scope = getBoundDocumentExecution(exec);
-        const originalSignal = exec.signal;
-        exec.signal = getTurnRequestSignal(scope, originalSignal);
-        try {
-            throwIfAborted(exec.signal);
-            const result = await next();
-            if (!isBoundDocumentExecutionActive(exec)) throw new Error('This tool call belongs to an expired QQ message.');
-            throwIfAborted(exec.signal);
-            if (exec.name === 'web_search') recordSuccessfulSearchSources(exec, result);
-            return result;
+    ctx.on('tools/execute', async (exec, next) => {
+        if (exec.name === ONEBOT_COMMAND_TOOL) {
+            return runInOnebotExecution(exec, async () => {
+                const reason = denyUnsafeTool(exec);
+                if (reason) throw new Error(reason);
+                const scope = getBoundOnebotExecution(exec);
+                const originalSignal = exec.signal;
+                exec.signal = getOnebotRequestSignal(scope, originalSignal);
+                try {
+                    throwIfAborted(exec.signal);
+                    const result = await next();
+                    if (onebotExecutionFailure(exec)) throw new Error('This tool call belongs to an expired QQ message.');
+                    throwIfAborted(exec.signal);
+                    return result;
+                }
+                finally {
+                    exec.signal = originalSignal;
+                }
+            });
         }
-        finally {
-            exec.signal = originalSignal;
-        }
-    }));
+        return runInDocumentExecution(exec, async () => {
+            const reason = denyUnsafeTool(exec);
+            if (reason) throw new Error(reason);
+            const scope = getBoundDocumentExecution(exec);
+            const originalSignal = exec.signal;
+            exec.signal = getTurnRequestSignal(scope, originalSignal);
+            try {
+                throwIfAborted(exec.signal);
+                const result = await next();
+                if (!isBoundDocumentExecutionActive(exec)) throw new Error('This tool call belongs to an expired QQ message.');
+                throwIfAborted(exec.signal);
+                if (exec.name === 'web_search') recordSuccessfulSearchSources(exec, result);
+                return result;
+            }
+            finally {
+                exec.signal = originalSignal;
+            }
+        });
+    });
     ctx.systemPrompt.section({
         name: 'qqbot:speaker-identity',
         order: 10249,
@@ -512,7 +562,8 @@ export function installChatPolicy(ctx) {
     });
     ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {
         const assembly = await next();
-        return { ...assembly, tools: assembly.tools.filter((tool) => allowedTools.has(tool.name)) };
+        return { ...assembly, tools: assembly.tools.filter((tool) => allowedTools.has(tool.name)
+            && (tool.name !== ONEBOT_COMMAND_TOOL || onebotToolAvailable)) };
     });
     console.log('[im-qqbot] chat-only policy installed; turn-scoped images, web search, and bounded plain-text reading');
 }

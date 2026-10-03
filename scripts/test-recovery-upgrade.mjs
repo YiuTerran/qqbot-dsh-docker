@@ -83,10 +83,16 @@ async function assertCurrentPatch(root) {
             '// Chat-only lazy quoted image grants v1.',
             'media: config.media,',
             '// Chat-only generation cleanup v1.',
+            "import { beginOnebotTurn, endOnebotTurn, renderOnebotRequestMetadata } from '/opt/qqbot-defaults/qqbot-onebot-scope.mjs';",
+            "import { setCurrentImages, clearCurrentImages, isOnebotToolAvailable } from '/opt/qqbot-defaults/qqbot-chat-policy.mjs';",
+            '// Chat-only OneBot provenance v1.',
+            'if (isOnebotToolAvailable()) onebotTurn = beginOnebotTurn(',
+            "const onebotMetadata = onebotTurn ? renderOnebotRequestMetadata(onebotTurn) : '';",
             'generationTurn = beginGenerationTurn(',
             'const generationMetadata = renderGenerationRequestMetadata(generationTurn);',
-            "const requestBody = [documentBody, generationMetadata].filter(Boolean).join('\\n\\n');",
+            "const requestBody = [documentBody, generationMetadata, onebotMetadata].filter(Boolean).join('\\n\\n');",
             'if (generationTurn) await endGenerationTurn(chatOnlyAgent, generationTurn);',
+            'if (onebotTurn) await endOnebotTurn(chatOnlyAgent, onebotTurn);',
             'await closeMergeBatch(replyBatch);',
             'if (documentTurn) await finishContentRiskRecovery(documentTurn);',
         ],
@@ -134,6 +140,11 @@ async function assertCurrentPatch(root) {
             'recoveryOptions.onCommitted?.(record)',
         ],
     };
+    const inbound = await readFile(join(root, 'transport/inbound.js'), 'utf8');
+    assert.equal(inbound.split("const requestBody = [documentBody, generationMetadata].filter(Boolean).join('\\n\\n');").length - 1, 0,
+        'obsolete request body without OneBot provenance is absent');
+    assert.equal(inbound.split("const requestBody = [documentBody, generationMetadata, onebotMetadata].filter(Boolean).join('\\n\\n');").length - 1, 1,
+        'the availability-gated request body includes OneBot provenance exactly once');
     for (const [file, markers] of Object.entries(expected)) {
         const content = await readFile(join(root, file), 'utf8');
         for (const marker of markers) assert.equal(content.split(marker).length, 2, `${file}: exactly one ${marker}`);

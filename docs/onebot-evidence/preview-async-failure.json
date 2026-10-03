@@ -1,0 +1,20 @@
+{
+  "first": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"request_id\":\"6573bd32-8cbb-4bf9-803e-3c1f8e8072af\",\"backend_id\":\"nonebot\",\"audience\":\"group\",\"outputs\":[{\"action\":\"send_msg\",\"audience\":\"group\",\"target_id\":\"22001\",\"message\":\"first output\"}]}"
+      }
+    ]
+  },
+  "next": {
+    "content": [
+      {
+        "type": "text",
+        "text": "{\"request_id\":\"d47509bf-14ec-4f89-b39d-7f1f3eb20471\",\"backend_id\":\"nonebot\",\"audience\":\"group\",\"outputs\":[{\"action\":\"send_msg\",\"audience\":\"group\",\"target_id\":\"22001\",\"message\":\"second late output\"}]}"
+      }
+    ]
+  },
+  "late_continuation_entered_next": true,
+  "first_had_both_parts": false
+}

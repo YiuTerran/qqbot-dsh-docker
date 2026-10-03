@@ -16,6 +16,8 @@ const generationPolicy = '/opt/qqbot-defaults/qqbot-generation.mjs';
 const generationScopePolicy = '/opt/qqbot-defaults/qqbot-generation-scope.mjs';
 const modelContextPolicy = '/opt/qqbot-defaults/qqbot-model-context.mjs';
 const contextDiagnosticsPolicy = '/opt/qqbot-defaults/qqbot-context-diagnostics.mjs';
+const onebotPolicy = '/opt/qqbot-defaults/qqbot-onebot.mjs';
+const onebotScopePolicy = '/opt/qqbot-defaults/qqbot-onebot-scope.mjs';
 const imageToolPolicyImport = `import { loadChatImageBytes } from '${policy}';`;
 const imageLoaderV3Marker = '// Chat-only scoped image loader v3.';
 const imageSchemaV3Marker = '// Chat-only image schema: scoped QQ media paths or public HTTPS image URLs v3.';
@@ -70,6 +72,29 @@ await patch('gateway/bootstrap.js', '// Chat-only generation tools v1.', (conten
     else if (!content.includes('// Chat-only generation tools v1.'))
         throw new Error('Chat-only patch: expected dedicated generation registration point in ' + file);
     return content;
+});
+
+await patch('gateway/bootstrap.js', '// Chat-only native OneBot command v1.', (content, file) => {
+    const onebotImport = `import { registerOnebotCommandTool } from '${onebotPolicy}';`;
+    const availabilityImport = `import { setOnebotToolAvailable } from '${policy}';`;
+    const protocolImport = "import { MediaApi, MessageApi } from '@tencent-connect/qqbot-nodejs/protocol';";
+    if (!content.includes(onebotImport)) content = `${onebotImport}\n${content}`;
+    if (!content.includes(availabilityImport)) content = `${availabilityImport}\n${content}`;
+    content = replaceOne(content, protocolImport,
+        "import { MediaApi, MessageApi, messagePath } from '@tencent-connect/qqbot-nodejs/protocol';", file);
+    const registration = [
+        '    // Chat-only native OneBot command v1.',
+        '    const onebotService = registerOnebotCommandTool(ctx, {',
+        '        appId: config.appId,',
+        '        bot,',
+        '        messagePath,',
+        '        logger,',
+        '        onAvailability: setOnebotToolAvailable,',
+        '    });',
+    ].join('\n');
+    content = replaceOne(content, '    // ── 生命周期 ──', `${registration}\n    // ── 生命周期 ──`, file);
+    return replaceOne(content, "            logger.info('Shutting down');",
+        "            logger.info('Shutting down');\n            await onebotService.stop();", file);
 });
 
 await patch('gateway/bootstrap.js', '// Chat-only merge batch reply adapter v1.', (content, file) => {
@@ -611,6 +636,33 @@ await patch('transport/inbound.js', '// Chat-only generation provenance v1.', (c
     return content;
 });
 
+await patch('transport/inbound.js', '// Chat-only OneBot provenance v1.', (content, file) => {
+    const scopeImport = `import { beginOnebotTurn, endOnebotTurn, renderOnebotRequestMetadata } from '${onebotScopePolicy}';`;
+    const oldPolicyImport = `import { setCurrentImages, clearCurrentImages } from '${policy}';`;
+    const nextPolicyImport = `import { setCurrentImages, clearCurrentImages, isOnebotToolAvailable } from '${policy}';`;
+    if (!content.includes(scopeImport)) content = `${scopeImport}\n${content}`;
+    if (content.includes(oldPolicyImport)) content = replaceOne(content, oldPolicyImport, nextPolicyImport, file);
+    else if (!content.includes(nextPolicyImport)) content = `${nextPolicyImport}\n${content}`;
+    content = replaceOne(content, '    let documentTurn;\n    let generationTurn;',
+        '    let documentTurn;\n    let generationTurn;\n    let onebotTurn;', file);
+    const generationBinding = '        const generationMetadata = renderGenerationRequestMetadata(generationTurn);';
+    const onebotBinding = [
+        generationBinding,
+        `        // Chat-only OneBot provenance v1.`,
+        '        if (isOnebotToolAvailable()) onebotTurn = beginOnebotTurn(',
+        '            chatOnlyAgent,',
+        '            getMergedGenerationRequests(ctx),',
+        '            { appId: config.appId, signal: ctx.signal, isCurrentRecord, record, documentScope: documentTurn },',
+        '        );',
+        "        const onebotMetadata = onebotTurn ? renderOnebotRequestMetadata(onebotTurn) : '';",
+    ].join('\n');
+    content = replaceOne(content, generationBinding, onebotBinding, file);
+    content = replaceOne(content,
+        "const requestBody = [documentBody, generationMetadata].filter(Boolean).join('\\n\\n');",
+        "const requestBody = [documentBody, generationMetadata, onebotMetadata].filter(Boolean).join('\\n\\n');", file);
+    return content;
+});
+
 await patch('transport/inbound.js', '// Chat-only lazy quoted image grants v1.', (content, file) => {
     return replaceOne(content, '                documentScope: documentTurn,',
         '                // Chat-only lazy quoted image grants v1.\n                media: config.media,\n                documentScope: documentTurn,', file);
@@ -670,12 +722,30 @@ await patch('transport/inbound.js', '// Chat-only generation cleanup v1.', (cont
     return content;
 });
 
+await patch('transport/inbound.js', '// Chat-only OneBot scope cleanup v1.', (content, file) => {
+    const marker = '                // Chat-only OneBot scope cleanup v1.';
+    const generationCleanup = '                if (generationTurn) await endGenerationTurn(chatOnlyAgent, generationTurn);';
+    const finishCleanup = '                if (documentTurn) await finishContentRiskRecovery(documentTurn);';
+    const onebotCleanup = [
+        marker,
+        '                if (onebotTurn) await endOnebotTurn(chatOnlyAgent, onebotTurn);',
+    ].join('\n');
+    if (!content.includes(marker)) {
+        content = replaceOne(content, [generationCleanup, finishCleanup].join('\n'),
+            [generationCleanup, onebotCleanup, finishCleanup].join('\n'), file);
+    }
+    else if (!content.includes('await endOnebotTurn(chatOnlyAgent, onebotTurn);')) {
+        throw new Error('Chat-only patch: OneBot scope cleanup is partial in ' + file);
+    }
+    return content;
+});
+
 await patch('transport/inbound.js', '// Chat-only group model context v1.', (content, file) => {
     const marker = '// Chat-only group model context v1.';
     const importLine = `import { beginGroupModelContext, endGroupModelContext } from '${modelContextPolicy}';`;
     if (!content.includes(importLine)) content = `${importLine}\n${content}`;
-    content = replaceOne(content, '    let generationTurn;\n    try {',
-        '    let generationTurn;\n    let modelContextTurn;\n    try {', file);
+    content = replaceOne(content, '    let generationTurn;\n    let onebotTurn;\n    try {',
+        '    let generationTurn;\n    let onebotTurn;\n    let modelContextTurn;\n    try {', file);
     content = replaceOne(content,
         '    chatOnlyAgent.followup(message);',
         `    ${marker}\n    modelContextTurn = beginGroupModelContext(chatOnlyAgent, scope, documentTurn);\n    chatOnlyAgent.followup(message);`, file);
@@ -1776,6 +1846,13 @@ assertOnce(finalInbound, 'await chatOnlyAgent.whenIdle();', 'inbound idle wait')
 assertOnce(finalInbound, 'clearCurrentImages(chatOnlyAgent, documentTurn);', 'inbound image cleanup');
 assertOnce(finalInbound, 'endDocumentTurn(chatOnlyAgent, documentTurn);', 'inbound document cleanup');
 assertOnce(finalInbound, 'await finishContentRiskRecovery(documentTurn);', 'inbound recovery cleanup');
+assertOnce(finalInbound, `import { beginOnebotTurn, endOnebotTurn, renderOnebotRequestMetadata } from '${onebotScopePolicy}';`, 'OneBot scope import');
+assertOnce(finalInbound, `import { setCurrentImages, clearCurrentImages, isOnebotToolAvailable } from '${policy}';`, 'OneBot availability import');
+assertOnce(finalInbound, '// Chat-only OneBot provenance v1.', 'OneBot provenance marker');
+assertOnce(finalInbound, 'if (isOnebotToolAvailable()) onebotTurn = beginOnebotTurn(', 'OneBot availability-gated turn binding');
+assertOnce(finalInbound, "const onebotMetadata = onebotTurn ? renderOnebotRequestMetadata(onebotTurn) : '';", 'OneBot request metadata');
+assertOnce(finalInbound, "const requestBody = [documentBody, generationMetadata, onebotMetadata].filter(Boolean).join('\\n\\n');", 'OneBot model input binding');
+assertOnce(finalInbound, 'await endOnebotTurn(chatOnlyAgent, onebotTurn);', 'OneBot scope cleanup');
 assertOnce(finalInbound, '// Chat-only safe inbound errors v1.', 'safe inbound errors marker');
 assertOnce(finalInbound, "logger.warn('whenIdle/followup rejected');", 'safe inbound exception log');
 if (finalInbound.includes('whenIdle/followup rejected: ${'))
@@ -1794,6 +1871,8 @@ if (historyGuardPosition > finalInbound.indexOf('const agentBody = assembleAgent
     || inboundRecoveryFinishPosition >= finalInbound.indexOf('await closeMergeBatch(replyBatch);')
     || finalInbound.indexOf('await endGenerationTurn(chatOnlyAgent, generationTurn);') <= inboundDocumentEndPosition
     || finalInbound.indexOf('await endGenerationTurn(chatOnlyAgent, generationTurn);') >= inboundRecoveryFinishPosition
+    || finalInbound.indexOf('await endOnebotTurn(chatOnlyAgent, onebotTurn);') <= finalInbound.indexOf('await endGenerationTurn(chatOnlyAgent, generationTurn);')
+    || finalInbound.indexOf('await endOnebotTurn(chatOnlyAgent, onebotTurn);') >= inboundRecoveryFinishPosition
     || finalInbound.indexOf(recoveryInboundRegistration) < finalInbound.indexOf('documentTurn = getDocumentTurn(chatOnlyAgent);')
     || finalInbound.indexOf(recoveryInboundRegistration) > finalInbound.indexOf('chatOnlyAgent.followup(message);')
     ) {
@@ -1802,9 +1881,20 @@ if (historyGuardPosition > finalInbound.indexOf('const agentBody = assembleAgent
 const finalBootstrap = await finalText('gateway/bootstrap.js');
 assertOnce(finalBootstrap, '// Chat-only merge batch reply adapter v1.', 'early merge sender adapter');
 assertOnce(finalBootstrap, 'setupMiddlewares(bot, config, manager, logger, sender);', 'merge sender injection');
+assertOnce(finalBootstrap, `import { registerOnebotCommandTool } from '${onebotPolicy}';`, 'native OneBot command import');
+assertOnce(finalBootstrap, `import { setOnebotToolAvailable } from '${policy}';`, 'native OneBot availability import');
+assertOnce(finalBootstrap, "import { MediaApi, MessageApi, messagePath } from '@tencent-connect/qqbot-nodejs/protocol';", 'QQ proactive C2C route import');
+assertOnce(finalBootstrap, '// Chat-only native OneBot command v1.', 'native OneBot command registration');
+assertOnce(finalBootstrap, "await onebotService.stop();", 'native OneBot shutdown');
 if (finalBootstrap.indexOf('// Chat-only merge batch reply adapter v1.') > finalBootstrap.indexOf('setupMiddlewares(bot, config, manager, logger, sender);')
     || finalBootstrap.includes('const replyLimiter = new ReplyLimiter({ limit: 4 });', finalBootstrap.indexOf('setupMiddlewares(bot, config, manager, logger, sender);'))) {
     throw new Error('Chat-only patch: merge overflow sender is not initialized before inbound middleware');
+}
+if (finalBootstrap.indexOf('const onebotService = registerOnebotCommandTool(ctx, {')
+    < finalBootstrap.indexOf('const bot = new QQBot({')
+    || finalBootstrap.indexOf('const onebotService = registerOnebotCommandTool(ctx, {')
+    > finalBootstrap.indexOf("await onebotService.stop();")) {
+    throw new Error('Chat-only patch: native OneBot tool must bind after the SDK bot exists and stop with its lifecycle');
 }
 
 const finalOutbound = await finalText('transport/outbound.js');

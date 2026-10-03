@@ -12,6 +12,7 @@ concurrency_test="${repo_root}/scripts/test-concurrency.mjs"
 generation_test="${repo_root}/scripts/test-generation.mjs"
 generation_scope_test="${repo_root}/scripts/test-generation-scope.mjs"
 generation_quota_test="${repo_root}/scripts/test-generation-quotas.mjs"
+onebot_native_test="${repo_root}/scripts/test-onebot-native.mjs"
 recovery_upgrade_test="${repo_root}/scripts/test-recovery-upgrade.mjs"
 pre_recovery_fixture="${repo_root}/scripts/prepare-pre-recovery-fixture.mjs"
 pre_concurrency_fixture="${repo_root}/scripts/prepare-pre-concurrency-fixture.mjs"
@@ -372,6 +373,7 @@ docker create \
     --mount "type=bind,src=${generation_test},dst=/tmp/test-generation.mjs,readonly" \
     --mount "type=bind,src=${generation_scope_test},dst=/tmp/test-generation-scope.mjs,readonly" \
     --mount "type=bind,src=${generation_quota_test},dst=/tmp/test-generation-quotas.mjs,readonly" \
+    --mount "type=bind,src=${onebot_native_test},dst=/tmp/test-onebot-native.mjs,readonly" \
     --mount "type=bind,src=${recovery_upgrade_test},dst=/tmp/test-recovery-upgrade.mjs,readonly" \
     --mount "type=bind,src=${pre_recovery_fixture},dst=/tmp/prepare-pre-recovery-fixture.mjs,readonly" \
     --mount "type=bind,src=${pre_concurrency_fixture},dst=/tmp/prepare-pre-concurrency-fixture.mjs,readonly" \
@@ -459,6 +461,7 @@ docker create \
         QQBOT_GENERATION_MODULE=/opt/qqbot-defaults/qqbot-generation.mjs QQBOT_GENERATION_SCOPE_MODULE=/opt/qqbot-defaults/qqbot-generation-scope.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test --test-timeout=30000 /tmp/test-generation.mjs
         QQBOT_GENERATION_SCOPE_MODULE=/opt/qqbot-defaults/qqbot-generation-scope.mjs node --test /tmp/test-generation-scope.mjs
         QQBOT_GENERATION_QUOTA_MODULE=/opt/qqbot-defaults/qqbot-generation-quotas.mjs node --test /tmp/test-generation-quotas.mjs
+        QQBOT_ONEBOT_MODULE_ROOT=/opt/qqbot-defaults QQBOT_ONEBOT_PATCHER_SOURCE=/usr/local/lib/enforce-chat-only.mjs QQBOT_SDK_API_CLIENT_MODULE=/data/profiles/qqbot/node_modules/@tencent-connect/qqbot-nodejs/dist/protocol/api/api-client.js node --test /tmp/test-onebot-native.mjs
         QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist QQBOT_ENFORCER_SCRIPT=/usr/local/lib/enforce-chat-only.mjs node --test /tmp/test-recovery-upgrade.mjs
         node /tmp/test-profile-boot.mjs
     '
@@ -722,7 +725,41 @@ docker run --rm --network none --entrypoint node --volume "${legacy_data_volume}
         "            }",
     ].join("\n");
     const inboundPath = `${root}/transport/inbound.js`;
+    const replaceExactlyOnce = (text, before, after, label) => {
+        const parts = text.split(before);
+        if (parts.length !== 2) throw new Error(`legacy fixture expected one ${label}`);
+        return parts[0] + after + parts[1];
+    };
     let inbound = fs.readFileSync(inboundPath, "utf8");
+    if (inbound.includes("// Chat-only OneBot provenance v1.") || inbound.includes("onebotMetadata") || inbound.includes("let onebotTurn;")) {
+        const onebotScopeImport = "import { beginOnebotTurn, endOnebotTurn, renderOnebotRequestMetadata } from '/opt/qqbot-defaults/qqbot-onebot-scope.mjs';\n";
+        if (inbound.includes(onebotScopeImport)) inbound = replaceExactlyOnce(inbound, onebotScopeImport, "", "OneBot scope import");
+        const onebotPolicyImport = "import { setCurrentImages, clearCurrentImages, isOnebotToolAvailable } from '/opt/qqbot-defaults/qqbot-chat-policy.mjs';";
+        if (inbound.includes(onebotPolicyImport)) inbound = replaceExactlyOnce(inbound, onebotPolicyImport,
+            "import { setCurrentImages, clearCurrentImages } from '/opt/qqbot-defaults/qqbot-chat-policy.mjs';", "OneBot availability import");
+        const onebotBinding = [
+            "        // Chat-only OneBot provenance v1.",
+            "        if (isOnebotToolAvailable()) onebotTurn = beginOnebotTurn(",
+            "            chatOnlyAgent,",
+            "            getMergedGenerationRequests(ctx),",
+            "            { appId: config.appId, signal: ctx.signal, isCurrentRecord, record, documentScope: documentTurn },",
+            "        );",
+            "        const onebotMetadata = onebotTurn ? renderOnebotRequestMetadata(onebotTurn) : '';",
+        ].join("\n");
+        if (inbound.includes(onebotBinding + "\n")) inbound = replaceExactlyOnce(inbound, onebotBinding + "\n", "", "OneBot turn binding");
+        else if (inbound.includes("// Chat-only OneBot provenance v1.") || inbound.includes("onebotMetadata")) {
+            throw new Error("legacy fixture found a partial OneBot request binding");
+        }
+        const withOnebotMetadata = "        const requestBody = [documentBody, generationMetadata, onebotMetadata].filter(Boolean).join(\x27\\n\\n\x27);";
+        const withoutOnebotMetadata = "        const requestBody = [documentBody, generationMetadata].filter(Boolean).join(\x27\\n\\n\x27);";
+        if (inbound.includes(withOnebotMetadata)) inbound = replaceExactlyOnce(inbound, withOnebotMetadata, withoutOnebotMetadata, "OneBot model body");
+        const onebotCleanup = "                // Chat-only OneBot scope cleanup v1.\n                if (onebotTurn) await endOnebotTurn(chatOnlyAgent, onebotTurn);\n";
+        if (inbound.includes(onebotCleanup)) inbound = replaceExactlyOnce(inbound, onebotCleanup, "", "OneBot scope cleanup");
+        else if (inbound.includes("endOnebotTurn(chatOnlyAgent, onebotTurn)")) throw new Error("legacy fixture found a partial OneBot cleanup");
+        if (inbound.includes("    let onebotTurn;\n")) inbound = replaceExactlyOnce(inbound, "    let onebotTurn;\n", "", "OneBot turn declaration");
+    }
+    if (inbound.includes("onebotTurn") || inbound.includes("onebotMetadata") || inbound.includes("OneBot provenance"))
+        throw new Error("legacy fixture did not remove the OneBot scope");
     const documentScopeBlock = [
         "    const chatOnlyAgent = record.agent;",
         "    let documentTurn;",
@@ -826,11 +863,6 @@ docker run --rm --network none --entrypoint node --volume "${legacy_data_volume}
         }
         fs.writeFileSync(path, text);
     }
-    const replaceExactlyOnce = (text, before, after, label) => {
-        const parts = text.split(before);
-        if (parts.length !== 2) throw new Error(`legacy fixture expected one ${label}`);
-        return parts[0] + after + parts[1];
-    };
     const visionPath = `${root}/media/vision-tool.js`;
     let vision = fs.readFileSync(visionPath, "utf8");
     const visionImport = "import { existsSync, readFileSync, writeFileSync } from \x27node:fs\x27;\n";

@@ -58,6 +58,8 @@ dsh --profile qqbot
 
 v0.8.0 起，本镜像不再内置 TRPG 骰子：`.r` 直接命令与 `qqbot_roll_dice` 工具均已移除，群聊历史只由 `QQBOT_GROUP_CURRENT_ONLY` 控制。`.r` 等骰式文本按普通聊天处理，会经 @bot 门控后交给当前聊天模型；需要骰子能力时，请由部署者自行对接外部骰子服务（例如海豹骰）。
 
+v0.9.0 增加可选的外部 OneBot TRPG 工具，仍不包含旧骰子实现。部署者启用 `QQBOT_ONEBOT_ENABLED=true` 并启动 `trpg` Compose profile 后，机器人通过专用 `qqbot_onebot_command` 调用 Gensokyo-MCP 和海豹原生规则。群消息仍需 @机器人；`.r` 不直接绕过模型。可使用普通骰、检定和角色卡；官方 QQ 平台已停止主动推送，本版群聊暗骰在执行前拒绝。模型不能指定身份、群、私聊目标或服务地址。请求使用 OneBot 标准 `reply` 消息段关联，并等待项目扩展的完成通知，避免晚到回复进入下一请求。未完成协商的后端不可用，超时或结果不确定的指令不会自动重放。详细部署、协议边界和验收说明见 [OneBot 集成](docs/onebot-integration.md)。
+
 ### 图片生成路由与 Markdown 限额
 
 图片生成/编辑走独立的服务商密钥和模型，不会复用 `DEEPSEEK_API_KEY`、`LLM_API_KEY` 或视觉模型。留空全部图片路由变量时，图片生成工具不可用；设置路由时，`IMAGE_API_KEY`、`IMAGE_API_BASE_URL` 和 `IMAGE_MODEL` 必须同时提供。`IMAGE_API_PROTOCOL` 可省略，默认 `openai-images`，也可设为 `xai-images`；不会自动探测协议或失败后切换。基础地址必须是无凭据、无查询参数、无片段的 HTTPS URL；基础地址应包含服务商要求的版本前缀（例如 `/v1`）；服务请求会追加固定的 `/images/generations` 或 `/images/edits` 路径，并在连接前校验和固定公网地址。密钥只从环境变量读取，不写入 `/data`。图片路由长度上限分别为密钥 4,096、基础地址 2,048、模型名 256 个字符，且拒绝控制字符。部分路由、非法协议/地址、非正整数额度或并发值会拒绝启动；Markdown 开关只接受 `true` 或 `false`。

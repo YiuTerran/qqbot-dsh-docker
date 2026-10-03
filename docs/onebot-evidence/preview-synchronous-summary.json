@@ -1,0 +1,23 @@
+{
+  "binary": "/private/tmp/qqbot-onebot-poc/bin/gensokyo-patched",
+  "checks": [
+    "initialize and tools/list",
+    "selected backend only; two group text replies captured with standard ACKs",
+    "private audience request returns its own private message content",
+    "private action response excluded from group tool result",
+    "stale cross-group output not mixed into next result",
+    "concurrent same-user requests serialized per backend and correlated by group",
+    "duplicate request_id dispatched once and returned same result",
+    "unknown delete_msg failed ACK; login and requested group IDs remain numeric",
+    "timeout plus socket reconnect quarantines backend A without replay; backend B remains usable"
+  ],
+  "check_count": 9,
+  "result": "PASS",
+  "mcp_initialize_http_status": 200,
+  "tools_list_http_status": 200,
+  "runtime_config": "/tmp/qqbot-onebot-poc/evidence/patched-mock/runtime/config.yml",
+  "process_log": "/tmp/qqbot-onebot-poc/evidence/patched-mock/gensokyo-process.log",
+  "trace": "/tmp/qqbot-onebot-poc/evidence/patched-mock/patched-protocol-trace.json",
+  "identities": "synthetic only: user 11001, groups 22001 and 22002, bot 90001",
+  "limitations": "synchronous mock fault suite; delayed continuation is covered by a separate real-backend suite"
+}

@@ -1,0 +1,273 @@
+{
+  "synthetic_only": true,
+  "checks": [
+    "bridge HTTP starts without backend and hides tools until negotiation",
+    "native registration and r1d1",
+    "native whitelist rejects management, hidden aliases and non-rule set without blocking next request",
+    "two users by two groups isolated native state",
+    "concurrent calls and same user across groups remain isolated",
+    "repeat invocation returns identical completed result",
+    "same invocation with different parameters is rejected",
+    "native rh public/private split, log privacy and claim/ack",
+    "restart preserves game and completed dedup state",
+    "native ra rc sc en pc command handlers",
+    "production qq-bot wrapper authorization to real native backend"
+  ],
+  "results": [
+    {
+      "request_id": "ce4d4df5-d0e5-41de-8523-3bddf6c5ca3c",
+      "backend_id": "sealdice",
+      "audience": "group",
+      "status": "ok",
+      "outputs": [
+        {
+          "action": "send_group_msg",
+          "audience": "group",
+          "target_id": 22001,
+          "message": "<>掷出了 1d1=1"
+        }
+      ]
+    },
+    {
+      "request_id": "1482a82e-9a7e-4bee-a89b-d7471fad0461",
+      "backend_id": "sealdice",
+      "audience": "group",
+      "status": "ok",
+      "outputs": [
+        {
+          "action": "send_group_msg",
+          "audience": "group",
+          "target_id": 22001,
+          "message": "<>的个人属性为:\n力量:31"
+        }
+      ]
+    },
+    {
+      "request_id": "2d1d74cd-cdfb-4a25-b5bd-a53280d67286",
+      "backend_id": "sealdice",
+      "audience": "group",
+      "status": "ok",
+      "outputs": [
+        {
+          "action": "send_group_msg",
+          "audience": "group",
+          "target_id": 22001,
+          "message": "<>的个人属性为:\n力量:47"
+        }
+      ]
+    },
+    {
+      "request_id": "fdba7812-75bb-48cb-9f76-445489e03efd",
+      "backend_id": "sealdice",
+      "audience": "group",
+      "status": "ok",
+      "outputs": [
+        {
+          "action": "send_group_msg",
+          "audience": "group",
+          "target_id": 22002,
+          "message": "<>的个人属性为:\n力量:73"
+        }
+      ]
+    },
+    {
+      "request_id": "b8bfb305-4c41-4b2b-b247-8b72d7c0074f",
+      "backend_id": "sealdice",
+      "audience": "group",
+      "status": "ok",
+      "outputs": [
+        {
+          "action": "send_group_msg",
+          "audience": "group",
+          "target_id": 22002,
+          "message": "<>的个人属性为:\n力量:89"
+        }
+      ]
+    },
+    {
+      "request_id": "4c1dafb5-aa9c-4749-bfb4-1f1fc90c6a81",
+      "backend_id": "sealdice",
+      "audience": "group",
+      "status": "ok",
+      "outputs": [
+        {
+          "action": "send_group_msg",
+          "audience": "group",
+          "target_id": 22001,
+          "message": "<>的个人属性为:\n力量:31"
+        }
+      ]
+    },
+    {
+      "request_id": "b977a795-32c2-41c6-a39f-6a9ce1d1e564",
+      "backend_id": "sealdice",
+      "audience": "group",
+      "status": "ok",
+      "outputs": [
+        {
+          "action": "send_group_msg",
+          "audience": "group",
+          "target_id": 22001,
+          "message": "<>的个人属性为:\n力量:47"
+        }
+      ]
+    },
+    {
+      "request_id": "1667ffa1-ce63-4887-955e-4840ebc987ce",
+      "backend_id": "sealdice",
+      "audience": "group",
+      "status": "ok",
+      "outputs": [
+        {
+          "action": "send_group_msg",
+          "audience": "group",
+          "target_id": 22002,
+          "message": "<>的个人属性为:\n力量:73"
+        }
+      ]
+    },
+    {
+      "request_id": "a73adbe5-9007-4b81-9b28-07797ebeaacd",
+      "backend_id": "sealdice",
+      "audience": "group",
+      "status": "ok",
+      "outputs": [
+        {
+          "action": "send_group_msg",
+          "audience": "group",
+          "target_id": 22002,
+          "message": "<>的个人属性为:\n力量:89"
+        }
+      ]
+    },
+    {
+      "request_id": "a5e749ff-ab3f-45a9-bab7-17c1f24ba189",
+      "backend_id": "sealdice",
+      "audience": "group",
+      "status": "ok",
+      "outputs": [
+        {
+          "action": "send_group_msg",
+          "audience": "group",
+          "target_id": 22003,
+          "message": "设定群组默认骰子面数为 100\n提示:已切换至 克苏鲁的呼唤第七版(coc7) 规则，默认骰子面数 100，自动启用关联扩展: coc7"
+        }
+      ]
+    },
+    {
+      "request_id": "56e6da56-badd-4ee2-8e45-e96e15e55516",
+      "backend_id": "sealdice",
+      "audience": "group",
+      "status": "ok",
+      "outputs": [
+        {
+          "action": "send_group_msg",
+          "audience": "group",
+          "target_id": 22003,
+          "message": "<>的coc7属性录入完成，本次录入了2条数据"
+        }
+      ]
+    },
+    {
+      "request_id": "dd2e879e-387c-432e-b812-f792b2f9c28f",
+      "backend_id": "sealdice",
+      "audience": "group",
+      "status": "ok",
+      "outputs": [
+        {
+          "action": "send_group_msg",
+          "audience": "group",
+          "target_id": 22003,
+          "message": "<>的\"力量\"检定结果为: D100=92/50 失败！"
+        }
+      ]
+    },
+    {
+      "request_id": "18d7b9dd-c859-46e6-91fd-c1f406d6371a",
+      "backend_id": "sealdice",
+      "audience": "group",
+      "status": "ok",
+      "outputs": [
+        {
+          "action": "send_group_msg",
+          "audience": "group",
+          "target_id": 22003,
+          "message": "<>的\"力量\"检定结果为: D100=5/50 极难成功"
+        }
+      ]
+    },
+    {
+      "request_id": "8026de22-f55b-4d60-a4d6-0382386b55c2",
+      "backend_id": "sealdice",
+      "audience": "group",
+      "status": "ok",
+      "outputs": [
+        {
+          "action": "send_group_msg",
+          "audience": "group",
+          "target_id": 22003,
+          "message": "<>的理智检定:\nd100=70/50 失败！\n理智变化: 50 ➯ 50 (扣除0=0点)"
+        }
+      ]
+    },
+    {
+      "request_id": "2b40a44a-6dd3-4782-9a81-3e560ef07c99",
+      "backend_id": "sealdice",
+      "audience": "group",
+      "status": "ok",
+      "outputs": [
+        {
+          "action": "send_group_msg",
+          "audience": "group",
+          "target_id": 22003,
+          "message": "<>的“力量”成长检定：\nD100=38/50 失败\n“力量”成长失败了！"
+        }
+      ]
+    },
+    {
+      "request_id": "6f2d5c23-6b07-4344-9935-a64218764eeb",
+      "backend_id": "sealdice",
+      "audience": "group",
+      "status": "ok",
+      "outputs": [
+        {
+          "action": "send_group_msg",
+          "audience": "group",
+          "target_id": 22003,
+          "message": "<>当前还没有角色列表"
+        }
+      ]
+    },
+    {
+      "result": "PASS",
+      "synthetic_only": true,
+      "checks": [
+        {
+          "check": "merged-member-card",
+          "member": 0,
+          "value": 31
+        },
+        {
+          "check": "merged-member-card",
+          "member": 1,
+          "value": 47
+        },
+        {
+          "check": "group-dedupe-forged-identity-hidden-and-expiry"
+        },
+        {
+          "check": "fresh-turn-merged-member-isolation"
+        },
+        {
+          "check": "private-user-scope"
+        }
+      ]
+    }
+  ],
+  "result": "PASS",
+  "verified_utc_date": "2026-10-03",
+  "gensokyo_commit": "83372721995153fb17cd5c396774db850006117a",
+  "sealdice_commit": "4bd9394c863c3843d1f805a88147cc4237d1f7ae",
+  "qqbot_source": "Integration source included with this evidence",
+  "platform_acceptance": "No real QQ or LLM connection; synthetic identities and real local containers only"
+}

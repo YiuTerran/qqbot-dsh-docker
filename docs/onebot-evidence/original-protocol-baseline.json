@@ -1,0 +1,42 @@
+{
+  "binary": "/private/tmp/qqbot-onebot-poc/bin/gensokyo-original",
+  "source_commit": "a0aa7954e557190704e84e8eb3a03c8bf543f664",
+  "mcp_initialize_http_status": 200,
+  "tools_list_http_status": 200,
+  "call_ws_group_only_result": {
+    "jsonrpc": "2.0",
+    "id": 5,
+    "result": {
+      "content": [
+        {
+          "type": "text",
+          "text": "等待超时"
+        }
+      ]
+    }
+  },
+  "call_ws_cross_group_result": {
+    "jsonrpc": "2.0",
+    "id": 7,
+    "result": {
+      "content": [
+        {
+          "type": "text",
+          "text": "PRIVATE_FIXTURE_SHOULD_NOT_LEAK"
+        }
+      ]
+    }
+  },
+  "findings": [
+    "supported get_login_info action receives standard ACK with echo",
+    "unsupported delete_msg action received no failed ACK",
+    "group_id-only send_group_msg cannot correlate; call_ws times out",
+    "call_ws group event was broadcast to both configured backends",
+    "synthetic group event uses hard-coded message_id 123",
+    "same-user output from another group leaks into call_ws history",
+    "private action body is exposed in group MCP result"
+  ],
+  "runtime_config": "synthetic fixture identities; empty WebSocket tokens",
+  "process_log": "/tmp/qqbot-onebot-poc/evidence/original-mock/gensokyo-process.log",
+  "trace": "/tmp/qqbot-onebot-poc/evidence/original-mock/gensokyo-original-protocol-trace.json"
+}

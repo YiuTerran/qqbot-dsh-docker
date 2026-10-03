@@ -1,0 +1,6 @@
+[submodule "third_party/gensokyo-mcp"]
+	path = third_party/gensokyo-mcp
+	url = https://github.com/YiuTerran/Gensokyo-MCP.git
+[submodule "third_party/sealdice-core"]
+	path = third_party/sealdice-core
+	url = https://github.com/YiuTerran/sealdice-core.git
