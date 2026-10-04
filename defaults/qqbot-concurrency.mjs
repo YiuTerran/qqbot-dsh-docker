@@ -18,6 +18,8 @@ function snapshotGenerationAttachment(attachment) {
         content_type: typeof attachment.content_type === 'string' ? attachment.content_type
             : typeof attachment.contentType === 'string' ? attachment.contentType : '',
         size: attachment.size,
+        ...(attachment.qqbotDeferredPromptSource === 'previous-image-only-message'
+            ? { promptSource: 'previous-image-only-message' } : {}),
     });
 }
 
@@ -25,6 +27,7 @@ function snapshotGenerationRequest(ctx) {
     const message = ctx?.message;
     const replyTarget = snapshotReplyTarget(message?.replyTarget ?? ctx?.replyTarget);
     if (!message || !replyTarget) return undefined;
+    const deferredCount = ctx?.state?.qqbotDeferredImagePrompt?.count;
     return Object.freeze({
         ownerId: message.senderId,
         replyTarget,
@@ -33,6 +36,8 @@ function snapshotGenerationRequest(ctx) {
             .map(snapshotGenerationAttachment).filter(Boolean)),
         quotedAttachments: Object.freeze((Array.isArray(ctx?.state?.quote?.attachments) ? ctx.state.quote.attachments : [])
             .map(snapshotGenerationAttachment).filter(Boolean)),
+        ...(Number.isSafeInteger(deferredCount) && deferredCount > 0 && deferredCount <= 8
+            ? { deferredImagePrompt: Object.freeze({ count: deferredCount }) } : {}),
     });
 }
 

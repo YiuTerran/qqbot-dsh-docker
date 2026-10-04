@@ -53,9 +53,9 @@ async function assertCurrentPatch(root) {
         ],
         'gateway/middleware-setup.js': [
             "import { createMergeConcurrencyGuard, sendMergeQueueFullNotice, sendMergeThinkingNotice } from '/opt/qqbot-defaults/qqbot-concurrency.mjs';",
-            "import { createGroupHistoryBuffer } from '/opt/qqbot-defaults/qqbot-group-history.mjs';",
-            '// Chat-only group history buffer v1.',
-            'bot.use(createGroupHistoryBuffer(historyBuffer, {',
+            "import { createHistorySnapshotBuffer } from '/opt/qqbot-defaults/qqbot-history-snapshot.mjs';",
+            '// Chat-only history snapshot epoch guard v1.',
+            'bot.use(createHistorySnapshotBuffer(historyBuffer, {',
             '// Chat-only serialized merge guard v1.',
             '// Chat-only idle group thinking notice v1.',
             'onStart: async (startedCtx) => {',
@@ -64,19 +64,10 @@ async function assertCurrentPatch(root) {
             'await sendMergeQueueFullNotice(sender, droppedCtx);',
         ],
         'transport/inbound.js': [
-            "import { logContextInbound, logContextBinding } from '/opt/qqbot-defaults/qqbot-context-diagnostics.mjs';",
-            '// Chat-only context diagnostics v1.',
-            'logContextInbound(ctx, getMergedGenerationRequests(ctx), agentBody);',
-            '// Chat-only context binding diagnostics v1.',
-            'logContextBinding(chatOnlyAgent, requestBody, agentBody);',
-            "import { beginGroupModelContext, endGroupModelContext } from '/opt/qqbot-defaults/qqbot-model-context.mjs';",
-            '// Chat-only group model context v1.',
-            'let modelContextTurn;',
-            'modelContextTurn = beginGroupModelContext(chatOnlyAgent, scope, documentTurn);',
-            'endGroupModelContext(chatOnlyAgent, modelContextTurn);',
             '// Chat-only content-risk recovery context v1.',
-            '// Chat-only group-history epoch guard v1.',
+            '// Chat-only history snapshot epoch guard v1.',
             '// Chat-only safe inbound errors v1.',
+            "import { renderDeferredImagePromptMetadata } from '/opt/qqbot-defaults/qqbot-pending-images.mjs';",
             '// Chat-only batch cancellation and reply binding v1.',
             '// Chat-only safe batch finalization v1.',
             '// Chat-only generation provenance v1.',
@@ -88,9 +79,10 @@ async function assertCurrentPatch(root) {
             '// Chat-only OneBot provenance v1.',
             'if (isOnebotToolAvailable()) onebotTurn = beginOnebotTurn(',
             "const onebotMetadata = onebotTurn ? renderOnebotRequestMetadata(onebotTurn) : '';",
+            'const deferredImagePromptMetadata = renderDeferredImagePromptMetadata(getMergedGenerationRequests(ctx));',
             'generationTurn = beginGenerationTurn(',
             'const generationMetadata = renderGenerationRequestMetadata(generationTurn);',
-            "const requestBody = [documentBody, generationMetadata, onebotMetadata].filter(Boolean).join('\\n\\n');",
+            "const requestBody = [documentBody, deferredImagePromptMetadata, generationMetadata, onebotMetadata].filter(Boolean).join('\\n\\n');",
             'if (generationTurn) await endGenerationTurn(chatOnlyAgent, generationTurn);',
             'if (onebotTurn) await endOnebotTurn(chatOnlyAgent, onebotTurn);',
             'await closeMergeBatch(replyBatch);',
@@ -109,11 +101,11 @@ async function assertCurrentPatch(root) {
             "event.reason.kind === 'completed' && turn?.toolFailed && !turn.hasAnswer && !completedStreamAnswer",
         ],
         'transport/attachment.js': [
-            '// Chat-only current-image downloads v2.',
-            '// Chat-only generation attachment provenance v1.',
+            '// Chat-only current-image downloads v3.',
+            '// Chat-only attachment source URL v2.',
             "import { downloadCurrentQQImage } from '/opt/qqbot-defaults/qqbot-web-pages.mjs';",
             'const buf = await downloadCurrentQQImage(parsed.href, maxBytes);',
-            'results.push({ filename: att.filename, contentType, localPath, sourceUrl: normalizeUrl(att.url) });',
+            'results.push({ filename: att.filename, contentType, localPath, sourceUrl: att.url });',
         ],
         'middleware/attachment.js': [
             '// Chat-only quoted-image downloads v2.',
@@ -141,9 +133,15 @@ async function assertCurrentPatch(root) {
         ],
     };
     const inbound = await readFile(join(root, 'transport/inbound.js'), 'utf8');
+    const middlewareSetup = await readFile(join(root, 'gateway/middleware-setup.js'), 'utf8');
+    for (const obsolete of ['QQBOT_GROUP_CURRENT_ONLY', 'beginGroupModelContext', 'projectGroupModelMessages',
+        'logContextInbound', 'logContextProjection', 'quoteFilter', 'createGroupHistoryBuffer']) {
+        assert.equal(inbound.includes(obsolete) || middlewareSetup.includes(obsolete), false,
+            `obsolete local group context behavior is absent: ${obsolete}`);
+    }
     assert.equal(inbound.split("const requestBody = [documentBody, generationMetadata].filter(Boolean).join('\\n\\n');").length - 1, 0,
         'obsolete request body without OneBot provenance is absent');
-    assert.equal(inbound.split("const requestBody = [documentBody, generationMetadata, onebotMetadata].filter(Boolean).join('\\n\\n');").length - 1, 1,
+    assert.equal(inbound.split("const requestBody = [documentBody, deferredImagePromptMetadata, generationMetadata, onebotMetadata].filter(Boolean).join('\\n\\n');").length - 1, 1,
         'the availability-gated request body includes OneBot provenance exactly once');
     for (const [file, markers] of Object.entries(expected)) {
         const content = await readFile(join(root, file), 'utf8');

@@ -6,7 +6,8 @@ if (!root) throw new Error('usage: enforce-chat-only.mjs <dsh-qqbot-dist-directo
 const manifest = JSON.parse(await readFile(join(root, '..', 'package.json'), 'utf8'));
 if (manifest.version !== '0.5.0') throw new Error('Chat-only patches require dsh-qqbot 0.5.0; refusing an unverified adapter.');
 const policy = '/opt/qqbot-defaults/qqbot-chat-policy.mjs';
-const groupHistoryPolicy = '/opt/qqbot-defaults/qqbot-group-history.mjs';
+const historySnapshotPolicy = '/opt/qqbot-defaults/qqbot-history-snapshot.mjs';
+const pendingImagesPolicy = '/opt/qqbot-defaults/qqbot-pending-images.mjs';
 const webPagesPolicy = '/opt/qqbot-defaults/qqbot-web-pages.mjs';
 const documentScopePolicy = '/opt/qqbot-defaults/qqbot-document-scope.mjs';
 const sessionRecoveryPolicy = '/opt/qqbot-defaults/qqbot-session-recovery.mjs';
@@ -14,8 +15,6 @@ const providerErrorsPolicy = '/opt/qqbot-defaults/qqbot-provider-errors.mjs';
 const concurrencyPolicy = '/opt/qqbot-defaults/qqbot-concurrency.mjs';
 const generationPolicy = '/opt/qqbot-defaults/qqbot-generation.mjs';
 const generationScopePolicy = '/opt/qqbot-defaults/qqbot-generation-scope.mjs';
-const modelContextPolicy = '/opt/qqbot-defaults/qqbot-model-context.mjs';
-const contextDiagnosticsPolicy = '/opt/qqbot-defaults/qqbot-context-diagnostics.mjs';
 const onebotPolicy = '/opt/qqbot-defaults/qqbot-onebot.mjs';
 const onebotScopePolicy = '/opt/qqbot-defaults/qqbot-onebot-scope.mjs';
 const imageToolPolicyImport = `import { loadChatImageBytes } from '${policy}';`;
@@ -237,8 +236,10 @@ await patch('gateway/middleware-setup.js', '// Chat-only quoted attachment cache
         '    // Chat-only quoted attachment cache v2.\n' + quoteBlock + '\n' + mentionCall, file);
 });
 
-await patch('gateway/middleware-setup.js', '// Chat-only group history buffer v1.', (content, file) => {
-    const newImport = `import { createGroupHistoryBuffer } from '${groupHistoryPolicy}';`;
+await patch('gateway/middleware-setup.js', '// Chat-only history snapshot epoch guard v1.', (content, file) => {
+    const newImport = `import { createHistorySnapshotBuffer } from '${historySnapshotPolicy}';`;
+    const oldImport = `import { createGroupHistoryBuffer } from '/opt/qqbot-defaults/qqbot-group-history.mjs';`;
+    const earlierImport = `import { createGroupHistoryBuffer } from '${historySnapshotPolicy}';`;
     const legacyImport = `import { createDiceCommandMiddleware, createDiceAwareHistoryBuffer } from '${policy}';`;
     const legacyCommandBlock = [
         '    // Chat-only dice command middleware v1.',
@@ -259,7 +260,7 @@ await patch('gateway/middleware-setup.js', '// Chat-only group history buffer v1
         '    }));',
     ].join('\n');
     const wrappedHistory = [
-        '    bot.use(createGroupHistoryBuffer(historyBuffer, {',
+        '    bot.use(createHistorySnapshotBuffer(historyBuffer, {',
         '        limit: config.historyLimit,',
         '        store: getHistoryStore(),',
         '        recordOnSkip: true,',
@@ -275,11 +276,19 @@ await patch('gateway/middleware-setup.js', '// Chat-only group history buffer v1
     // its named imports. Rewrite those before the gateway can import them.
     if (content.includes(legacyCommandBlock)) content = replaceOne(content, legacyCommandBlock, '', file);
     if (content.includes(legacyImport)) content = replaceOne(content, legacyImport, newImport, file);
+    else if (content.includes(oldImport)) {
+        content = replaceOne(content, oldImport, newImport, file);
+        content = content.replaceAll('createGroupHistoryBuffer(historyBuffer, {', 'createHistorySnapshotBuffer(historyBuffer, {');
+    }
+    else if (content.includes(earlierImport)) {
+        content = replaceOne(content, earlierImport, newImport, file);
+        content = content.replaceAll('createGroupHistoryBuffer(historyBuffer, {', 'createHistorySnapshotBuffer(historyBuffer, {');
+    }
     else if (!content.includes(newImport)) content = `${newImport}\n${content}`;
     if (content.includes(originalHistory)) content = replaceOne(content, originalHistory, wrappedHistory, file);
     else if (content.includes('bot.use(createDiceAwareHistoryBuffer(historyBuffer, {')) {
         content = replaceOne(content, 'bot.use(createDiceAwareHistoryBuffer(historyBuffer, {',
-            'bot.use(createGroupHistoryBuffer(historyBuffer, {', file);
+            'bot.use(createHistorySnapshotBuffer(historyBuffer, {', file);
         if (content.includes('    }, contentSanitizer));')) {
             content = replaceOne(content, '    }, contentSanitizer));', '    }));', file);
         }
@@ -287,21 +296,67 @@ await patch('gateway/middleware-setup.js', '// Chat-only group history buffer v1
     else if (!content.includes(wrappedHistory)) {
         throw new Error(`Chat-only patch: expected the pinned group history middleware in ${file}`);
     }
-    if (!content.includes('// Chat-only group history buffer v1.')) {
-        content = replaceOne(content, '    bot.use(createGroupHistoryBuffer(historyBuffer, {',
-            '    // Chat-only group history buffer v1.\n    bot.use(createGroupHistoryBuffer(historyBuffer, {', file);
+    if (content.includes('// Chat-only group history buffer v1.')) {
+        content = replaceOne(content, '// Chat-only group history buffer v1.', '// Chat-only history snapshot epoch guard v1.', file);
+        content = content.replaceAll('createGroupHistoryBuffer(historyBuffer, {', 'createHistorySnapshotBuffer(historyBuffer, {');
+    }
+    if (!content.includes('// Chat-only history snapshot epoch guard v1.')) {
+        content = replaceOne(content, '    bot.use(createHistorySnapshotBuffer(historyBuffer, {',
+            '    // Chat-only history snapshot epoch guard v1.\n    bot.use(createHistorySnapshotBuffer(historyBuffer, {', file);
     }
     return content;
 });
 
+await patch('gateway/middleware-setup.js', '// Chat-only deferred image prompts v1.', (content, file) => {
+    const importLine = `import { createPendingImageCaptureMiddleware, createPendingImagePromptMiddleware, createPendingImageNewCommandCleanup } from '${pendingImagesPolicy}';`;
+    if (!content.includes(importLine)) content = `${importLine}\n${content}`;
+
+    const captureMarker = '    // Chat-only deferred image prompts v1.';
+    const captureCall = '    bot.use(createPendingImageCaptureMiddleware({ appId: config.appId }));';
+    if (!content.includes(captureMarker)) {
+        const quoteCall = '    bot.use(createScopedQuoteRef(quoteRef));';
+        if (!content.includes(quoteCall)) throw new Error(`Chat-only patch: missing scoped quote insertion point in ${file}`);
+        content = replaceOne(content, quoteCall, `${quoteCall}\n${captureMarker}\n${captureCall}`, file);
+    }
+    else if (!content.includes(captureCall)) throw new Error(`Chat-only patch: deferred image capture is partial in ${file}`);
+
+    const mentionBlock = [
+        '    bot.use(mentionGate({',
+        '        requireMentionInGroup: config.requireMention,',
+        '    }));',
+    ].join('\n');
+    const cleanupMarker = '    // Chat-only pending image /new cleanup v1.';
+    const cleanupCall = '    bot.use(createPendingImageNewCommandCleanup({ appId: config.appId }));';
+    if (!content.includes(cleanupMarker)) {
+        if (!content.includes(mentionBlock)) throw new Error(`Chat-only patch: missing mention gate insertion point in ${file}`);
+        content = replaceOne(content, mentionBlock, `${mentionBlock}\n${cleanupMarker}\n${cleanupCall}`, file);
+    }
+    else if (!content.includes(cleanupCall)) throw new Error(`Chat-only patch: pending image cleanup is partial in ${file}`);
+
+    const answerCall = '    bot.use(questionAnswer(manager));';
+    const mergeMarker = '    // Chat-only serialized merge guard v1.';
+    const promptMarker = '    // Chat-only deferred image prompt association v1.';
+    const promptCall = '    bot.use(createPendingImagePromptMiddleware({ appId: config.appId }));';
+    if (!content.includes(promptMarker)) {
+        const answerPosition = content.indexOf(answerCall);
+        const mergePosition = content.indexOf(mergeMarker);
+        if (answerPosition < 0 || mergePosition <= answerPosition) {
+            throw new Error(`Chat-only patch: deferred image prompt must follow question answering and precede the merge guard in ${file}`);
+        }
+        content = content.slice(0, mergePosition) + `${promptMarker}\n${promptCall}\n` + content.slice(mergePosition);
+    }
+    else if (!content.includes(promptCall)) throw new Error(`Chat-only patch: prompt association middleware is partial in ${file}`);
+    return content;
+});
+
 const middlewareSetupPath = join(root, 'gateway/middleware-setup.js');
-const patchedMiddlewareSetup = updates.get(middlewareSetupPath) ?? await readFile(middlewareSetupPath, 'utf8');
-const groupHistoryMarker = '// Chat-only group history buffer v1.';
-const groupHistoryImport = `import { createGroupHistoryBuffer } from '${groupHistoryPolicy}';`;
+let patchedMiddlewareSetup = updates.get(middlewareSetupPath) ?? await readFile(middlewareSetupPath, 'utf8');
+const historySnapshotMarker = '// Chat-only history snapshot epoch guard v1.';
+const historySnapshotImport = `import { createHistorySnapshotBuffer } from '${historySnapshotPolicy}';`;
 const legacyDiceImport = `import { createDiceCommandMiddleware, createDiceAwareHistoryBuffer } from '${policy}';`;
-const canonicalGroupHistory = [
-    '    // Chat-only group history buffer v1.',
-    '    bot.use(createGroupHistoryBuffer(historyBuffer, {',
+const canonicalHistorySnapshot = [
+    '    // Chat-only history snapshot epoch guard v1.',
+    '    bot.use(createHistorySnapshotBuffer(historyBuffer, {',
     '        limit: config.historyLimit,',
     '        store: getHistoryStore(),',
     '        recordOnSkip: true,',
@@ -313,22 +368,45 @@ const canonicalGroupHistory = [
     '        },',
     '    }));',
 ].join('\n');
+const deferredCaptureBlock = [
+    '    // Chat-only deferred image prompts v1.',
+    '    bot.use(createPendingImageCaptureMiddleware({ appId: config.appId }));',
+].join('\n');
+const historySnapshotPosition = patchedMiddlewareSetup.indexOf(canonicalHistorySnapshot);
+const deferredCapturePosition = patchedMiddlewareSetup.indexOf(deferredCaptureBlock);
+if (historySnapshotPosition < 0 || deferredCapturePosition < 0) {
+    throw new Error('Chat-only patch: history snapshot or deferred image capture middleware is missing');
+}
+if (historySnapshotPosition < deferredCapturePosition) {
+    patchedMiddlewareSetup = replaceOne(patchedMiddlewareSetup, canonicalHistorySnapshot, '', 'gateway/middleware-setup.js');
+    const captureEnd = patchedMiddlewareSetup.indexOf(deferredCaptureBlock) + deferredCaptureBlock.length;
+    patchedMiddlewareSetup = patchedMiddlewareSetup.slice(0, captureEnd) + '\n' + canonicalHistorySnapshot
+        + patchedMiddlewareSetup.slice(captureEnd);
+    updates.set(middlewareSetupPath, patchedMiddlewareSetup);
+}
 const rateLimitPosition = patchedMiddlewareSetup.indexOf('    bot.use(rateLimiter());');
 const slashPosition = patchedMiddlewareSetup.indexOf('    const slash = slashCommand({');
 const accessPosition = patchedMiddlewareSetup.indexOf('    bot.use(accessPolicy({');
 const mentionPosition = patchedMiddlewareSetup.indexOf('    bot.use(mentionGate({');
 const sanitizerPosition = patchedMiddlewareSetup.indexOf('    bot.use(contentSanitizer({');
 const attachmentPosition = patchedMiddlewareSetup.indexOf('    bot.use(attachmentProcessor(config, logger));');
-if (patchedMiddlewareSetup.split(groupHistoryMarker).length !== 2
-    || patchedMiddlewareSetup.split(groupHistoryImport).length !== 2
-    || patchedMiddlewareSetup.split(canonicalGroupHistory).length !== 2
+const capturePosition = patchedMiddlewareSetup.indexOf('bot.use(createPendingImageCaptureMiddleware({ appId: config.appId }));');
+const promptCleanupPosition = patchedMiddlewareSetup.indexOf('bot.use(createPendingImageNewCommandCleanup({ appId: config.appId }));');
+const promptAssociationPosition = patchedMiddlewareSetup.indexOf('bot.use(createPendingImagePromptMiddleware({ appId: config.appId }));');
+const scopedQuotePosition = patchedMiddlewareSetup.indexOf('bot.use(createScopedQuoteRef(quoteRef));');
+const slashMiddlewarePosition = patchedMiddlewareSetup.indexOf('bot.use(slash.middleware);');
+if (patchedMiddlewareSetup.split(historySnapshotMarker).length !== 2
+    || patchedMiddlewareSetup.split(historySnapshotImport).length !== 2
+    || patchedMiddlewareSetup.split(canonicalHistorySnapshot).length !== 2
     || patchedMiddlewareSetup.includes(legacyDiceImport)
     || patchedMiddlewareSetup.includes('createDiceCommandMiddleware')
     || patchedMiddlewareSetup.includes('createDiceAwareHistoryBuffer')
+    || patchedMiddlewareSetup.includes('createGroupHistoryBuffer')
+    || !patchedMiddlewareSetup.includes('bot.use(createHistorySnapshotBuffer(historyBuffer, {')
     || accessPosition < 0 || mentionPosition <= accessPosition || sanitizerPosition <= mentionPosition
     || rateLimitPosition <= sanitizerPosition
     || slashPosition <= rateLimitPosition || attachmentPosition <= slashPosition) {
-    throw new Error('Chat-only patch: group history middleware is incomplete or ordered outside the guarded chain');
+    throw new Error('Chat-only patch: native history snapshot wrapper is incomplete or outside the guarded chain');
 }
 const mergeGuardImport = `import { createMergeConcurrencyGuard, sendMergeQueueFullNotice, sendMergeThinkingNotice } from '${concurrencyPolicy}';`;
 const oldMergeGuardImport = `import { createMergeConcurrencyGuard, sendMergeQueueFullNotice } from '${concurrencyPolicy}';`;
@@ -360,6 +438,7 @@ const mergeGuardEndPosition = patchedMiddlewareSetup.indexOf(canonicalMergeGuard
 const answerPosition = patchedMiddlewareSetup.indexOf('bot.use(questionAnswer(manager));');
 const generationQuotePosition = patchedMiddlewareSetup.indexOf('// Chat-only generation quote capture v1.');
 const scopedQuoteCallPosition = patchedMiddlewareSetup.indexOf('bot.use(createScopedQuoteRef(quoteRef));');
+const historySnapshotCallPosition = patchedMiddlewareSetup.indexOf('bot.use(createHistorySnapshotBuffer(historyBuffer, {');
 const typingPosition = patchedMiddlewareSetup.indexOf('bot.use(typingIndicator());');
 if (patchedMiddlewareSetup.split(mergeGuardImport).length !== 2
     || patchedMiddlewareSetup.split(oldMergeGuardImport).length !== 1
@@ -375,13 +454,21 @@ if (patchedMiddlewareSetup.split(mergeGuardImport).length !== 2
     || slashPosition <= rateLimitPosition
     || generationQuotePosition <= accessPosition || scopedQuoteCallPosition <= generationQuotePosition
     || mentionPosition <= scopedQuoteCallPosition || answerPosition <= slashPosition || mergeGuardPosition <= answerPosition
+    || capturePosition <= scopedQuotePosition || capturePosition >= mentionPosition
+    || capturePosition >= historySnapshotCallPosition || historySnapshotCallPosition >= mentionPosition
+    || promptCleanupPosition <= mentionPosition || promptCleanupPosition >= slashMiddlewarePosition
+    || promptAssociationPosition <= answerPosition || promptAssociationPosition >= mergeGuardPosition
     || thinkingNoticePosition <= mergeGuardPosition || onStartPosition <= thinkingNoticePosition
     || thinkingSendPosition <= onStartPosition || onDropPosition <= thinkingSendPosition
     || attachmentPosition <= mergeGuardEndPosition || typingPosition <= mergeGuardEndPosition
     || !patchedMiddlewareSetup.includes('setupMiddlewares(bot, config, manager, logger, sender)')) {
     throw new Error('Chat-only patch: serialized merge middleware, overflow notice, or ordering is incomplete');
 }
-if (patchedMiddlewareSetup.split('// Chat-only generation quote capture v1.').length !== 2
+if (patchedMiddlewareSetup.split(`import { createPendingImageCaptureMiddleware, createPendingImagePromptMiddleware, createPendingImageNewCommandCleanup } from '${pendingImagesPolicy}';`).length !== 2
+    || patchedMiddlewareSetup.split('// Chat-only deferred image prompts v1.').length !== 2
+    || patchedMiddlewareSetup.split('// Chat-only pending image /new cleanup v1.').length !== 2
+    || patchedMiddlewareSetup.split('// Chat-only deferred image prompt association v1.').length !== 2
+    || patchedMiddlewareSetup.split('// Chat-only generation quote capture v1.').length !== 2
     || patchedMiddlewareSetup.split('// Chat-only quoted attachment cache v2.').length !== 2
     || patchedMiddlewareSetup.split('bot.use(createScopedQuoteRef(quoteRef));').length !== 2) {
     throw new Error('Chat-only patch: generation quote provenance is missing or duplicated');
@@ -528,8 +615,8 @@ await patch('transport/inbound.js', '// Chat-only batch cancellation and reply b
     return content;
 });
 
-await patch('transport/inbound.js', '// Chat-only group-history epoch guard v1.', (content, file) => {
-    const marker = '// Chat-only group-history epoch guard v1.';
+await patch('transport/inbound.js', '// Chat-only history snapshot epoch guard v1.', (content, file) => {
+    const marker = '// Chat-only history snapshot epoch guard v1.';
     const original = '    const agentBody = assembleAgentBody(msg, mwState, scope, logger);';
     const guarded = [
         `    ${marker}`,
@@ -537,6 +624,15 @@ await patch('transport/inbound.js', '// Chat-only group-history epoch guard v1.'
         '    if (historySnapshot && !isHistorySnapshotCurrent(mwState.history)) mwState.history = [];',
         original,
     ].join('\n');
+    const previousMarker = '// Chat-only group-history epoch guard v1.';
+    if (content.includes(previousMarker)) {
+        content = replaceOne(content, previousMarker, marker, file);
+        if (!content.includes('getHistorySnapshot(mwState.history)')
+            || !content.includes('isHistorySnapshotCurrent(mwState.history)')) {
+            throw new Error(`Chat-only patch: legacy history snapshot guard is incomplete in ${file}`);
+        }
+        return content;
+    }
     if (content.includes(original)) return replaceOne(content, original, guarded, file);
     if (content.includes(marker) && content.includes('getHistorySnapshot(mwState.history)')
         && content.includes('isHistorySnapshotCurrent(mwState.history)')) return content;
@@ -566,7 +662,7 @@ await patch('transport/inbound.js', '// Chat-only content-risk recovery context 
     if (!content.includes(finish)) content = replaceOne(content, endTurn, `${endTurn}\n${finish}`, file);
 
     const importPosition = content.indexOf(recoveryImport);
-    const historyPosition = content.indexOf('// Chat-only group-history epoch guard v1.');
+    const historyPosition = content.indexOf('// Chat-only history snapshot epoch guard v1.');
     const registrationPosition = content.indexOf(registration);
     const turnBindingPosition = content.indexOf(turnBinding);
     const followupPosition = content.indexOf('    chatOnlyAgent.followup(message);');
@@ -663,6 +759,23 @@ await patch('transport/inbound.js', '// Chat-only OneBot provenance v1.', (conte
     return content;
 });
 
+await patch('transport/inbound.js', '// Chat-only deferred image prompt metadata v1.', (content, file) => {
+    const importLine = `import { renderDeferredImagePromptMetadata } from '${pendingImagesPolicy}';`;
+    if (!content.includes(importLine)) content = `${importLine}\n${content}`;
+    const marker = '// Chat-only deferred image prompt metadata v1.';
+    const bodyLine = '    const agentBody = assembleAgentBody(msg, mwState, scope, logger);';
+    const metadataLine = '    const deferredImagePromptMetadata = renderDeferredImagePromptMetadata(getMergedGenerationRequests(ctx));';
+    if (!content.includes(marker)) {
+        if (!content.includes(bodyLine)) throw new Error(`Chat-only patch: missing model input assembly in ${file}`);
+        content = replaceOne(content, bodyLine, `${bodyLine}\n${metadataLine}\n    ${marker}`, file);
+    }
+    const oldBody = "const requestBody = [documentBody, generationMetadata, onebotMetadata].filter(Boolean).join('\\n\\n');";
+    const newBody = "const requestBody = [documentBody, deferredImagePromptMetadata, generationMetadata, onebotMetadata].filter(Boolean).join('\\n\\n');";
+    if (content.includes(oldBody)) content = replaceOne(content, oldBody, newBody, file);
+    else if (!content.includes(newBody)) throw new Error(`Chat-only patch: deferred image prompt metadata is not bound to the model input in ${file}`);
+    return content;
+});
+
 await patch('transport/inbound.js', '// Chat-only lazy quoted image grants v1.', (content, file) => {
     return replaceOne(content, '                documentScope: documentTurn,',
         '                // Chat-only lazy quoted image grants v1.\n                media: config.media,\n                documentScope: documentTurn,', file);
@@ -740,32 +853,31 @@ await patch('transport/inbound.js', '// Chat-only OneBot scope cleanup v1.', (co
     return content;
 });
 
-await patch('transport/inbound.js', '// Chat-only group model context v1.', (content, file) => {
-    const marker = '// Chat-only group model context v1.';
-    const importLine = `import { beginGroupModelContext, endGroupModelContext } from '${modelContextPolicy}';`;
-    if (!content.includes(importLine)) content = `${importLine}\n${content}`;
-    content = replaceOne(content, '    let generationTurn;\n    let onebotTurn;\n    try {',
-        '    let generationTurn;\n    let onebotTurn;\n    let modelContextTurn;\n    try {', file);
-    content = replaceOne(content,
-        '    chatOnlyAgent.followup(message);',
-        `    ${marker}\n    modelContextTurn = beginGroupModelContext(chatOnlyAgent, scope, documentTurn);\n    chatOnlyAgent.followup(message);`, file);
-    content = replaceOne(content,
-        '    } finally {\n        clearCurrentImages(chatOnlyAgent, documentTurn);',
-        '    } finally {\n        endGroupModelContext(chatOnlyAgent, modelContextTurn);\n        clearCurrentImages(chatOnlyAgent, documentTurn);', file);
+await patch('transport/inbound.js', '// Chat-only native model history restored v1.', (content, file) => {
+    const staleImports = [
+        `import { beginGroupModelContext, endGroupModelContext } from '/opt/qqbot-defaults/qqbot-model-context.mjs';\n`,
+        `import { logContextInbound, logContextBinding } from '/opt/qqbot-defaults/qqbot-context-diagnostics.mjs';\n`,
+    ];
+    for (const importLine of staleImports) {
+        if (content.includes(importLine)) content = replaceOne(content, importLine, '', file);
+    }
+    const staleLines = [
+        '    let modelContextTurn;\n',
+        '    // Chat-only group model context v1.\n',
+        '    modelContextTurn = beginGroupModelContext(chatOnlyAgent, scope, documentTurn);\n',
+        '        endGroupModelContext(chatOnlyAgent, modelContextTurn);\n',
+        '    // Chat-only context diagnostics v1.\n',
+        '    logContextInbound(ctx, getMergedGenerationRequests(ctx), agentBody);\n',
+        '    // Chat-only context binding diagnostics v1.\n',
+        '    logContextBinding(chatOnlyAgent, requestBody, agentBody);\n',
+    ];
+    for (const staleLine of staleLines) {
+        if (content.includes(staleLine)) content = replaceOne(content, staleLine, '', file);
+    }
+    if (!content.includes('// Chat-only native model history restored v1.')) {
+        content = `// Chat-only native model history restored v1.\n${content}`;
+    }
     return content;
-});
-
-await patch('transport/inbound.js', '// Chat-only context diagnostics v1.', (content, file) => {
-    const importLine = `import { logContextInbound, logContextBinding } from '${contextDiagnosticsPolicy}';`;
-    if (!content.includes(importLine)) content = `${importLine}\n${content}`;
-    content = replaceOne(content,
-        '    const agentBody = assembleAgentBody(msg, mwState, scope, logger);',
-        '    const agentBody = assembleAgentBody(msg, mwState, scope, logger);\n'
-        + '    // Chat-only context diagnostics v1.\n'
-        + '    logContextInbound(ctx, getMergedGenerationRequests(ctx), agentBody);', file);
-    const binding = '    modelContextTurn = beginGroupModelContext(chatOnlyAgent, scope, documentTurn);';
-    return replaceOne(content, binding,
-        `${binding}\n    // Chat-only context binding diagnostics v1.\n    logContextBinding(chatOnlyAgent, requestBody, agentBody);`, file);
 });
 
 await patch('transport/outbound.js', '// Chat-only content-risk turn recovery v1.', (content, file) => {
@@ -1440,7 +1552,7 @@ await patch('transport/inbound.js', '// Chat-only explicit-quote text trigger v1
         '    if (isEmptyMessage(userContent, msg.attachments, isGroup, wasMentioned))',
         '    // Chat-only explicit-quote text trigger v1.\n    if (isEmptyMessage(userContent, [...(msg.attachments ?? []), ...(state.quote?.attachments ?? [])], isGroup, wasMentioned))', file));
 
-await patch('transport/attachment.js', '// Chat-only generation attachment provenance v1.', (content, file) => {
+await patch('transport/attachment.js', '// Chat-only attachment source URL v2.', (content, file) => {
     const helperImport = `import { downloadCurrentQQImage } from '${webPagesPolicy}';`;
     if (content.includes(helperImport)) {
         if (content.split(helperImport).length !== 2) {
@@ -1452,15 +1564,25 @@ await patch('transport/attachment.js', '// Chat-only generation attachment prove
     }
 
     const oldImageMarker = '// Chat-only downloads: images only.';
-    const newImageMarker = '// Chat-only current-image downloads v2.';
+    const newImageMarker = '// Chat-only current-image downloads v3.';
     const originalTargets = "    const targets = (attachments ?? []).filter(a => classifyContentType(a.content_type) !== 'voice' && a.url);";
-    const currentTargets = "    const targets = (attachments ?? []).filter(a => classifyContentType(a.content_type) === 'image' && a.url);";
+    const previousCurrentTargets = "    const targets = (attachments ?? []).filter(a => classifyContentType(a.content_type) === 'image' && a.url);";
+    const currentTargets = "    const targets = (attachments ?? []).filter(a => a.url && (classifyContentType(a.content_type) === 'image' || ((!a.content_type || ['file', 'application/octet-stream'].includes(a.content_type.toLowerCase())) && /\\.(?:png|jpe?g|gif|webp)$/iu.test(a.filename ?? ''))));";
     if (content.includes(oldImageMarker)) {
         content = replaceOne(content, oldImageMarker, newImageMarker, file);
+        if (content.includes(previousCurrentTargets)) content = replaceOne(content, previousCurrentTargets, currentTargets, file);
     }
     else if (content.includes(originalTargets)) {
         content = replaceOne(content, originalTargets,
             `${newImageMarker}\n${currentTargets}`, file);
+    }
+    else if (content.includes(previousCurrentTargets)) {
+        content = replaceOne(content, previousCurrentTargets,
+            `${newImageMarker}\n${currentTargets}`, file);
+    }
+    else if (content.includes('// Chat-only current-image downloads v2.')) {
+        content = replaceOne(content, '// Chat-only current-image downloads v2.', newImageMarker, file);
+        content = replaceOne(content, previousCurrentTargets, currentTargets, file);
     }
     else if (!content.includes(newImageMarker) || !content.includes(currentTargets)) {
         throw new Error(`Chat-only patch: expected one matching location in ${file}`);
@@ -1504,12 +1626,29 @@ await patch('transport/attachment.js', '// Chat-only generation attachment prove
         content = replaceOne(content, resolverCall, '', file);
     }
     const oldMetadata = '        results.push({ filename: att.filename, contentType, localPath });';
-    const markedMetadata = '        // Chat-only generation attachment provenance v1.\n        results.push({ filename: att.filename, contentType, localPath, sourceUrl: normalizeUrl(att.url) });';
+    const oldSourceUrlMetadata = '        results.push({ filename: att.filename, contentType, localPath, sourceUrl: normalizeUrl(att.url) });';
+    const markedMetadata = '        // Chat-only attachment source URL v2.\n        results.push({ filename: att.filename, contentType, localPath, sourceUrl: att.url });';
     if (content.includes(oldMetadata)) content = replaceOne(content, oldMetadata, markedMetadata, file);
-    else if (!content.includes('// Chat-only generation attachment provenance v1.')
-        || !content.includes('sourceUrl: normalizeUrl(att.url)')) {
+    else if (content.includes(oldSourceUrlMetadata)) content = replaceOne(content, oldSourceUrlMetadata, markedMetadata, file);
+    else if (!content.includes('// Chat-only attachment source URL v2.')
+        || !content.includes('sourceUrl: att.url')) {
         throw new Error('Chat-only patch: attachment provenance result is missing in ' + file);
     }
+    return content;
+});
+
+await patch('transport/inbound.js', '// Chat-only downloaded attachment lookup by source URL v1.', (content, file) => {
+    const oldMap = '        const downloadedByFilename = new Map((state.downloadedFiles ?? []).map(d => [d.filename, d]));';
+    const sourceMap = [
+        '        // Chat-only downloaded attachment lookup by source URL v1.',
+        "        const downloadedBySourceUrl = new Map((state.downloadedFiles ?? []).filter(d => typeof d.sourceUrl === 'string').map(d => [d.sourceUrl, d]));",
+    ].join('\n');
+    const oldLookup = '            const d = downloadedByFilename.get(att.filename);';
+    const sourceLookup = '            const d = downloadedBySourceUrl.get(att.url);';
+    if (content.includes(oldMap)) content = replaceOne(content, oldMap, sourceMap, file);
+    else if (!content.includes(sourceMap)) throw new Error(`Chat-only patch: source URL download map is missing in ${file}`);
+    if (content.includes(oldLookup)) content = replaceOne(content, oldLookup, sourceLookup, file);
+    else if (!content.includes(sourceLookup)) throw new Error(`Chat-only patch: source URL download lookup is missing in ${file}`);
     return content;
 });
 
@@ -1786,33 +1925,29 @@ function assertOnce(source, marker, label) {
 }
 
 const finalInbound = await finalText('transport/inbound.js');
-const contextDiagnosticsImport = `import { logContextInbound, logContextBinding } from '${contextDiagnosticsPolicy}';`;
-assertOnce(finalInbound, contextDiagnosticsImport, 'context diagnostics import');
-assertOnce(finalInbound, '// Chat-only context diagnostics v1.', 'context diagnostics marker');
-assertOnce(finalInbound, 'logContextInbound(ctx, getMergedGenerationRequests(ctx), agentBody);', 'context diagnostics call');
-assertOnce(finalInbound, '// Chat-only context binding diagnostics v1.', 'context binding diagnostics marker');
-assertOnce(finalInbound, 'logContextBinding(chatOnlyAgent, requestBody, agentBody);', 'context binding diagnostics call');
-if (finalInbound.indexOf('logContextInbound(ctx, getMergedGenerationRequests(ctx), agentBody);')
-    < finalInbound.indexOf('const agentBody = assembleAgentBody(msg, mwState, scope, logger);')
-    || finalInbound.indexOf('logContextInbound(ctx, getMergedGenerationRequests(ctx), agentBody);')
-    > finalInbound.indexOf('if (!agentBody)')
-    || finalInbound.indexOf('logContextBinding(chatOnlyAgent, requestBody, agentBody);')
-    < finalInbound.indexOf('modelContextTurn = beginGroupModelContext(chatOnlyAgent, scope, documentTurn);')
-    || finalInbound.indexOf('logContextBinding(chatOnlyAgent, requestBody, agentBody);')
-    > finalInbound.indexOf('chatOnlyAgent.followup(message);')) {
-    throw new Error('Chat-only patch: context diagnostics must bracket the assembled and bound model input');
+assertOnce(finalInbound, '// Chat-only native model history restored v1.', 'native model history migration marker');
+const obsoleteGroupFilter = [
+    'QQBOT_GROUP_CURRENT_ONLY',
+    'beginGroupModelContext',
+    'endGroupModelContext',
+    'projectGroupModelMessages',
+    'logContextInbound',
+    'logContextBinding',
+    'qqbot-model-context.mjs',
+    'qqbot-context-diagnostics.mjs',
+];
+if (obsoleteGroupFilter.some((value) => finalInbound.includes(value))) {
+    throw new Error('Chat-only patch: stale local group-history filtering or diagnostics remain in the inbound adapter');
 }
-const modelContextImport = `import { beginGroupModelContext, endGroupModelContext } from '${modelContextPolicy}';`;
-assertOnce(finalInbound, modelContextImport, 'group model context import');
-assertOnce(finalInbound, '// Chat-only group model context v1.', 'group model context marker');
-assertOnce(finalInbound, 'let modelContextTurn;', 'group model context scope');
-assertOnce(finalInbound, 'modelContextTurn = beginGroupModelContext(chatOnlyAgent, scope, documentTurn);', 'group model context binding');
-assertOnce(finalInbound, 'endGroupModelContext(chatOnlyAgent, modelContextTurn);', 'group model context cleanup');
-if (finalInbound.indexOf('modelContextTurn = beginGroupModelContext(chatOnlyAgent, scope, documentTurn);')
-    > finalInbound.indexOf('chatOnlyAgent.followup(message);')
-    || finalInbound.indexOf('endGroupModelContext(chatOnlyAgent, modelContextTurn);')
-    < finalInbound.indexOf('await chatOnlyAgent.whenIdle();')) {
-    throw new Error('Chat-only patch: group model context must bracket the model turn');
+const deferredPromptImport = `import { renderDeferredImagePromptMetadata } from '${pendingImagesPolicy}';`;
+assertOnce(finalInbound, deferredPromptImport, 'deferred image prompt metadata import');
+assertOnce(finalInbound, 'renderDeferredImagePromptMetadata(getMergedGenerationRequests(ctx))', 'per-original-request deferred image metadata');
+assertOnce(finalInbound, 'deferredImagePromptMetadata, generationMetadata, onebotMetadata', 'separate image prompt metadata in model body');
+if (finalInbound.indexOf('renderDeferredImagePromptMetadata(getMergedGenerationRequests(ctx))')
+    < finalInbound.indexOf('const agentBody = assembleAgentBody(msg, mwState, scope, logger);')
+    || finalInbound.indexOf('renderDeferredImagePromptMetadata(getMergedGenerationRequests(ctx))')
+    > finalInbound.indexOf('chatOnlyAgent.followup(message);')) {
+    throw new Error('Chat-only patch: deferred image prompt metadata is outside the bound model input lifecycle');
 }
 assertOnce(finalInbound, '// Chat-only lazy quoted image grants v1.', 'lazy quote grant marker');
 assertOnce(finalInbound, '                media: config.media,', 'lazy quote media configuration');
@@ -1840,7 +1975,7 @@ assertOnce(finalInbound, recoveryInboundImport, 'inbound recovery import');
 assertOnce(finalInbound, recoveryInboundMarker, 'inbound recovery marker');
 assertOnce(finalInbound, recoveryInboundRegistration, 'inbound recovery registration');
 assertOnce(finalInbound, 'if (documentTurn) await finishContentRiskRecovery(documentTurn);', 'inbound recovery completion');
-assertOnce(finalInbound, '// Chat-only group-history epoch guard v1.', 'group history epoch guard');
+assertOnce(finalInbound, '// Chat-only history snapshot epoch guard v1.', 'history snapshot epoch guard');
 assertOnce(finalInbound, 'if (historySnapshot && !isHistorySnapshotCurrent(mwState.history)) mwState.history = [];', 'stale history snapshot filter');
 assertOnce(finalInbound, 'await chatOnlyAgent.whenIdle();', 'inbound idle wait');
 assertOnce(finalInbound, 'clearCurrentImages(chatOnlyAgent, documentTurn);', 'inbound image cleanup');
@@ -1851,13 +1986,13 @@ assertOnce(finalInbound, `import { setCurrentImages, clearCurrentImages, isOnebo
 assertOnce(finalInbound, '// Chat-only OneBot provenance v1.', 'OneBot provenance marker');
 assertOnce(finalInbound, 'if (isOnebotToolAvailable()) onebotTurn = beginOnebotTurn(', 'OneBot availability-gated turn binding');
 assertOnce(finalInbound, "const onebotMetadata = onebotTurn ? renderOnebotRequestMetadata(onebotTurn) : '';", 'OneBot request metadata');
-assertOnce(finalInbound, "const requestBody = [documentBody, generationMetadata, onebotMetadata].filter(Boolean).join('\\n\\n');", 'OneBot model input binding');
+assertOnce(finalInbound, "const requestBody = [documentBody, deferredImagePromptMetadata, generationMetadata, onebotMetadata].filter(Boolean).join('\\n\\n');", 'OneBot model input with deferred image prompt metadata');
 assertOnce(finalInbound, 'await endOnebotTurn(chatOnlyAgent, onebotTurn);', 'OneBot scope cleanup');
 assertOnce(finalInbound, '// Chat-only safe inbound errors v1.', 'safe inbound errors marker');
 assertOnce(finalInbound, "logger.warn('whenIdle/followup rejected');", 'safe inbound exception log');
 if (finalInbound.includes('whenIdle/followup rejected: ${'))
     throw new Error('Chat-only patch: inbound exception log exposes raw errors');
-const historyGuardPosition = finalInbound.indexOf('// Chat-only group-history epoch guard v1.');
+const historyGuardPosition = finalInbound.indexOf('// Chat-only history snapshot epoch guard v1.');
 const historyFilterPosition = finalInbound.indexOf('if (historySnapshot && !isHistorySnapshotCurrent(mwState.history)) mwState.history = [];');
 const inboundIdlePosition = finalInbound.indexOf('await chatOnlyAgent.whenIdle();');
 const inboundImageClearPosition = finalInbound.indexOf('clearCurrentImages(chatOnlyAgent, documentTurn);');

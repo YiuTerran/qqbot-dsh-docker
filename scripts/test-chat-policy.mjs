@@ -170,7 +170,7 @@ test('executor rejects dangerous and unknown tools before their bodies run, even
     assert.ok(assembly.sections.some((section) => section.name === 'qqbot:chat-only-policy'));
 });
 
-test('the patched QQ middleware chain keeps the guarded order and stores only current group messages', async (t) => {
+test('the patched QQ middleware chain preserves SDK group history and guarded ordering', async (t) => {
     const appId = '123456';
     const allowedGroup = 'chain-allowed';
     const parallelGroup = 'chain-parallel-peer';
@@ -204,12 +204,33 @@ test('the patched QQ middleware chain keeps the guarded order and stores only cu
         questionChannel: { tryAnswer() { managerCalls++; return false; } },
     };
     const layers = captureMiddlewareChain(config, manager);
-    assert.equal(layers.length, 14, 'the real patched gateway chain is installed');
-    assert.match(layers[7].toString(), /rate-limit/, 'the SDK rate limiter remains directly after the content sanitizer');
+    const layerSources = layers.map((middleware) => middleware.toString());
+    assert.ok(layers.length >= 14, 'the real patched gateway chain is installed');
+    assert.ok(layerSources.some((source) => source.includes('cache.capture(ctx?.message')),
+        'the pending-image capture middleware is installed before mention gating');
+    assert.ok(layerSources.some((source) => source.includes('cache.clearForMessage(ctx.message')),
+        'the pending-image /new cleanup middleware is installed');
+    assert.ok(layerSources.some((source) => source.includes('cache.consume(ctx?.message')),
+        'the pending-image prompt middleware is installed before merged requests are handled');
+    const middlewareSetup = await readFile(`${adapter}gateway/middleware-setup.js`, 'utf8');
+    const orderedCalls = [
+        'bot.use(createPendingImageCaptureMiddleware({ appId: config.appId }));',
+        'bot.use(mentionGate({',
+        'bot.use(createPendingImageNewCommandCleanup({ appId: config.appId }));',
+        'bot.use(slash.middleware);',
+        'bot.use(questionAnswer(manager));',
+        'bot.use(createPendingImagePromptMiddleware({ appId: config.appId }));',
+        '// Chat-only serialized merge guard v1.',
+    ].map((needle) => middlewareSetup.indexOf(needle));
+    assert.ok(orderedCalls.every((position) => position >= 0), 'all pending-image and command boundaries exist in the real SDK middleware setup');
+    assert.ok(orderedCalls.every((position, index) => index === 0 || position > orderedCalls[index - 1]),
+        'image capture, mention gate, /new cleanup, commands, prompt association, and merge guard retain their required order');
+    const rateLimitIndex = layerSources.findIndex((source) => /rate-limit/.test(source));
+    assert.ok(rateLimitIndex >= 0, 'the SDK rate limiter remains installed after content sanitization');
     assert.equal(layers.some((middleware) => /Dice/.test(middleware.toString())), false,
         'no direct-command middleware remains in the guarded chain');
     const mergeGuardIndex = layers.findIndex((middleware) => middleware.name === 'mergeConcurrencyGuard');
-    assert.ok(mergeGuardIndex > 7, 'slash command handling remains upstream of the idle group notice gate');
+    assert.ok(mergeGuardIndex > rateLimitIndex, 'slash command handling remains upstream of the idle group notice gate');
     let terminalCalls = 0;
     const sends = [];
     const thinkingSends = () => sends.filter(({ text }) => text === THINKING_NOTICE);
@@ -287,7 +308,7 @@ test('the patched QQ middleware chain keeps the guarded order and stores only cu
     assert.equal(thinkingSends().length, 1, 'an unmentioned group message never receives a thinking notice');
     assert.deepEqual(historyStore.list(allowedHistoryKey, 16).map(({ content }) => content),
         [`<@${appId}> .read document context`, 'hello without a mention'],
-        'the pre-gate history buffer still records admitted and gated messages once each');
+        'the SDK history buffer keeps admitted and gated group messages available to the native session');
 
     const sendsBeforeParallel = sends.length;
     await Promise.all([
@@ -296,7 +317,7 @@ test('the patched QQ middleware chain keeps the guarded order and stores only cu
     ]);
     assert.deepEqual(historyStore.list(allowedHistoryKey, 16).map(({ content }) => content),
         [`<@${appId}> .read document context`, 'hello without a mention', `<@${appId}> concurrent current text`],
-        'each admitted group message is appended once to its own group history');
+        'each group message remains scoped to its own native history');
     assert.deepEqual(historyStore.list(parallelHistoryKey, 16).map(({ content }) => content), [`<@${appId}> ordinary context`],
         'an overlapping normal peer receives its own history append');
     assert.equal(sends.length, sendsBeforeParallel + 2,
@@ -978,12 +999,6 @@ test('quote references are isolated by c2c peer and group, including overlapping
 });
 
 test('group image quotes recover cached original attachments through the production middleware chain', async (t) => {
-    const previousCurrentOnly = process.env.QQBOT_GROUP_CURRENT_ONLY;
-    process.env.QQBOT_GROUP_CURRENT_ONLY = 'true';
-    t.after(() => {
-        if (previousCurrentOnly === undefined) delete process.env.QQBOT_GROUP_CURRENT_ONLY;
-        else process.env.QQBOT_GROUP_CURRENT_ONLY = previousCurrentOnly;
-    });
     const originalRequestOnce = PublicHttpProvider.prototype.requestOnce;
     const downloads = [];
     PublicHttpProvider.prototype.requestOnce = async function (url) {
@@ -1058,7 +1073,6 @@ test('group image quotes recover cached original attachments through the product
         assert.equal(modelInput.metadata[0].images[0].quoted, true);
         assert.match(JSON.stringify(modelInput.body), /imageAttachmentId/);
         assert.match(JSON.stringify(modelInput.body), /https:\/\/example\.com\/original-river/, 'quoted vision can still use the original URL');
-        assert.doesNotMatch(JSON.stringify(modelInput.body), /Chat history begins/);
 
         const textOnly = await run({ messageId: `river-text-only-${mentioned}`, refMsgIdx: sourceId,
             content: `<@!${config.appId}> 改这张图`, msgElements: [{ content: '江景' }] });
@@ -1083,16 +1097,16 @@ test('group image quotes recover cached original attachments through the product
         msgType: 103, raw: { message_type: 103 }, content: `<@!${config.appId}> 只看当前图`,
         attachments: [{ content_type: 'image/png', filename: 'current.png', url: 'https://example.com/current.png' }],
         msgElements: [{ content: bundle(0) }] });
-    assert.equal(automatic.state.quote, undefined, 'an unindexed automatic bundle is removed before attachment recovery');
-    assert.deepEqual(automatic.state.quoteFilter, { mode: 'current-only', reason: 'automatic-rendered-context',
-        accepted: false, counts: { inputRecords: 5, retainedRecords: 0, droppedRecords: 5 } });
+    assert.ok(automatic.state.quote, 'QQ-provided quote context is retained without local history-mode filtering');
+    assert.match(automatic.state.quote.rawContent, /record-1[\s\S]*record-5/u,
+        'all rendered records from the QQ quote block remain available');
+    assert.equal(Object.hasOwn(automatic.state, 'quoteFilter'), false,
+        'the local rendered-context filter is removed');
     const automaticModelInput = followups.at(-1);
-    assert.match(JSON.stringify(automaticModelInput.body), /只看当前图/);
-    assert.doesNotMatch(JSON.stringify(automaticModelInput.body), /record-[1-5]|Quoted message begins/u);
-    assert.equal(automaticModelInput.metadata[0].images.length, 1, 'the current attachment remains authorized');
-    assert.equal(automaticModelInput.metadata[0].images[0].quoted, false);
-    assert.equal(automaticModelInput.metadata[0].images[0].filename, 'current.png');
-    assert.equal(typeof automaticModelInput.metadata[0].images[0].imageAttachmentId, 'string');
+    assert.match(JSON.stringify(automaticModelInput.body), /只看当前图/u);
+    assert.match(JSON.stringify(automaticModelInput.body), /record-1[\s\S]*record-5/u);
+    assert.ok(automaticModelInput.metadata[0].images.some((image) => image.filename === 'current.png'),
+        'the current image remains authorized alongside the complete QQ context');
 
     const nativeAttachments = Array.from({ length: 5 }, (_, index) => ({
         content_type: 'image/png', filename: `record-${index + 1}.png`,
@@ -1101,103 +1115,63 @@ test('group image quotes recover cached original attachments through the product
     const explicit = await run({ messageId: 'bundle-explicit', refMsgIdx: 'unresolved-explicit-ref',
         msgType: 103, raw: { message_type: 103 }, content: `<@!${config.appId}> 编辑引用图片`,
         msgElements: [{ content: bundle(4), attachments: nativeAttachments }] });
-    assert.equal(explicit.state.quoteFilter.reason, 'selected-rendered-reference');
-    assert.deepEqual(explicit.state.quoteFilter.counts, { inputRecords: 5, retainedRecords: 1, droppedRecords: 4 });
-    assert.match(explicit.state.quote.rawContent, /=== 消息 4 ===[\s\S]*\[消息类型\] 引用消息/u);
-    assert.doesNotMatch(explicit.state.quote.rawContent, /record-[1235](?:\.png)?/u);
+    assert.match(explicit.state.quote.rawContent, /record-1[\s\S]*record-5/u);
     assert.deepEqual(explicit.state.quote.attachments.map((attachment) => attachment.url),
-        ['https://example.com/record-4.png'], 'native bundle attachments are matched only to the selected record');
-    const explicitModelInput = followups.at(-1);
-    assert.match(JSON.stringify(explicitModelInput.body), /record-4/);
-    assert.doesNotMatch(JSON.stringify(explicitModelInput.body), /record-[1235](?:\.png)?/u);
-    assert.equal(explicitModelInput.metadata[0].images.length, 1);
-    assert.equal(explicitModelInput.metadata[0].images[0].quoted, true);
-    assert.equal(explicitModelInput.metadata[0].images[0].filename, 'record-4.png');
-    assert.equal(typeof explicitModelInput.metadata[0].images[0].imageAttachmentId, 'string');
-    for (const number of [1, 2, 3, 5]) {
-        assert.doesNotMatch(JSON.stringify(explicitModelInput.body), new RegExp(`https://example\\.com/record-${number}\\.png`, 'u'));
-    }
+        nativeAttachments.map((attachment) => attachment.url),
+        'the unmodified quote retains the SDK-provided attachment list');
+    assert.match(JSON.stringify(followups.at(-1).body), /record-1[\s\S]*record-5/u,
+        'the full rendered quote reaches the model input');
 
     const cachedExplicit = await run({ messageId: 'bundle-cache-explicit', refMsgIdx: 'river-source-false',
         msgType: 103, raw: { message_type: 103 }, content: `<@!${config.appId}> 编辑缓存引用`,
-        msgElements: [{ content: bundle(4, false), attachments: nativeAttachments }] });
-    assert.equal(cachedExplicit.state.quoteFilter.reason, 'selected-rendered-reference');
-    assert.deepEqual(cachedExplicit.state.quote.attachments.map((attachment) => attachment.url), [sourceUrl],
-        'the explicit same-group message cache may restore its own attachment when the selected rendered record has no URL');
-    assert.match(cachedExplicit.state.quote.rawContent, /=== 消息 4 ===[\s\S]*\[消息类型\] 引用消息/u);
-    assert.doesNotMatch(cachedExplicit.state.quote.rawContent, /record-[1235](?:\.png)?/u);
-    const cachedModelInput = followups.at(-1);
-    assert.equal(cachedModelInput.metadata[0].images.length, 1);
-    assert.equal(cachedModelInput.metadata[0].images[0].quoted, true);
-    assert.equal(cachedModelInput.metadata[0].images[0].filename, 'river.png');
-    assert.equal(typeof cachedModelInput.metadata[0].images[0].imageAttachmentId, 'string');
+        msgElements: [{ content: bundle(4, false) }] });
+    assert.match(cachedExplicit.state.quote.rawContent, /record-1[\s\S]*record-5/u,
+        'same-peer quote text remains intact when cached attachments are restored');
+    assert.ok(cachedExplicit.state.quote.attachments.some((attachment) => attachment.url === sourceUrl));
 
     const singleRecord = await run({ messageId: 'single-rendered-record', refMsgIdx: 'single-record-ref',
         msgType: 103, raw: { message_type: 103 }, content: 'single record quote',
         msgElements: [{ content: 'unrelated preamble\n=== 消息 1 ===\n[消息内容] selected document\n[消息类型] 引用消息\n[附件1] 类型:文件 文件名:notes.txt URL:https://example.com/notes.txt',
             attachments: [{ content_type: 'text/plain', filename: 'notes.txt', url: 'https://example.com/notes.txt' }] }] });
-    assert.equal(singleRecord.state.quoteFilter.reason, 'selected-rendered-reference');
-    assert.match(singleRecord.state.quote.rawContent, /^=== 消息 1 ===/u);
-    assert.doesNotMatch(singleRecord.state.quote.rawContent, /unrelated preamble/u);
-    assert.match(singleRecord.state.quote.text, /^=== 消息 1 ===/u);
-    assert.doesNotMatch(singleRecord.state.quote.text, /unrelated preamble/u);
-    assert.deepEqual(singleRecord.state.quote.attachments.map((attachment) => attachment.url),
-        ['https://example.com/notes.txt'], 'selected document attachments do not require image dimensions');
+    assert.match(singleRecord.state.quote.rawContent, /unrelated preamble[\s\S]*selected document/u,
+        'the adapter does not clip surrounding rendered quote text');
+    assert.match(singleRecord.state.quote.text, /unrelated preamble[\s\S]*selected document/u);
     const audioRecord = await run({ messageId: 'single-audio-record', refMsgIdx: 'single-audio-ref',
         msgType: 103, raw: { message_type: 103 }, content: 'single audio quote',
         msgElements: [{ content: '=== 消息 1 ===\n[消息类型] 引用消息', attachments: [
             { content_type: 'audio/ogg', filename: 'voice.ogg', asr_refer_text: '你好主人', asrText: '你好主人' },
         ] }] });
-    assert.match(audioRecord.state.quote.text, /\[voice: 你好主人\]/u,
-        'a single explicit audio quote retains the SDK voice transcription marker');
+    assert.match(audioRecord.state.quote.text, /[\s\S]*\[voice: 你好主人\]/u,
+        'quoted audio context preserves the SDK transcription marker');
 
     const unparsed = await run({ messageId: 'unparsed-rendered-record', refMsgIdx: 'unparsed-ref',
         msgType: 103, raw: { message_type: 103 }, content: 'unparsed quote',
         msgElements: [{ content: '[消息内容] preserve safely\n[消息类型] 引用消息' }] });
-    assert.equal(unparsed.state.quoteFilter.reason, 'unparsed-rendered-reference');
-    assert.equal(unparsed.state.quoteFilter.accepted, true);
     assert.match(unparsed.state.quote.rawContent, /preserve safely/u);
 
     const sparseNumbering = await run({ messageId: 'sparse-numbering', refMsgIdx: 'sparse-ref',
         msgType: 103, raw: { message_type: 103 }, content: 'select sparse record',
         msgElements: [{ content: '=== 消息 2 ===\n[消息内容] sparse-2\n=== 消息 4 ===\n[消息内容] sparse-4\n[消息类型] 引用消息\n=== 消息 7 ===\n[消息内容] sparse-7' }] });
-    assert.equal(sparseNumbering.state.quoteFilter.reason, 'selected-rendered-reference');
-    assert.deepEqual(sparseNumbering.state.quoteFilter.counts, { inputRecords: 3, retainedRecords: 1, droppedRecords: 2 });
-    assert.match(sparseNumbering.state.quote.rawContent, /^=== 消息 4 ===[\s\S]*sparse-4/u);
-    assert.doesNotMatch(sparseNumbering.state.quote.rawContent, /sparse-[27]/u);
+    assert.match(sparseNumbering.state.quote.rawContent, /sparse-2[\s\S]*sparse-4[\s\S]*sparse-7/u,
+        'sparse numbered quote context is left intact');
 
     const privateQuote = await run({ kind: 'c2c', senderId: 'private-peer', messageId: 'private-rendered',
         refMsgIdx: 'private-ref', msgType: 103, content: 'private message', msgElements: [{ content: bundle(0) }] });
-    assert.equal(privateQuote.state.quoteFilter.reason, 'not-group');
     assert.match(privateQuote.state.quote.rawContent, /record-1[\s\S]*record-5/u);
-    const previousCurrentOnlySetting = process.env.QQBOT_GROUP_CURRENT_ONLY;
-    process.env.QQBOT_GROUP_CURRENT_ONLY = 'false';
-    let historyQuote;
-    try {
-        historyQuote = await run({ messageId: 'history-rendered', refMsgIdx: 'history-ref',
-            msgType: 103, content: 'history-enabled', msgElements: [{ content: bundle(0) }] });
-    } finally {
-        if (previousCurrentOnlySetting === undefined) delete process.env.QQBOT_GROUP_CURRENT_ONLY;
-        else process.env.QQBOT_GROUP_CURRENT_ONLY = previousCurrentOnlySetting;
-    }
-    assert.equal(historyQuote.state.quoteFilter.reason, 'history-enabled');
+    const historyQuote = await run({ messageId: 'history-rendered', refMsgIdx: 'history-ref',
+        msgType: 103, content: 'history-enabled', msgElements: [{ content: bundle(0) }] });
     assert.match(historyQuote.state.quote.rawContent, /record-1[\s\S]*record-5/u);
     const indexedQuote = await run({ messageId: 'indexed-rendered', refMsgIdx: 'indexed-ref',
         msgType: 103, content: 'indexed reference',
         msgElements: [{ content: bundle(0), msg_idx: 'indexed-ref' }] });
-    assert.equal(indexedQuote.state.quoteFilter.reason, 'indexed-element');
     assert.match(indexedQuote.state.quote.rawContent, /record-1[\s\S]*record-5/u);
     const bareQuote = await run({ messageId: 'bare-rendered', refMsgIdx: 'bare-ref', msgType: 103,
         content: 'bare reference', msgElements: [{ content: 'plain quoted text' }] });
-    assert.equal(bareQuote.state.quoteFilter.reason, 'no-rendered-bundle');
     assert.equal(bareQuote.state.quote.rawContent, 'plain quoted text');
     const anchoredQuote = await run({ messageId: 'anchored-rendered', refMsgIdx: 'anchored-ref', msgType: 103,
         content: 'anchored test', msgElements: [{ content: 'body prefix [消息内容] remains body' }] });
-    assert.equal(anchoredQuote.state.quoteFilter.reason, 'no-rendered-bundle');
     assert.equal(anchoredQuote.state.quote.rawContent, 'body prefix [消息内容] remains body');
 
-    assert.ok(downloads.every((url) => !/record-[1-5]\.png/u.test(url)),
-        'URLs from dropped or unselected rendered records are never downloaded');
 });
 
 test('QQ rendered image records recover only complete HTTPS images from the current explicit quote', () => {

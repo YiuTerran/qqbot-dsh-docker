@@ -6,14 +6,14 @@ qq-bot 使用专用工具调用 Gensokyo-MCP；桥将请求变成虚拟 OneBot v
 
 两个 fork 固定为子模块：`third_party/gensokyo-mcp`、`third_party/sealdice-core`。初始化使用 `git submodule update --init --recursive`。海豹嵌套资源按其自己的 gitlink 检出，不改变 UI。
 
-镜像分别为 `tryao/qqbot-dsh:v0.9.0`、`tryao/gensokyo-mcp:v0.1.0`、`tryao/sealdice-core:v1.6.2-bridge.1`，只使用版本标签，没有 latest。主镜像不包含两个 Go 项目源码或运行程序。
+镜像分别为 `tryao/qqbot-dsh:v0.10.0`、`tryao/gensokyo-mcp:v0.1.0`、`tryao/sealdice-core:v1.6.2-bridge.1`，只使用版本标签，没有 latest。主镜像不包含两个 Go 项目源码或运行程序。
 
 ## 启动
 
 保留当前聊天凭据。在 `.env` 中配置三份不同的随机服务密钥；不要复用 QQ/LLM 密钥：
 
 ```dotenv
-IMAGE_TAG=v0.9.0
+IMAGE_TAG=v0.10.0
 QQBOT_ONEBOT_ENABLED=true
 QQBOT_ONEBOT_MCP_URL=http://gensokyo-mcp:8090/mcp
 QQBOT_ONEBOT_BACKENDS=sealdice

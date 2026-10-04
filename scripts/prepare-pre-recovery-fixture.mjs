@@ -45,7 +45,7 @@ await edit('transport/inbound.js', (source) => {
         "import { finishContentRiskRecovery, getHistorySnapshot, isHistorySnapshotCurrent, registerRecoveryContext } from '/opt/qqbot-defaults/qqbot-session-recovery.mjs';\n",
         '', 'inbound recovery import');
     source = replaceOnce(source, [
-        '    // Chat-only group-history epoch guard v1.',
+        '    // Chat-only history snapshot epoch guard v1.',
         '    const historySnapshot = getHistorySnapshot(mwState.history);',
         '    if (historySnapshot && !isHistorySnapshotCurrent(mwState.history)) mwState.history = [];',
     ].join('\n'), '', 'inbound history epoch guard');

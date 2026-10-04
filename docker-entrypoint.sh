@@ -42,7 +42,6 @@ if [ -n "$image_api_key" ] || [ -n "$image_api_base_url" ] || [ -n "$image_model
 fi
 
 QQBOT_MARKDOWN_ENABLED=${QQBOT_MARKDOWN_ENABLED:-true}
-QQBOT_GROUP_CURRENT_ONLY=${QQBOT_GROUP_CURRENT_ONLY:-true}
 QQBOT_IMAGE_USER_HOURLY_LIMIT=${QQBOT_IMAGE_USER_HOURLY_LIMIT:-10}
 QQBOT_MARKDOWN_USER_HOURLY_LIMIT=${QQBOT_MARKDOWN_USER_HOURLY_LIMIT:-30}
 QQBOT_IMAGE_MAX_CONCURRENT=${QQBOT_IMAGE_MAX_CONCURRENT:-2}
@@ -51,11 +50,7 @@ if [ "$QQBOT_MARKDOWN_ENABLED" != "true" ] && [ "$QQBOT_MARKDOWN_ENABLED" != "fa
     echo "[entrypoint] QQBOT_MARKDOWN_ENABLED must be true or false" >&2
     exit 64
 fi
-if [ "$QQBOT_GROUP_CURRENT_ONLY" != "true" ] && [ "$QQBOT_GROUP_CURRENT_ONLY" != "false" ]; then
-    echo "[entrypoint] QQBOT_GROUP_CURRENT_ONLY must be true or false" >&2
-    exit 64
-fi
-export QQBOT_MARKDOWN_ENABLED QQBOT_GROUP_CURRENT_ONLY QQBOT_IMAGE_USER_HOURLY_LIMIT QQBOT_MARKDOWN_USER_HOURLY_LIMIT
+export QQBOT_MARKDOWN_ENABLED QQBOT_IMAGE_USER_HOURLY_LIMIT QQBOT_MARKDOWN_USER_HOURLY_LIMIT
 export QQBOT_IMAGE_MAX_CONCURRENT QQBOT_MARKDOWN_MAX_CONCURRENT
 
 # Validate route syntax and resource settings before touching persistent state.
@@ -138,6 +133,22 @@ if [ ! -e /data/AGENTS.md ]; then
     install -o node -g node -m 0644 /opt/qqbot-defaults/AGENTS.md /data/AGENTS.md
 fi
 
+# Upgrade only the exact stock instructions shipped by v0.9.0. A customized,
+# symlinked, or read-only AGENTS.md remains user-owned and is never replaced.
+previous_stock_agents_sha256=17aa60a400c6c541e11d21da1eb527ebd5330791e646d8e6ca4eb02c8ac2b02b
+if [ -f /data/AGENTS.md ] && [ ! -L /data/AGENTS.md ] && [ -r /data/AGENTS.md ] && [ -w /data/AGENTS.md ]; then
+    current_agents_sha256=$(sha256sum /data/AGENTS.md | cut -d ' ' -f 1)
+    if [ "$current_agents_sha256" = "$previous_stock_agents_sha256" ]; then
+        agents_migration_tmp="/data/.AGENTS.md.$$"
+        if install -o node -g node -m 0644 /opt/qqbot-defaults/AGENTS.md "$agents_migration_tmp" \
+            && mv -f "$agents_migration_tmp" /data/AGENTS.md; then
+            chown node:node /data/AGENTS.md
+        else
+            rm -f "$agents_migration_tmp" || true
+        fi
+    fi
+fi
+
 # Store the QQ plugin's transport cache in the persistent data volume.
 media_store=/data/qqbot-media
 
@@ -150,11 +161,11 @@ if [ ! -e "$media_store" ]; then
 fi
 chown node:node "$media_store"
 
-# Existing named volumes retain the originally seeded plugin. Apply the strict
-# chat policy before launch; diagnostics may degrade, but policy must not.
+# Existing named volumes retain the originally seeded plugin. Apply the chat
+# policy and upgrade migrations before launch; policy errors stop startup.
 qqbot_dist=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
 if [ ! -d "$qqbot_dist" ]; then
-    echo "[entrypoint] Pinned QQ plugin is missing; refusing to start without the chat-only policy" >&2
+    echo "[entrypoint] Pinned QQ plugin is missing; refusing to start without the qqbot runtime policy" >&2
     exit 78
 fi
 node /usr/local/lib/enforce-chat-only.mjs "$qqbot_dist"

@@ -15,6 +15,5 @@ scripts/*
 !scripts/link-global-bins.mjs
 !scripts/enforce-chat-only.mjs
 !scripts/enforce-web-search.mjs
-!scripts/enforce-model-context.mjs
 .workbuddy/
 /third_party

@@ -44,6 +44,21 @@ if (thinkingOnly) {
 // Reverse the newer generation layers before reproducing the historical
 // concurrency layout. Thinking-only fixtures keep these current layers.
 await edit('transport/inbound.js', (source) => {
+    if (source.includes('// Chat-only deferred image prompt metadata v1.')) {
+        source = replaceOnce(source,
+            "import { renderDeferredImagePromptMetadata } from '/opt/qqbot-defaults/qqbot-pending-images.mjs';\n",
+            '', 'deferred image prompt metadata import');
+        source = replaceOnce(source,
+            '    const deferredImagePromptMetadata = renderDeferredImagePromptMetadata(getMergedGenerationRequests(ctx));\n    // Chat-only deferred image prompt metadata v1.\n',
+            '', 'deferred image prompt metadata binding');
+        source = replaceOnce(source,
+            "const requestBody = [documentBody, deferredImagePromptMetadata, generationMetadata, onebotMetadata].filter(Boolean).join('\\n\\n');",
+            "const requestBody = [documentBody, generationMetadata, onebotMetadata].filter(Boolean).join('\\n\\n');",
+            'deferred image prompt request body');
+    }
+    else if (source.includes('renderDeferredImagePromptMetadata') || source.includes('deferredImagePromptMetadata')) {
+        throw new Error('pre-concurrency fixture found partial deferred image prompt metadata');
+    }
     if (source.includes('// Chat-only OneBot provenance v1.')) {
         source = replaceOnce(source,
             "import { beginOnebotTurn, endOnebotTurn, renderOnebotRequestMetadata } from '/opt/qqbot-defaults/qqbot-onebot-scope.mjs';\n",
@@ -74,36 +89,6 @@ await edit('transport/inbound.js', (source) => {
     }
     else if (source.includes('beginOnebotTurn') || source.includes('onebotMetadata')) {
         throw new Error('pre-concurrency fixture found partial OneBot provenance');
-    }
-    if (source.includes('// Chat-only context diagnostics v1.')) {
-        source = replaceOnce(source,
-            "import { logContextInbound, logContextBinding } from '/opt/qqbot-defaults/qqbot-context-diagnostics.mjs';\n",
-            '', 'context diagnostics import');
-        source = replaceOnce(source,
-            '    // Chat-only context diagnostics v1.\n    logContextInbound(ctx, getMergedGenerationRequests(ctx), agentBody);\n',
-            '', 'context diagnostics call');
-        source = replaceOnce(source,
-            '    // Chat-only context binding diagnostics v1.\n    logContextBinding(chatOnlyAgent, requestBody, agentBody);\n',
-            '', 'context binding diagnostics call');
-    }
-    else if (source.includes('logContextInbound') || source.includes('logContextBinding')) {
-        throw new Error('pre-concurrency fixture found partial context diagnostics');
-    }
-    if (source.includes('// Chat-only group model context v1.')) {
-        source = replaceOnce(source,
-            "import { beginGroupModelContext, endGroupModelContext } from '/opt/qqbot-defaults/qqbot-model-context.mjs';\n",
-            '', 'group model context import');
-        source = replaceOnce(source,
-            '    let modelContextTurn;\n', '', 'group model context declaration');
-        source = replaceOnce(source,
-            '    // Chat-only group model context v1.\n    modelContextTurn = beginGroupModelContext(chatOnlyAgent, scope, documentTurn);\n',
-            '', 'group model context binding');
-        source = replaceOnce(source,
-            '        endGroupModelContext(chatOnlyAgent, modelContextTurn);\n',
-            '', 'group model context cleanup');
-    }
-    else if (source.includes('beginGroupModelContext') || source.includes('modelContextTurn')) {
-        throw new Error('pre-concurrency fixture found partial group model context guard');
     }
     if (source.includes('// Chat-only lazy quoted image grants v1.')) {
         source = replaceOnce(source,
@@ -274,14 +259,15 @@ await edit('middleware/attachment.js', (source) => {
 });
 
 await edit('transport/attachment.js', (source) => {
-    if (!source.includes('// Chat-only generation attachment provenance v1.')) {
-        if (source.includes('sourceUrl: normalizeUrl(att.url)'))
+    const marker = '// Chat-only attachment source URL v2.';
+    if (!source.includes(marker)) {
+        if (source.includes('sourceUrl: att.url'))
             throw new Error('pre-concurrency fixture found partial generation attachment provenance');
         return source;
     }
     return replaceOnce(source, [
-        '        // Chat-only generation attachment provenance v1.',
-        '        results.push({ filename: att.filename, contentType, localPath, sourceUrl: normalizeUrl(att.url) });',
+        '        // Chat-only attachment source URL v2.',
+        '        results.push({ filename: att.filename, contentType, localPath, sourceUrl: att.url });',
     ].join('\n'), '        results.push({ filename: att.filename, contentType, localPath });', 'generation attachment provenance');
 });
 
