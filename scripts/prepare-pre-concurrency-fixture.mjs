@@ -41,6 +41,78 @@ if (thinkingOnly) {
     process.exit(0);
 }
 
+// Restore the pre-recent-image vision layout before older upgrade fixtures
+// reverse its v3/v2 layers. Reject incomplete new layers rather than making a
+// synthetic legacy fixture that still imports a modern helper.
+await edit('media/vision-tool.js', (source) => {
+    const memoryMarker = '// Chat-only recent image bytes stay in memory v1.';
+    if (source.includes(memoryMarker)) {
+        const current = [
+            memoryMarker,
+            '            let text;',
+            "            if (image.startsWith('qqbot-image:')) {",
+            '                text = await withMemoryVisionImage(attachments, loaded, exec.signal, (ref) =>',
+            '                    callVision(llm, vision, prompt ?? vision.defaultPrompt, ref, exec.signal));',
+            '            }',
+            '            else {',
+            '                const ref = await attachments.saveImage({',
+            '                    data: loaded.data,',
+            '                    mediaType: loaded.mediaType,',
+            '                    name: /^https?:\\/\\//i.test(image) ? undefined : basename(image),',
+            '                });',
+            '                text = await callVision(llm, vision, prompt ?? vision.defaultPrompt, ref, exec.signal);',
+            '            }',
+        ].join('\n');
+        const previous = [
+            '            const ref = await attachments.saveImage({',
+            '                data: loaded.data,',
+            '                mediaType: loaded.mediaType,',
+            '                name: /^https?:\\/\\//i.test(image) ? undefined : basename(image),',
+            '            });',
+            '            const text = await callVision(llm, vision, prompt ?? vision.defaultPrompt, ref, exec.signal);',
+        ].join('\n');
+        source = replaceOnce(source, current, previous, 'recent-image memory vision branch');
+        source = replaceOnce(source,
+            "import { withMemoryVisionImage } from '/opt/qqbot-defaults/qqbot-memory-images.mjs';\n",
+            '', 'memory vision helper import');
+    }
+    else if (source.includes('withMemoryVisionImage') || source.includes('qqbot-memory-images.mjs')) {
+        throw new Error('pre-concurrency fixture found partial memory vision handling');
+    }
+    const marker = '// Chat-only image schema: current, quoted, public HTTPS, or recent QQ image references v4.';
+    if (source.includes(marker)) {
+        const current = [
+            marker,
+            "const DESCRIPTION = 'Inspect one image and return the text the user needs. The image must be either an absolute path '",
+            "    + 'of a current or explicitly quoted QQ image inside the QQ media directory, a public HTTPS image URL, or the exact '",
+            "    + 'imageRef capability listed in recentImages for the matching original request. Recent refs are only for explicit '",
+            "    + 'image analysis, OCR, image content questions, or edits. Other local paths and non-HTTPS URLs are forbidden. '",
+            "    + 'Current and explicitly quoted images and user-provided URLs take priority; never fall back to a recent image when '",
+            "    + 'the selected source fails. Ask which image to edit when multiple recent candidates are ambiguous. Always pass an '",
+            "    + 'explicit `prompt` with a precise instruction instead of relying on the generic default.';",
+        ].join('\n');
+        const previous = [
+            '// Chat-only image schema: scoped QQ media paths or public HTTPS image URLs v3.',
+            "const DESCRIPTION = 'Inspect one image and return the text the user needs. The image must be either an absolute path '",
+            "    + 'of an image attached to or explicitly quoted in the current QQ message and stored inside the QQ media directory, '",
+            "    + 'or a public HTTPS image URL. Other local paths, non-HTTPS URLs, and non-image files are forbidden. '",
+            "    + 'Use this when the user references an image, or when a task needs OCR, chart/diagram reading, screenshot or UI analysis, '",
+            "    + 'translation of image text, or photo understanding. Always pass an explicit `prompt` with a precise '",
+            "    + 'instruction (e.g. \"transcribe all text\", \"extract the table as CSV\", \"translate the text into Chinese\") '",
+            "    + 'instead of relying on the generic default.';",
+        ].join('\n');
+        source = replaceOnce(source, current, previous, 'recent-image vision schema');
+        source = replaceOnce(source,
+            "                    description: 'Current or explicitly quoted QQ image path inside the QQ media directory, public HTTPS image URL, or exact recentImages imageRef for the matching original request.',",
+            "                    description: 'Absolute path of a current-message or explicitly quoted image inside the QQ media directory, or a public HTTPS image URL.',",
+            'recent-image vision parameter');
+    }
+    else if (source.includes('recentImages') || source.includes('qqbot-image:')) {
+        throw new Error('pre-concurrency fixture found partial recent-image vision schema');
+    }
+    return source;
+});
+
 // Reverse the newer generation layers before reproducing the historical
 // concurrency layout. Thinking-only fixtures keep these current layers.
 await edit('transport/inbound.js', (source) => {

@@ -5,6 +5,7 @@ import {
     getGenerationImageAttachment,
     getGenerationRequest,
     getGenerationRequestSignal,
+    getGenerationRecentImageAttachment,
     trackGenerationOperation,
 } from './qqbot-generation-scope.mjs';
 import { resolvePublicHttpAddresses } from './qqbot-web-pages.mjs';
@@ -591,7 +592,8 @@ function executionFailure(exec, args, kind, route) {
             return 'Image prompts must be non-empty text of at most 4000 characters.';
         }
         if (args.imageAttachmentId !== undefined
-            && !getGenerationImageAttachment(scope, args.requestId, args.imageAttachmentId)) {
+            && !getGenerationImageAttachment(scope, args.requestId, args.imageAttachmentId)
+            && !getGenerationRecentImageAttachment(scope, args.requestId, args.imageAttachmentId)) {
             return 'This imageAttachmentId is not authorized for that original QQ message.';
         }
     }
@@ -655,7 +657,9 @@ async function performImageTask({ scope, request, args, exec, service, quota, se
     const assertActive = () => generationScopeFailure(scope, 'image') === undefined;
     const imageGrant = args.imageAttachmentId
         ? getGenerationImageAttachment(scope, args.requestId, args.imageAttachmentId)
+            ?? getGenerationRecentImageAttachment(scope, args.requestId, args.imageAttachmentId)
         : undefined;
+    const isRecentImage = imageGrant?.recent === true;
     let acquired;
     try {
         acquired = await quota.tryAcquire({ ownerId: request.ownerId, type: 'image' });
@@ -686,7 +690,10 @@ async function performImageTask({ scope, request, args, exec, service, quota, se
                 // Source URL is taken only from the request-scoped grant. The
                 // downloader validates public HTTPS and image bytes; no file is
                 // written for a quoted base image, even on a failed edit.
-                imageBytes = Buffer.from(await loadChatImageBytes(imageGrant.localPath ?? imageGrant.sourceUrl, maxBytes,
+                const source = isRecentImage
+                    ? `qqbot-image:${args.requestId}:${imageGrant.imageAttachmentId}`
+                    : imageGrant.localPath ?? imageGrant.sourceUrl;
+                imageBytes = Buffer.from(await loadChatImageBytes(source, maxBytes,
                     exec.sourceExecution ?? exec, operationSignal));
                 if (operationSignal.aborted) throw operationSignal.reason ?? new Error('cancelled');
                 if (remote) logDownloadDiagnostics(imageGrant, 'success');
@@ -879,7 +886,7 @@ function imageToolSchema() {
                 maxLength: MAX_PROMPT_CHARS,
                 description: 'Final image prompt (at most 4000 characters). Before calling, use the matched original QQ request and its explicit quote only: clarify short or vague visual descriptions with concise subject, composition, lighting, palette, and style details; preserve every explicit subject, style, text, quantity, and prohibition, add no unrequested theme or style, leave detailed prompts or requests to keep wording unchanged as written, and for edits describe only requested changes while preserving everything else. Prompt polishing alone does not authorize image generation.',
             },
-            imageAttachmentId: { type: 'string', minLength: 1, maxLength: 64, description: 'Required for editing: opaque imageAttachmentId from that same original request. Omit only for a requested new image. If an edit has no authorized base image, ask the user to attach it again instead of generating a replacement scene.' },
+            imageAttachmentId: { type: 'string', minLength: 1, maxLength: 64, description: 'Required for editing: plain opaque imageAttachmentId from images or recentImages on that same original request. Omit only for a requested new image. If multiple recent images could be the base, ask which one before calling.' },
         },
         required: ['requestId', 'prompt'],
         additionalProperties: false,

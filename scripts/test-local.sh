@@ -10,15 +10,18 @@ recovery_policy_test="${repo_root}/scripts/test-session-recovery.mjs"
 provider_errors_test="${repo_root}/scripts/test-provider-errors.mjs"
 concurrency_test="${repo_root}/scripts/test-concurrency.mjs"
 generation_test="${repo_root}/scripts/test-generation.mjs"
+recent_image_generation_test="${repo_root}/scripts/test-recent-image-generation.mjs"
 generation_scope_test="${repo_root}/scripts/test-generation-scope.mjs"
 generation_quota_test="${repo_root}/scripts/test-generation-quotas.mjs"
 pending_images_test="${repo_root}/scripts/test-pending-images.mjs"
 pending_images_native_test="${repo_root}/scripts/test-pending-images-native.mjs"
+memory_images_test="${repo_root}/scripts/test-memory-images.mjs"
 onebot_native_test="${repo_root}/scripts/test-onebot-native.mjs"
 recovery_upgrade_test="${repo_root}/scripts/test-recovery-upgrade.mjs"
 pre_recovery_fixture="${repo_root}/scripts/prepare-pre-recovery-fixture.mjs"
 pre_concurrency_fixture="${repo_root}/scripts/prepare-pre-concurrency-fixture.mjs"
 previous_stock_agents_fixture="${repo_root}/scripts/fixtures/agents-v0.9.0-stock.md"
+previous_stock_agents_v0_10_fixture="${repo_root}/scripts/fixtures/agents-v0.10.0-stock.md"
 persistent_reset_probe="${repo_root}/scripts/test-persistent-reset.mjs"
 suffix="$(date +%s)-$$"
 data_volume="dsh-qqbot-test-data-${suffix}"
@@ -37,6 +40,8 @@ pre_concurrency_data_volume="dsh-qqbot-test-pre-concurrency-data-${suffix}"
 partial_concurrency_data_volume="dsh-qqbot-test-partial-concurrency-data-${suffix}"
 stock_agents_data_volume="dsh-qqbot-test-stock-agents-data-${suffix}"
 readonly_stock_agents_data_volume="dsh-qqbot-test-readonly-stock-agents-data-${suffix}"
+stock_agents_v0_10_data_volume="dsh-qqbot-test-stock-agents-v0-10-data-${suffix}"
+readonly_stock_agents_v0_10_data_volume="dsh-qqbot-test-readonly-stock-agents-v0-10-data-${suffix}"
 container="dsh-qqbot-test-${suffix}"
 instructions_file="$(mktemp)"
 incompatible_log="$(mktemp)"
@@ -54,7 +59,7 @@ on_error() {
 cleanup() {
     log "Cleaning up temporary container, volumes, and instruction file"
     docker rm --force "$container" >/dev/null 2>&1 || true
-    docker volume rm "$data_volume" "$workspace_volume" "$override_data_volume" "$legacy_data_volume" "$dice_legacy_data_volume" "$incompatible_data_volume" "$media_guard_data_volume" "$search_env_data_volume" "$official_data_volume" "$no_search_data_volume" "$partial_recovery_data_volume" "$recovery_v1_data_volume" "$pre_concurrency_data_volume" "$partial_concurrency_data_volume" "$stock_agents_data_volume" "$readonly_stock_agents_data_volume" >/dev/null 2>&1 || true
+    docker volume rm "$data_volume" "$workspace_volume" "$override_data_volume" "$legacy_data_volume" "$dice_legacy_data_volume" "$incompatible_data_volume" "$media_guard_data_volume" "$search_env_data_volume" "$official_data_volume" "$no_search_data_volume" "$partial_recovery_data_volume" "$recovery_v1_data_volume" "$pre_concurrency_data_volume" "$partial_concurrency_data_volume" "$stock_agents_data_volume" "$readonly_stock_agents_data_volume" "$stock_agents_v0_10_data_volume" "$readonly_stock_agents_v0_10_data_volume" >/dev/null 2>&1 || true
     rm -f "$instructions_file"
     rm -f "$incompatible_log"
 }
@@ -101,6 +106,16 @@ if [[ ! -r "$previous_stock_agents_fixture" ]]; then
     exit 66
 fi
 
+if [[ ! -r "$previous_stock_agents_v0_10_fixture" ]]; then
+    echo "missing previous stock AGENTS.md fixture: $previous_stock_agents_v0_10_fixture" >&2
+    exit 66
+fi
+
+if [[ ! -r "$memory_images_test" ]]; then
+    echo "missing memory-only recent images regression script: $memory_images_test" >&2
+    exit 66
+fi
+
 if [[ ! -r "$provider_errors_test" ]]; then
     echo "missing provider errors regression script: $provider_errors_test" >&2
     exit 66
@@ -113,6 +128,11 @@ fi
 
 if [[ ! -r "$generation_test" ]]; then
     echo "missing image generation and Markdown regression script: $generation_test" >&2
+    exit 66
+fi
+
+if [[ ! -r "$recent_image_generation_test" ]]; then
+    echo "missing recent image editing regression script: $recent_image_generation_test" >&2
     exit 66
 fi
 
@@ -379,6 +399,25 @@ docker run --rm --network none \
     --mount "type=bind,src=${previous_stock_agents_fixture},dst=/tmp/agents-v0.9.0-stock.md,readonly" \
     "$IMAGE" sh -ec 'cmp /data/AGENTS.md /tmp/agents-v0.9.0-stock.md'
 
+docker run --rm --network none --entrypoint sh \
+    --volume "${stock_agents_v0_10_data_volume}:/data" \
+    --mount "type=bind,src=${previous_stock_agents_v0_10_fixture},dst=/tmp/agents-v0.10.0-stock.md,readonly" \
+    "$IMAGE" -ec '
+        cp -a /opt/dsh-seed/. /data/
+        : > /data/.initialized
+        cp /tmp/agents-v0.10.0-stock.md /data/AGENTS.md
+        chmod 0644 /data/AGENTS.md
+    '
+docker run --rm --network none \
+    --volume "${stock_agents_v0_10_data_volume}:/data" \
+    "$IMAGE" sh -ec 'cmp /data/AGENTS.md /opt/qqbot-defaults/AGENTS.md'
+
+docker run --rm --network none \
+    --volume "${readonly_stock_agents_v0_10_data_volume}:/data" \
+    --mount "type=bind,src=${previous_stock_agents_v0_10_fixture},dst=/data/AGENTS.md,readonly" \
+    --mount "type=bind,src=${previous_stock_agents_v0_10_fixture},dst=/tmp/agents-v0.10.0-stock.md,readonly" \
+    "$IMAGE" sh -ec 'cmp /data/AGENTS.md /tmp/agents-v0.10.0-stock.md'
+
 # The command is deliberately finite: fixture credentials are supplied only to
 # the local SDK probe, never real QQ credentials, so no QR login is attempted.
 log "Preparing finite first-run validation container"
@@ -396,10 +435,12 @@ docker create \
     --mount "type=bind,src=${provider_errors_test},dst=/tmp/test-provider-errors.mjs,readonly" \
     --mount "type=bind,src=${concurrency_test},dst=/tmp/test-concurrency.mjs,readonly" \
     --mount "type=bind,src=${generation_test},dst=/tmp/test-generation.mjs,readonly" \
+    --mount "type=bind,src=${recent_image_generation_test},dst=/tmp/test-recent-image-generation.mjs,readonly" \
     --mount "type=bind,src=${generation_scope_test},dst=/tmp/test-generation-scope.mjs,readonly" \
     --mount "type=bind,src=${generation_quota_test},dst=/tmp/test-generation-quotas.mjs,readonly" \
     --mount "type=bind,src=${pending_images_test},dst=/tmp/test-pending-images.mjs,readonly" \
     --mount "type=bind,src=${pending_images_native_test},dst=/tmp/test-pending-images-native.mjs,readonly" \
+    --mount "type=bind,src=${memory_images_test},dst=/tmp/test-memory-images.mjs,readonly" \
     --mount "type=bind,src=${onebot_native_test},dst=/tmp/test-onebot-native.mjs,readonly" \
     --mount "type=bind,src=${recovery_upgrade_test},dst=/tmp/test-recovery-upgrade.mjs,readonly" \
     --mount "type=bind,src=${pre_recovery_fixture},dst=/tmp/prepare-pre-recovery-fixture.mjs,readonly" \
@@ -483,10 +524,12 @@ docker create \
         QQBOT_HISTORY_SNAPSHOT_MODULE=/opt/qqbot-defaults/qqbot-history-snapshot.mjs node --test /tmp/test-group-history.mjs
         QQBOT_PENDING_IMAGES_MODULE=/opt/qqbot-defaults/qqbot-pending-images.mjs QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs node --test /tmp/test-pending-images.mjs
         node --test /tmp/test-pending-images-native.mjs
+        node --test /tmp/test-memory-images.mjs
         QQBOT_RECOVERY_MODULE=/opt/qqbot-defaults/qqbot-session-recovery.mjs QQBOT_HISTORY_SNAPSHOT_MODULE=/opt/qqbot-defaults/qqbot-history-snapshot.mjs QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-session-recovery.mjs
         QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-provider-errors.mjs
         QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-concurrency.mjs
         QQBOT_GENERATION_MODULE=/opt/qqbot-defaults/qqbot-generation.mjs QQBOT_GENERATION_SCOPE_MODULE=/opt/qqbot-defaults/qqbot-generation-scope.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test --test-timeout=30000 /tmp/test-generation.mjs
+        QQBOT_GENERATION_MODULE=/opt/qqbot-defaults/qqbot-generation.mjs QQBOT_GENERATION_SCOPE_MODULE=/opt/qqbot-defaults/qqbot-generation-scope.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test --test-timeout=30000 /tmp/test-recent-image-generation.mjs
         QQBOT_GENERATION_SCOPE_MODULE=/opt/qqbot-defaults/qqbot-generation-scope.mjs node --test /tmp/test-generation-scope.mjs
         QQBOT_GENERATION_QUOTA_MODULE=/opt/qqbot-defaults/qqbot-generation-quotas.mjs node --test /tmp/test-generation-quotas.mjs
         QQBOT_ONEBOT_MODULE_ROOT=/opt/qqbot-defaults QQBOT_ONEBOT_PATCHER_SOURCE=/usr/local/lib/enforce-chat-only.mjs QQBOT_SDK_API_CLIENT_MODULE=/data/profiles/qqbot/node_modules/@tencent-connect/qqbot-nodejs/dist/protocol/api/api-client.js node --test /tmp/test-onebot-native.mjs

@@ -1,32 +1,43 @@
 // Deterministic provenance and lifetime tests for Phase 2 generation grants.
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const scopeUrl = process.env.QQBOT_GENERATION_SCOPE_MODULE
     ?? new URL('../defaults/qqbot-generation-scope.mjs', import.meta.url).href;
+const scopeModuleUrl = scopeUrl instanceof URL ? scopeUrl
+    : scopeUrl.startsWith('file:') ? new URL(scopeUrl) : pathToFileURL(resolve(scopeUrl));
 const {
     beginGenerationTurn,
     endGenerationTurn,
     generationRequestMetadata,
     generationScopeFailure,
     getGenerationImageAttachment,
+    getGenerationRecentImageAttachment,
+    getGenerationRecentImageReference,
     getGenerationRequest,
     getGenerationTurn,
     renderGenerationRequestMetadata,
     trackGenerationOperation,
+    claimGenerationRecentImage,
 } = await import(scopeUrl);
+const { createPendingImagePromptCache } = await import(new URL('./qqbot-pending-images.mjs', scopeModuleUrl));
+
+const APP = '123456789';
 
 const imageA = 'https://cdn.example.test/first.png';
 const imageB = 'https://cdn.example.test/quoted-b.jpg';
 const imageC = 'https://cdn.example.test/quoted-c.png';
 
-function originalRequest({ ownerId, groupId, msgId, text = '', currentAttachments = [], quotedAttachments = [] }) {
+function originalRequest({ ownerId, groupId, msgId, text = '', currentAttachments = [], quotedAttachments = [], recentImageSnapshot }) {
     return {
         ownerId,
         replyTarget: { scope: 'group', targetId: groupId, msgId },
         text,
         currentAttachments,
         quotedAttachments,
+        recentImageSnapshot,
     };
 }
 
@@ -49,6 +60,136 @@ function metadataFor(scope, ownerId) {
     assert.ok(metadata);
     return { request, metadata };
 }
+
+function recentSnapshot(cache, { ownerId = 'user-a', groupId = 'group-a', sourceId = 'image-source', filenames = ['recent.png'] } = {}) {
+    const source = {
+        appId: APP,
+        kind: 'group',
+        senderId: ownerId,
+        groupOpenid: groupId,
+        messageId: sourceId,
+        content: '',
+        attachments: filenames.map((filename, index) => image(`https://cdn.example.test/${sourceId}-${index}.png`, filename)),
+        replyTarget: { scope: 'group', targetId: groupId, msgId: sourceId },
+    };
+    assert.equal(cache.capture(source, APP), true);
+    const prompt = { ...source, messageId: `${sourceId}-prompt`, content: 'use these recent images', attachments: [] };
+    return { source, prompt, snapshot: cache.snapshot(prompt, APP, { mention: { wasMentioned: true } }) };
+}
+
+test('recent-image grants use branded snapshots, stay separate from current image IDs, and hide source URLs', async () => {
+    const cache = createPendingImagePromptCache();
+    const { snapshot } = recentSnapshot(cache);
+    assert.ok(snapshot);
+    const agent = {};
+    const scope = beginGenerationTurn(agent, [originalRequest({
+        ownerId: 'user-a', groupId: 'group-a', msgId: 'prompt-a', text: 'ordinary chat',
+        recentImageSnapshot: snapshot,
+    })], [], { documentScope: activeDocumentScope(), media: { enabled: true, maxMB: 2 } });
+    const { request, metadata } = metadataFor(scope, 'user-a');
+
+    assert.deepEqual(metadata.images, [], 'recent candidates are not current or quoted generation image IDs');
+    assert.equal(metadata.recentImages.length, 1, 'recent grants are available without an image-generation API route');
+    assert.equal(metadata.recentImages[0].imageAttachmentId.length > 0, true);
+    assert.equal(metadata.recentImages[0].imageRef,
+        `qqbot-image:${request.requestId}:${metadata.recentImages[0].imageAttachmentId}`);
+    assert.equal(getGenerationRecentImageAttachment(scope, request.requestId,
+        metadata.recentImages[0].imageAttachmentId).maxBytes, 2 * 1024 * 1024);
+    assert.ok(getGenerationRecentImageReference(scope, metadata.recentImages[0].imageRef));
+    assert.ok(!renderGenerationRequestMetadata(scope).includes('https://cdn.example.test/'));
+    assert.equal(claimGenerationRecentImage(scope, 'some-other-request', metadata.recentImages[0].imageAttachmentId), false,
+        'candidate IDs cannot cross original request boundaries');
+
+    await endGenerationTurn(agent, scope);
+    assert.equal(getGenerationRecentImageAttachment(scope, request.requestId, metadata.recentImages[0].imageAttachmentId), undefined);
+    assert.equal((await import(new URL('./qqbot-pending-images.mjs', scopeModuleUrl))).recentImageSnapshotAvailable(snapshot), false,
+        'ending the original turn releases its snapshot capability');
+    cache.clear();
+});
+
+test('recent candidates yield to current or quoted images, explicit remote sources, disabled media, and document mode', async () => {
+    const cases = [
+        { text: 'please inspect this', currentAttachments: [image(imageA, 'current.png')] },
+        { text: 'please inspect this', quotedAttachments: [image(imageB, 'quoted.jpg')] },
+        { text: 'please inspect https://images.example/current.png' },
+        { text: 'please inspect http://images.example/current.png' },
+        { text: 'please inspect this', media: { enabled: false } },
+        { text: 'please inspect this', documentMode: true },
+    ];
+    for (const [index, entry] of cases.entries()) {
+        const cache = createPendingImagePromptCache();
+        const { snapshot } = recentSnapshot(cache, { sourceId: `priority-${index}` });
+        const agent = {};
+        const documentScope = activeDocumentScope({ documentMode: entry.documentMode === true });
+        const scope = beginGenerationTurn(agent, [originalRequest({
+            ownerId: 'user-a', groupId: 'group-a', msgId: `prompt-${index}`,
+            text: entry.text,
+            currentAttachments: entry.currentAttachments,
+            quotedAttachments: entry.quotedAttachments,
+            recentImageSnapshot: snapshot,
+        })], [], { documentScope, media: entry.media ?? { enabled: true } });
+        assert.deepEqual(generationRequestMetadata(scope)[0].recentImages, [], `case ${index} must not fall back to recent images`);
+        await endGenerationTurn(agent, scope);
+        cache.clear();
+    }
+});
+
+test('a batch claim is atomic across distinct snapshot identities and repeatable only for the same original', async () => {
+    const cache = createPendingImagePromptCache();
+    const { prompt, snapshot: firstSnapshot } = recentSnapshot(cache, { sourceId: 'atomic-source' });
+    const secondSnapshot = cache.snapshot(prompt, APP, { mention: { wasMentioned: true } });
+    assert.ok(firstSnapshot && secondSnapshot && firstSnapshot !== secondSnapshot);
+    const agent = {};
+    const scope = beginGenerationTurn(agent, [
+        originalRequest({ ownerId: 'user-a', groupId: 'group-a', msgId: 'atomic-a', recentImageSnapshot: firstSnapshot }),
+        originalRequest({ ownerId: 'user-a', groupId: 'group-a', msgId: 'atomic-b', recentImageSnapshot: secondSnapshot }),
+    ], [], { documentScope: activeDocumentScope(), media: { enabled: true } });
+    const first = metadataFor(scope, 'user-a');
+    const firstId = first.metadata.recentImages[0].imageAttachmentId;
+    const otherRequest = [...scope.requests.values()].find((request) => request.requestId !== first.request.requestId);
+    const otherMetadata = generationRequestMetadata(scope).find((entry) => entry.requestId === otherRequest.requestId);
+    assert.equal(getGenerationRecentImageAttachment(scope, otherRequest.requestId, firstId), undefined);
+    assert.equal(claimGenerationRecentImage(scope, first.request.requestId, firstId), true);
+    assert.equal(claimGenerationRecentImage(scope, first.request.requestId, firstId), true,
+        'the same original can repeat tool reads after a successful claim');
+    assert.equal(generationRequestMetadata(scope).find((entry) => entry.requestId === otherRequest.requestId).recentImages.length, 0,
+        'the other snapshot becomes unavailable after the first atomic claim');
+    assert.equal(claimGenerationRecentImage(scope, otherRequest.requestId,
+        otherMetadata.recentImages[0].imageAttachmentId), false);
+
+    await endGenerationTurn(agent, scope);
+    cache.clear();
+});
+
+test('recent grants expire and /new revokes their opaque references', async () => {
+    let time = 0;
+    const cache = createPendingImagePromptCache({ ttlMs: 100, now: () => time,
+        setTimeout(callback, delay) { return { callback, at: time + delay, unref() {} }; }, clearTimeout() {} });
+    const { source, snapshot } = recentSnapshot(cache, { sourceId: 'expiry-source' });
+    const agent = {};
+    const scope = beginGenerationTurn(agent, [originalRequest({
+        ownerId: 'user-a', groupId: 'group-a', msgId: 'expiry-prompt', recentImageSnapshot: snapshot,
+    })], [], { documentScope: activeDocumentScope(), media: { enabled: true } });
+    const { request, metadata } = metadataFor(scope, 'user-a');
+    const candidateId = metadata.recentImages[0].imageAttachmentId;
+    time = 101;
+    assert.equal(getGenerationRecentImageAttachment(scope, request.requestId, candidateId), undefined);
+    await endGenerationTurn(agent, scope);
+    cache.clear();
+
+    const resetCache = createPendingImagePromptCache();
+    const reset = recentSnapshot(resetCache, { sourceId: 'reset-source' });
+    const resetAgent = {};
+    const resetScope = beginGenerationTurn(resetAgent, [originalRequest({
+        ownerId: 'user-a', groupId: 'group-a', msgId: 'reset-prompt', recentImageSnapshot: reset.snapshot,
+    })], [], { documentScope: activeDocumentScope(), media: { enabled: true } });
+    const resetMeta = metadataFor(resetScope, 'user-a');
+    assert.equal(resetCache.clearForMessage(reset.source, APP), true);
+    assert.equal(getGenerationRecentImageReference(resetScope, resetMeta.metadata.recentImages[0].imageRef), undefined,
+        'a /new reset revokes its source snapshot immediately');
+    await endGenerationTurn(resetAgent, resetScope);
+    resetCache.clear();
+});
 
 test('generation metadata binds each merged original request and quoted image to its own owner and reply target', async (t) => {
     const agent = {};

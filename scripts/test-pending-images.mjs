@@ -12,11 +12,15 @@ const moduleUrl = (environmentName, relativePath) => {
 const pendingModule = await import(moduleUrl('QQBOT_PENDING_IMAGES_MODULE', '../defaults/qqbot-pending-images.mjs'));
 const concurrencyModule = await import(moduleUrl('QQBOT_CONCURRENCY_MODULE', '../defaults/qqbot-concurrency.mjs'));
 const {
+    claimRecentImageSnapshot,
     createPendingImageCaptureMiddleware,
     createPendingImageNewCommandCleanup,
     createPendingImagePromptCache,
     createPendingImagePromptMiddleware,
-    renderDeferredImagePromptMetadata,
+    isRecentImageSnapshot,
+    releaseRecentImageSnapshot,
+    recentImageSnapshotAvailable,
+    renderRecentImagePromptMetadata,
 } = pendingModule;
 const { createMergeConcurrencyGuard, getMergedGenerationRequests } = concurrencyModule;
 
@@ -68,61 +72,57 @@ function makeCache(options = {}) {
     return createPendingImagePromptCache(options);
 }
 
-test('an image-only group message is cached before mention handling and returns without downstream work', async () => {
+test('pure image messages are cached before mention handling and stop without downstream work', async () => {
     const cache = makeCache();
     const capture = createPendingImageCaptureMiddleware({ appId: APP, cache });
     const ctx = { message: groupMessage({
         content: `<@!${APP}>`, id: 'photo-source', attachments: [image('https://cdn.example/photo.png')],
     }), state: {} };
     let nextCalls = 0;
-    let modelCalls = 0;
-    let downloadCalls = 0;
-    let thinkingCalls = 0;
     ctx.stop = () => {};
-    await capture(ctx, async () => {
-        nextCalls++;
-        modelCalls++;
-        downloadCalls++;
-        thinkingCalls++;
-    });
+    await capture(ctx, async () => { nextCalls++; });
     assert.equal(nextCalls, 0);
-    assert.equal(modelCalls, 0);
-    assert.equal(downloadCalls, 0);
-    assert.equal(thinkingCalls, 0);
     assert.equal(ctx.state.qqbotPendingImageCaptured, true);
     assert.deepEqual(cache.inspect(ctx.message, APP), { count: 1, lastImageAt: cache.inspect(ctx.message, APP).lastImageAt });
 });
 
-test('only the same app, chat peer, and sender can consume, and group prompts need an actual bot mention', () => {
+test('only same app, peer, and sender share a snapshot; group text needs an actual bot mention', () => {
     const cache = makeCache();
     const source = groupMessage({ attachments: [image('https://cdn.example/a.png')] });
     assert.equal(cache.capture(source, APP), true);
-    assert.equal(cache.consume(groupMessage({ content: 'follow up' }), APP, { mention: { wasMentioned: false } }), undefined);
-    assert.equal(cache.consume(groupMessage({ senderId: 'user-b', content: 'follow up' }), APP, { mention: { wasMentioned: true } }), undefined);
-    assert.equal(cache.consume(groupMessage({ groupOpenid: 'group-b', content: 'follow up' }), APP, { mention: { wasMentioned: true } }), undefined);
-    assert.equal(cache.consume(groupMessage({ content: 'follow up' }), '987654321', { mention: { wasMentioned: true } }), undefined);
-    assert.equal(cache.consume(groupMessage({ content: `<@${APP}> /roll 1d20` }), APP, { mention: { wasMentioned: true } }), undefined,
-        'slash commands are not treated as image prompts');
-    assert.equal(cache.inspect(source, APP).count, 1, 'misses leave the original bucket pending');
-    const consumed = cache.consume(groupMessage({ content: `<@${APP}> describe this` }), APP, { mention: { wasMentioned: true } });
-    assert.equal(consumed.attachments.length, 1);
-    assert.equal(cache.consume(groupMessage({ content: `<@${APP}> describe this again` }), APP, { mention: { wasMentioned: true } }), undefined);
+    assert.equal(cache.snapshot(groupMessage({ content: 'follow up' }), APP, { mention: { wasMentioned: false } }), undefined);
+    assert.equal(cache.snapshot(groupMessage({ senderId: 'user-b', content: `<@${APP}> follow up` }), APP,
+        { mention: { wasMentioned: true } }), undefined);
+    assert.equal(cache.snapshot(groupMessage({ groupOpenid: 'group-b', content: `<@${APP}> follow up` }), APP,
+        { mention: { wasMentioned: true } }), undefined);
+    assert.equal(cache.snapshot(groupMessage({ content: `<@${APP}> /roll 1d20` }), APP,
+        { mention: { wasMentioned: true } }), undefined, 'slash commands are not prompts');
+    assert.equal(cache.snapshot(groupMessage({ appId: undefined, content: `<@${APP}> follow up` }), undefined,
+        { mention: { wasMentioned: true } }), undefined);
+    const snapshot = cache.snapshot(groupMessage({ content: `<@${APP}> describe this` }), APP,
+        { mention: { wasMentioned: true } });
+    assert.equal(snapshot.attachments.length, 1);
+    assert.equal(cache.size(), 1, 'creating a snapshot does not claim or remove the pending key');
+    assert.equal(recentImageSnapshotAvailable(snapshot), true);
 });
 
-test('private prompts consume without a mention and image-only messages keep only safe image metadata', () => {
+test('private prompts can snapshot without a mention and images contain only safe metadata', () => {
     const cache = makeCache();
     const source = c2cMessage({ attachments: [image('//cdn.example/picture.jpg', 'picture.jpg', '')] });
     assert.equal(cache.capture(source, APP), true, 'a reliable image extension covers absent MIME metadata');
-    const consumed = cache.consume(c2cMessage({ content: 'please describe it' }), APP);
-    assert.equal(consumed.attachments[0].url, 'https://cdn.example/picture.jpg');
-    assert.equal(consumed.attachments[0].filename, 'picture.jpg');
-    assert.equal(consumed.attachments[0].content_type, 'image', 'a reliable extension fallback reaches the image downloader');
-    assert.equal('localPath' in consumed.attachments[0], false);
-    assert.equal('path' in consumed.attachments[0], false);
-    assert.equal(consumed.attachments[0].qqbotDeferredPromptSource, 'previous-image-only-message');
+    const snapshot = cache.snapshot(c2cMessage({ content: 'please describe it' }), APP);
+    assert.equal(snapshot.attachments[0].url, 'https://cdn.example/picture.jpg');
+    assert.equal(snapshot.attachments[0].filename, 'picture.jpg');
+    assert.equal(snapshot.attachments[0].content_type, 'image');
+    assert.equal('localPath' in snapshot.attachments[0], false);
+    assert.equal('path' in snapshot.attachments[0], false);
+    assert.deepEqual(snapshot.sourceMessageIds, ['message-a']);
+    assert.equal(Object.isFrozen(snapshot), true);
+    assert.equal(Object.isFrozen(snapshot.attachments), true);
+    assert.equal(Object.isFrozen(snapshot.attachments[0]), true);
 });
 
-test('image recognition rejects text, other media, explicit non-image MIME, and unsafe URLs', () => {
+test('image recognition rejects captions, other media, unsupported metadata, and unsafe URLs', () => {
     const cases = [
         groupMessage({ content: `<@${APP}> keep this caption`, attachments: [image('https://cdn.example/a.png')] }),
         groupMessage({ attachments: [image('https://cdn.example/a.png'), { url: 'https://cdn.example/voice.ogg', filename: 'voice.ogg', content_type: 'audio/ogg' }] }),
@@ -142,17 +142,41 @@ test('image recognition rejects text, other media, explicit non-image MIME, and 
     assert.equal(cache.capture(groupMessage({ appId: undefined, attachments: [image('https://cdn.example/a.png')] }), undefined), false);
 });
 
-test('voice and document attachments are not mistaken for image-only input', () => {
+test('a same-sender non-image message closes the batch; the next pure image starts a fresh batch', () => {
     const cache = makeCache();
-    for (const attachment of [
-        { url: 'https://cdn.example/audio.ogg', filename: 'audio.ogg', content_type: 'audio/ogg' },
-        { url: 'https://cdn.example/notes.pdf', filename: 'notes.pdf', content_type: 'application/pdf' },
-    ]) {
-        assert.equal(cache.capture(groupMessage({ attachments: [attachment] }), APP), false);
-    }
+    cache.capture(groupMessage({ id: 'old', attachments: [image('https://cdn.example/old.png', 'old.png')] }), APP);
+    const oldSnapshot = cache.snapshot(groupMessage({ content: `<@${APP}> first prompt` }), APP,
+        { mention: { wasMentioned: true } });
+
+    cache.capture(groupMessage({ content: 'unmentioned ordinary message' }), APP);
+    const afterBoundary = cache.snapshot(groupMessage({ content: `<@${APP}> another prompt` }), APP,
+        { mention: { wasMentioned: true } });
+    assert.equal(afterBoundary.attachments[0].filename, 'old.png', 'ordinary text does not consume the batch');
+
+    cache.capture(groupMessage({ id: 'new', attachments: [image('https://cdn.example/new.png', 'new.png')] }), APP);
+    const latest = cache.snapshot(groupMessage({ content: `<@${APP}> use the latest` }), APP,
+        { mention: { wasMentioned: true } });
+    assert.deepEqual(latest.attachments.map(({ filename }) => filename), ['new.png']);
+    assert.equal(recentImageSnapshotAvailable(oldSnapshot), true, 'queued snapshots keep their original batch');
+
+    cache.capture(groupMessage({ id: 'other-sender-text', senderId: 'user-b', content: 'talking' }), APP);
+    const stillLatest = cache.snapshot(groupMessage({ content: `<@${APP}> use this` }), APP,
+        { mention: { wasMentioned: true } });
+    assert.deepEqual(stillLatest.attachments.map(({ filename }) => filename), ['new.png'],
+        'other members do not split this sender’s sequence');
 });
 
-test('continuous images merge, keep the newest eight, and expire five minutes after the latest image', () => {
+test('invalid pure-image URLs close a valid batch and cannot partially append', () => {
+    const cache = makeCache();
+    cache.capture(groupMessage({ id: 'valid-old', attachments: [image('https://cdn.example/old.png', 'old.png')] }), APP);
+    assert.equal(cache.capture(groupMessage({ id: 'bad', attachments: [image('file:///private/photo.png', 'bad.png')] }), APP), false);
+    cache.capture(groupMessage({ id: 'valid-new', attachments: [image('https://cdn.example/new.png', 'new.png')] }), APP);
+    const snapshot = cache.snapshot(groupMessage({ content: `<@${APP}> inspect it` }), APP,
+        { mention: { wasMentioned: true } });
+    assert.deepEqual(snapshot.attachments.map(({ filename }) => filename), ['new.png']);
+});
+
+test('continuous images retain the newest eight and expire five minutes after the latest image', () => {
     const clock = fakeClock();
     const cache = makeCache({ ttlMs: 300_000, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout });
     assert.equal(cache.capture(groupMessage({ id: 'first', attachments: [image('https://cdn.example/1.png', '1.png')] }), APP), true);
@@ -162,89 +186,154 @@ test('continuous images merge, keep the newest eight, and expire five minutes af
     assert.equal(cache.inspect(groupMessage(), APP).count, 8);
     clock.advance(60_000);
     assert.equal(cache.inspect(groupMessage(), APP).count, 8, 'the second image message extended the deadline');
-    const consumed = cache.consume(groupMessage({ content: 'caption' }), APP, { mention: { wasMentioned: true } });
-    assert.equal(consumed.attachments[0].filename, '3.png', 'overflow discards oldest images');
-    assert.equal(consumed.attachments.at(-1).filename, '10.png');
-    assert.equal(clock.timerCount(), 0, 'consumption cancels the expiry timer');
+    const snapshot = cache.snapshot(groupMessage({ content: `<@${APP}> caption` }), APP,
+        { mention: { wasMentioned: true } });
+    assert.equal(snapshot.attachments[0].filename, '3.png', 'overflow discards oldest images');
+    assert.equal(snapshot.attachments.at(-1).filename, '10.png');
+    assert.deepEqual(snapshot.sourceMessageIds, ['second'], 'source ids follow the retained images');
 
     const expiry = makeCache({ ttlMs: 300_000, now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout });
     const message = groupMessage({ attachments: [image('https://cdn.example/expiry.png')] });
     expiry.capture(message, APP);
+    const expiredSnapshot = expiry.snapshot(groupMessage({ content: `<@${APP}> caption` }), APP,
+        { mention: { wasMentioned: true } });
     clock.advance(299_999);
-    assert.equal(expiry.inspect(message, APP).count, 1);
+    assert.equal(recentImageSnapshotAvailable(expiredSnapshot), true);
     clock.advance(1);
-    assert.equal(expiry.inspect(message, APP), undefined);
-    assert.equal(expiry.size(), 0, 'a timer releases metadata without a later inbound message');
+    assert.equal(recentImageSnapshotAvailable(expiredSnapshot), false);
+    assert.equal(expiry.size(), 0, 'a timer releases metadata without another inbound message');
 });
 
-test('capacity is bounded and least recently captured buckets are evicted', () => {
-    const cache = makeCache({ maxGroups: 2 });
-    const a = groupMessage({ groupOpenid: 'group-a', senderId: 'user-a', attachments: [image('https://cdn.example/a.png')] });
-    const b = groupMessage({ groupOpenid: 'group-b', senderId: 'user-a', attachments: [image('https://cdn.example/b.png')] });
-    const c = groupMessage({ groupOpenid: 'group-c', senderId: 'user-a', attachments: [image('https://cdn.example/c.png')] });
+test('one of multiple snapshots claims the batch atomically and only that snapshot remains available', () => {
+    const cache = makeCache();
+    cache.capture(groupMessage({ id: 'source', attachments: [image('https://cdn.example/a.png')] }), APP);
+    const first = cache.snapshot(groupMessage({ id: 'prompt-a', content: `<@${APP}> first` }), APP,
+        { mention: { wasMentioned: true } });
+    const second = cache.snapshot(groupMessage({ id: 'prompt-b', content: `<@${APP}> second` }), APP,
+        { mention: { wasMentioned: true } });
+    assert.notEqual(first, second);
+    assert.equal(isRecentImageSnapshot(first), true);
+    assert.equal(isRecentImageSnapshot({ attachments: first.attachments, sourceMessageIds: first.sourceMessageIds }), false,
+        'copying public metadata cannot forge a capability');
+    assert.equal(claimRecentImageSnapshot(first), true);
+    assert.equal(claimRecentImageSnapshot(first), true, 'the owning request can check the same capability again');
+    assert.equal(recentImageSnapshotAvailable(first), true);
+    assert.equal(claimRecentImageSnapshot(second), false);
+    assert.equal(recentImageSnapshotAvailable(second), false);
+    assert.equal(cache.size(), 0, 'claim removes the pending key synchronously');
+    assert.equal(cache.snapshot(groupMessage({ content: `<@${APP}> third` }), APP,
+        { mention: { wasMentioned: true } }), undefined);
+});
+
+test('request release revokes its snapshot and cleans retired records without restoring claimed images', () => {
+    const clock = fakeClock();
+    const cache = makeCache({ now: clock.now, setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout });
+    cache.capture(groupMessage({ id: 'source', attachments: [image('https://cdn.example/a.png')] }), APP);
+    const firstRequest = cache.snapshot(groupMessage({ content: `<@${APP}> first` }), APP,
+        { mention: { wasMentioned: true } });
+    assert.equal(releaseRecentImageSnapshot(firstRequest), true);
+    assert.equal(releaseRecentImageSnapshot(firstRequest), false, 'release is idempotent');
+    assert.equal(recentImageSnapshotAvailable(firstRequest), false);
+    assert.equal(cache.size(), 1, 'an unclaimed current batch remains available for a later request');
+    const secondRequest = cache.snapshot(groupMessage({ content: `<@${APP}> second` }), APP,
+        { mention: { wasMentioned: true } });
+    assert.equal(recentImageSnapshotAvailable(secondRequest), true);
+    assert.equal(claimRecentImageSnapshot(secondRequest), true);
+    assert.equal(releaseRecentImageSnapshot(secondRequest), true);
+    assert.equal(recentImageSnapshotAvailable(secondRequest), false);
+    assert.equal(cache.size(), 0, 'claimed images are never restored to pending');
+    assert.equal(clock.timerCount(), 0, 'release clears retired-record expiry timers');
+});
+
+test('capacity evicts the oldest pending key but keeps its already queued snapshot alive until expiry', () => {
+    const clock = fakeClock();
+    const cache = makeCache({ maxGroups: 2, ttlMs: 300_000, now: clock.now,
+        setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout });
+    const a = groupMessage({ groupOpenid: 'group-a', attachments: [image('https://cdn.example/a.png')] });
+    const b = groupMessage({ groupOpenid: 'group-b', attachments: [image('https://cdn.example/b.png')] });
+    const c = groupMessage({ groupOpenid: 'group-c', attachments: [image('https://cdn.example/c.png')] });
     cache.capture(a, APP);
+    const queuedA = cache.snapshot(groupMessage({ groupOpenid: 'group-a', content: `<@${APP}> queued` }), APP,
+        { mention: { wasMentioned: true } });
+    clock.advance(1);
     cache.capture(b, APP);
-    cache.capture(a, APP);
+    clock.advance(1);
     cache.capture(c, APP);
     assert.equal(cache.size(), 2);
-    assert.equal(cache.inspect(a, APP).count, 2);
-    assert.equal(cache.inspect(b, APP), undefined);
-    assert.equal(cache.inspect(c, APP).count, 1);
+    assert.equal(cache.snapshot(groupMessage({ groupOpenid: 'group-a', content: `<@${APP}> later` }), APP,
+        { mention: { wasMentioned: true } }), undefined);
+    assert.equal(recentImageSnapshotAvailable(queuedA), true);
+    assert.equal(claimRecentImageSnapshot(queuedA), true);
 });
 
-test('/new clears all pending senders in its peer and does not clear another app or peer', async () => {
+test('/new invalidates pending, superseded, and claimed snapshots across the same peer', async () => {
     const cache = makeCache();
-    const capture = (group, user, app = APP) => cache.capture(groupMessage({ groupOpenid: group, senderId: user,
-        attachments: [image(`https://cdn.example/${group}-${user}.png`)] }), app);
-    capture('group-a', 'user-a');
-    capture('group-a', 'user-b');
-    capture('group-b', 'user-a');
-    capture('group-a', 'user-a', '999999999');
+    cache.capture(groupMessage({ id: 'old', attachments: [image('https://cdn.example/old.png')] }), APP);
+    const old = cache.snapshot(groupMessage({ content: `<@${APP}> old request` }), APP,
+        { mention: { wasMentioned: true } });
+    cache.capture(groupMessage({ content: 'close old batch' }), APP);
+    cache.capture(groupMessage({ id: 'new', attachments: [image('https://cdn.example/new.png')] }), APP);
+    const current = cache.snapshot(groupMessage({ content: `<@${APP}> current request` }), APP,
+        { mention: { wasMentioned: true } });
+    assert.equal(claimRecentImageSnapshot(current), true);
+    cache.capture(groupMessage({ senderId: 'user-b', id: 'peer', attachments: [image('https://cdn.example/peer.png')] }), APP);
+    const otherSender = cache.snapshot(groupMessage({ senderId: 'user-b', content: `<@${APP}> other` }), APP,
+        { mention: { wasMentioned: true } });
+    cache.capture(groupMessage({ groupOpenid: 'group-b', id: 'other-group', attachments: [image('https://cdn.example/group.png')] }), APP);
+    const otherGroup = cache.snapshot(groupMessage({ groupOpenid: 'group-b', content: `<@${APP}> other` }), APP,
+        { mention: { wasMentioned: true } });
+    cache.capture(groupMessage({ id: 'other-app', attachments: [image('https://cdn.example/app.png')] }), '999999999');
+    const otherApp = cache.snapshot(groupMessage({ appId: '999999999', content: `<@999999999> other` }), '999999999',
+        { mention: { wasMentioned: true } });
+
     const cleanup = createPendingImageNewCommandCleanup({ appId: APP, cache });
-    const ctx = { message: groupMessage({ groupOpenid: 'group-a', senderId: 'user-a', content: `<@${APP}> /new` }) };
+    const ctx = { message: groupMessage({ content: `<@${APP}> /new` }) };
     let nextCalls = 0;
     await cleanup(ctx, async () => { nextCalls++; });
-    assert.equal(nextCalls, 1, 'cleanup lets the real slash command execute');
-    assert.equal(cache.inspect(groupMessage({ groupOpenid: 'group-a', senderId: 'user-a' }), APP), undefined);
-    assert.equal(cache.inspect(groupMessage({ groupOpenid: 'group-a', senderId: 'user-b' }), APP), undefined);
-    assert.equal(cache.inspect(groupMessage({ groupOpenid: 'group-b', senderId: 'user-a' }), APP).count, 1);
-    assert.equal(cache.inspect(groupMessage({ groupOpenid: 'group-a', senderId: 'user-a' }), '999999999').count, 1);
+    assert.equal(nextCalls, 1, '/new still reaches the normal command handler');
+    assert.equal(recentImageSnapshotAvailable(old), false);
+    assert.equal(recentImageSnapshotAvailable(current), false, 'claimed requests are revoked too');
+    assert.equal(claimRecentImageSnapshot(current), false);
+    assert.equal(recentImageSnapshotAvailable(otherSender), false, 'all senders in that peer are reset');
+    assert.equal(recentImageSnapshotAvailable(otherGroup), true);
+    assert.equal(recentImageSnapshotAvailable(otherApp), true);
 });
 
-test('the first eligible prompt atomically consumes once and preserves its exact text and current attachments', async () => {
+test('current or quoted images retain explicit-source priority and never enter current attachments', async () => {
     const cache = makeCache();
-    cache.capture(groupMessage({ id: 'source', attachments: [image('https://cdn.example/old.png', 'old.png')] }), APP);
-    const consume = createPendingImagePromptMiddleware({ appId: APP, cache });
-    const prompts = [
-        { message: groupMessage({ id: 'prompt-a', content: `<@${APP}> describe this`, attachments: [image('https://cdn.example/new.png', 'new.png')] }),
-            state: { mention: { wasMentioned: true } } },
-        { message: groupMessage({ id: 'prompt-b', content: `<@${APP}> describe this too` }),
-            state: { mention: { wasMentioned: true } } },
-    ];
-    const release = [];
-    const work = prompts.map((ctx) => consume(ctx, () => new Promise((resolve) => release.push(resolve))));
-    assert.equal(prompts[0].message.content, `<@${APP}> describe this`);
-    assert.deepEqual(prompts[0].message.attachments.map((attachment) => attachment.filename), ['new.png', 'old.png']);
-    assert.equal(prompts[0].message.attachments[1].qqbotDeferredPromptSource, 'previous-image-only-message');
-    assert.deepEqual(prompts[0].state.qqbotDeferredImagePrompt, { count: 1, sourceMessageIds: ['source'] });
-    assert.deepEqual(prompts[1].message.attachments, []);
-    for (const done of release) done();
-    await Promise.all(work);
+    cache.capture(groupMessage({ attachments: [image('https://cdn.example/pending.png', 'pending.png')] }), APP);
+    const currentImage = groupMessage({ content: `<@${APP}> use current`, attachments: [image('https://cdn.example/current.png')] });
+    assert.equal(cache.snapshot(currentImage, APP, { mention: { wasMentioned: true } }), undefined);
+    const quoteImage = groupMessage({ content: `<@${APP}> use quote` });
+    assert.equal(cache.snapshot(quoteImage, APP, { mention: { wasMentioned: true }, quote: { attachments: [image('https://cdn.example/quote.png')] } }), undefined);
+    assert.equal(cache.snapshot(groupMessage({ content: 'ordinary chat https://cdn.example/link.png' }), APP,
+        { mention: { wasMentioned: false } }), undefined, 'ordinary group chat does not consume candidates');
+    const explicitUrl = groupMessage({ content: `<@${APP}> inspect ${'x'.repeat(4_100)} https://cdn.example/current.png` });
+    assert.equal(cache.snapshot(explicitUrl, APP, { mention: { wasMentioned: true } }), undefined,
+        'a URL after the model text limit still has source priority');
+
+    const ctx = { message: groupMessage({ content: `<@${APP}> use pending` }), state: { mention: { wasMentioned: true } } };
+    const originalAttachments = ctx.message.attachments;
+    const prompt = createPendingImagePromptMiddleware({ appId: APP, cache });
+    await prompt(ctx, async () => {});
+    assert.equal(ctx.message.attachments, originalAttachments);
+    assert.deepEqual(ctx.message.attachments, []);
+    assert.equal(isRecentImageSnapshot(ctx.state.qqbotRecentImages), true);
 });
 
-test('pending groups from merged users remain attached to their own generation request', async () => {
+test('merged requests preserve exact snapshot identity and keep recent images separate from attachments', async () => {
     const cache = makeCache();
-    const userAImage = image('https://cdn.example/a.png', 'same-name.png');
-    const userBImage = image('https://cdn.example/b.png', 'same-name.png');
-    cache.capture(groupMessage({ senderId: 'user-a', id: 'a-image', attachments: [userAImage] }), APP);
-    cache.capture(groupMessage({ senderId: 'user-b', id: 'b-image', attachments: [userBImage] }), APP);
-    const consume = createPendingImagePromptMiddleware({ appId: APP, cache });
-    const requestA = { message: groupMessage({ senderId: 'user-a', id: 'a-text', content: `<@${APP}> edit A` }),
-        state: { mention: { wasMentioned: true } } };
+    cache.capture(groupMessage({ senderId: 'user-a', id: 'a-image', attachments: [image('https://cdn.example/a.png', 'same-name.png')] }), APP);
+    cache.capture(groupMessage({ senderId: 'user-b', id: 'b-image', attachments: [image('https://cdn.example/b.png', 'same-name.png')] }), APP);
+    const prompt = createPendingImagePromptMiddleware({ appId: APP, cache });
+    const requestA = { message: groupMessage({ senderId: 'user-a', id: 'a-text', content: `<@${APP}> edit A`,
+        attachments: [{ url: 'https://cdn.example/current-a.pdf', filename: 'current-a.pdf', content_type: 'application/pdf' }] }), state: { mention: { wasMentioned: true } } };
     const requestB = { message: groupMessage({ senderId: 'user-b', id: 'b-text', content: `<@${APP}> edit B` }),
         state: { mention: { wasMentioned: true } } };
-    await consume(requestA, () => {});
-    await consume(requestB, () => {});
+    await prompt(requestA, () => {});
+    await prompt(requestB, () => {});
+    const snapshotA = requestA.state.qqbotRecentImages;
+    const snapshotB = requestB.state.qqbotRecentImages;
 
     const guard = createMergeConcurrencyGuard();
     let ownerStarted;
@@ -263,17 +352,20 @@ test('pending groups from merged users remain attached to their own generation r
     assert.equal(requests.length, 2);
     assert.equal(requests[0].ownerId, 'user-a');
     assert.equal(requests[1].ownerId, 'user-b');
-    assert.equal(requests[0].currentAttachments[0].url, userAImage.url);
-    assert.equal(requests[1].currentAttachments[0].url, userBImage.url);
-    assert.equal(requests[0].currentAttachments[0].promptSource, 'previous-image-only-message');
-    assert.equal(requests[1].currentAttachments[0].promptSource, 'previous-image-only-message');
-    assert.deepEqual(requests.map((request) => request.deferredImagePrompt?.count), [1, 1]);
-    assert.match(renderDeferredImagePromptMetadata(requests), /Original request 1 includes 1 image/);
-    assert.match(renderDeferredImagePromptMetadata(requests), /Original request 2 includes 1 image/);
-    assert.doesNotMatch(renderDeferredImagePromptMetadata(requests), /https?:|user-a|user-b|a-image|b-image/u);
+    assert.equal(requests[0].currentAttachments[0].url, 'https://cdn.example/current-a.pdf');
+    assert.equal(requests[0].recentImageSnapshot, snapshotA);
+    assert.equal(requests[1].recentImageSnapshot, snapshotB);
+    assert.deepEqual(requests[0].recentImageSnapshot.attachments.map(({ url }) => url), ['https://cdn.example/a.png']);
+    assert.deepEqual(requests[1].recentImageSnapshot.attachments.map(({ url }) => url), ['https://cdn.example/b.png']);
+    assert.equal(requests[0].currentAttachments.length, 1, 'recent images were not appended to current attachments');
+    const metadata = renderRecentImagePromptMetadata(requests);
+    assert.match(metadata, /Original request 1 has 1 optional recent-image candidate/u);
+    assert.match(metadata, /Original request 2 has 1 optional recent-image candidate/u);
+    assert.match(metadata, /Ignore them for ordinary chat and text-to-image requests/u);
+    assert.doesNotMatch(metadata, /https?:|user-a|user-b|a-image|b-image/u);
 });
 
-test('an aborted source receipt is not cached and image-only capture never sends a thinking message', async () => {
+test('an aborted capture does not cache an image and an aborted prompt does not create a snapshot', async () => {
     const cache = makeCache();
     const capture = createPendingImageCaptureMiddleware({ appId: APP, cache });
     const controller = new AbortController();
@@ -284,43 +376,11 @@ test('an aborted source receipt is not cached and image-only capture never sends
     async () => { nextCalls++; });
     assert.equal(nextCalls, 1);
     assert.equal(cache.size(), 0);
-});
 
-test('an already-aborted prompt cannot consume images for a later retry', async () => {
-    const cache = makeCache();
-    cache.capture(c2cMessage({ attachments: [image('https://cdn.example/a.png')] }), APP);
-    const consume = createPendingImagePromptMiddleware({ appId: APP, cache });
-    const controller = new AbortController();
-    controller.abort();
-    const ctx = { signal: controller.signal, message: c2cMessage({ content: 'caption' }), state: {} };
-    await consume(ctx, async () => {});
-    assert.equal(ctx.message.attachments.length, 0);
-    assert.equal(cache.inspect(c2cMessage(), APP).count, 1);
-});
-
-test('a saturated merge queue drops the consumed prompt without leaking its image to a later request', async () => {
-    const cache = makeCache();
-    cache.capture(groupMessage({ attachments: [image('https://cdn.example/queued.png')] }), APP);
-    const consume = createPendingImagePromptMiddleware({ appId: APP, cache });
-    const prompt = { message: groupMessage({ content: `<@${APP}> use this image` }),
-        state: { mention: { wasMentioned: true } }, stop(reason) { this.stopReason = reason; } };
-    await consume(prompt, () => {});
-    let releaseOwner;
-    let startedOwner;
-    const started = new Promise((resolve) => { startedOwner = resolve; });
-    const ownerWait = new Promise((resolve) => { releaseOwner = resolve; });
-    let dropped = 0;
-    let promptRan = 0;
-    const guard = createMergeConcurrencyGuard({ maxQueue: 0, onDrop: async () => { dropped++; } });
-    const owner = { message: groupMessage({ senderId: 'other-user', content: 'busy' }), state: {} };
-    const active = guard(owner, async () => { startedOwner(); await ownerWait; });
-    await started;
-    await guard(prompt, async () => { promptRan++; });
-    assert.equal(prompt.stopReason, 'concurrency:merge-full');
-    assert.equal(dropped, 1);
-    assert.equal(promptRan, 0);
-    assert.equal(cache.inspect(groupMessage(), APP), undefined,
-        'the dropped prompt is consumed once and does not leak its image to a later turn');
-    releaseOwner();
-    await active;
+    cache.capture(c2cMessage({ attachments: [image('https://cdn.example/private.png')] }), APP);
+    const prompt = createPendingImagePromptMiddleware({ appId: APP, cache });
+    const aborted = { signal: controller.signal, message: c2cMessage({ content: 'caption' }), state: {} };
+    await prompt(aborted, async () => {});
+    assert.equal(aborted.state.qqbotRecentImages, undefined);
+    assert.equal(cache.size(), 1);
 });

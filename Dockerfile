@@ -105,6 +105,7 @@ COPY defaults/qqbot-text-documents.mjs /opt/qqbot-defaults/qqbot-text-documents.
 COPY defaults/qqbot-documents.mjs /opt/qqbot-defaults/qqbot-documents.mjs
 COPY defaults/qqbot-history-snapshot.mjs /opt/qqbot-defaults/qqbot-history-snapshot.mjs
 COPY defaults/qqbot-pending-images.mjs /opt/qqbot-defaults/qqbot-pending-images.mjs
+COPY defaults/qqbot-memory-images.mjs /opt/qqbot-defaults/qqbot-memory-images.mjs
 COPY defaults/qqbot-concurrency.mjs /opt/qqbot-defaults/qqbot-concurrency.mjs
 COPY defaults/qqbot-generation.mjs /opt/qqbot-defaults/qqbot-generation.mjs
 COPY defaults/qqbot-image-input.mjs /opt/qqbot-defaults/qqbot-image-input.mjs
@@ -113,7 +114,7 @@ COPY defaults/qqbot-generation-scope.mjs /opt/qqbot-defaults/qqbot-generation-sc
 COPY defaults/qqbot-generation-quotas.mjs /opt/qqbot-defaults/qqbot-generation-quotas.mjs
 COPY defaults/qqbot-generation-sender.mjs /opt/qqbot-defaults/qqbot-generation-sender.mjs
 
-RUN node --input-type=module -e "import sharp from '/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/sharp/dist/index.cjs'; import { normalizeEditImage } from '/opt/qqbot-defaults/qqbot-image-input.mjs'; const source = await sharp({ create: { width: 1, height: 1, channels: 4, background: { r: 255, g: 0, b: 0, alpha: 1 } } }).webp({ lossless: true }).toBuffer(); const output = await normalizeEditImage(source, { inspectImage: bytes => bytes[0] === 137 ? 'image/png' : undefined }); const metadata = await sharp(output).metadata(); if (metadata.format !== 'png' || metadata.width !== 1 || metadata.height !== 1) process.exit(1)"
+RUN node --input-type=module -e "import '/opt/qqbot-defaults/qqbot-chat-policy.mjs'; import '/opt/qqbot-defaults/qqbot-generation-scope.mjs'; import '/opt/qqbot-defaults/qqbot-memory-images.mjs'; import sharp from '/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/sharp/dist/index.cjs'; import { normalizeEditImage } from '/opt/qqbot-defaults/qqbot-image-input.mjs'; const source = await sharp({ create: { width: 1, height: 1, channels: 4, background: { r: 255, g: 0, b: 0, alpha: 1 } } }).webp({ lossless: true }).toBuffer(); const output = await normalizeEditImage(source, { inspectImage: bytes => bytes[0] === 137 ? 'image/png' : undefined }); const metadata = await sharp(output).metadata(); if (metadata.format !== 'png' || metadata.width !== 1 || metadata.height !== 1) process.exit(1)"
 
 RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh \
     && chown -R node:node /opt/dsh-seed /opt/qqbot-defaults

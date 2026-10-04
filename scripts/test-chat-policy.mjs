@@ -210,7 +210,7 @@ test('the patched QQ middleware chain preserves SDK group history and guarded or
         'the pending-image capture middleware is installed before mention gating');
     assert.ok(layerSources.some((source) => source.includes('cache.clearForMessage(ctx.message')),
         'the pending-image /new cleanup middleware is installed');
-    assert.ok(layerSources.some((source) => source.includes('cache.consume(ctx?.message')),
+    assert.ok(layerSources.some((source) => source.includes('cache.snapshot(ctx?.message')),
         'the pending-image prompt middleware is installed before merged requests are handled');
     const middlewareSetup = await readFile(`${adapter}gateway/middleware-setup.js`, 'utf8');
     const orderedCalls = [

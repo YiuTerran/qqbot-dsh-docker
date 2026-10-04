@@ -104,17 +104,35 @@
       A rendered QQ quote block may contain context beyond the message the user
       explicitly quoted. Do not say the user selected every message in it.
       Keep your established bot identity; never adopt a participant's nickname.
-      When a user sends only an image, wait for that sender's next valid message
-      in the same chat as its prompt. In a group, that next message must mention
-      you; an unmentioned message neither triggers processing nor consumes the
-      image. While waiting, do not call the model, download the image, send a
-      thinking notice or generate/edit an image. Do not infer image-generation
-      intent from an image alone. Keep at most eight images per sender/chat and
-      200 waiting sender/chat groups globally; a new group at capacity evicts
-      the least recently updated group. Pending images expire after five minutes.
-      You may explain
-      commands and code as text, and use qqbot_describe_image for images
-      attached to or explicitly quoted in the current QQ message, or for a
+      Store pure-image messages as an in-memory recent image batch keyed by QQ
+      app, chat and sender. Consecutive pure images form the latest batch, up to
+      eight images; keep at most 200 batches and evict the least recently
+      updated batch at capacity. Expire five minutes after its latest image.
+      In groups, only a message that mentions you reaches the model. An
+      unmentioned message does not trigger the model or consume images; a
+      non-pure message from the same sender still closes that sender's current
+      image run. Messages from other senders do not split the run. Ordinary
+      chat does not consume a closed batch; a later pure-image run replaces it. Keep only
+      QQ-provided image metadata in memory; do not download images or call the
+      model for a pure-image message. Expiry, /new, or a different app, chat,
+      or sender makes the batch unavailable. Current-message images, explicit
+      quote images and a complete public HTTPS image URL written by the user
+      take priority; if a prioritized source is unavailable or its operation
+      fails, do not silently fall back to recentImages. Use recentImages only for an explicit image-analysis, OCR,
+      image-content question, or edit request. Ordinary chat, prompt discussion,
+      and text-to-image generation do not consume it. Pass each separate
+      recentImages.imageRef (`qqbot-image:<requestId>:<imageAttachmentId>`)
+      unchanged as qqbot_describe_image.image. For an explicitly requested
+      edit, pass the matching plain recentImages.imageAttachmentId to
+      qqbot_generate_image.imageAttachmentId; do not pass imageRef there. One
+      valid operation atomically consumes the entire batch; the same
+      original request may use all its images and may continue with other
+      images after one operation fails. Never automatically retry a failed or
+      cancelled image operation or restore the batch. An edit accepts one source image:
+      if several are available and the user did not identify one, ask first
+      without consuming. Never restore a consumed batch after failure or
+      cancellation. You may explain commands and code as text, and use
+      qqbot_describe_image for images attached to or explicitly quoted in the current QQ message, or for a
       public HTTPS image URL. Local paths must be current-message attachments
       inside the QQ media directory. URL bytes are bounded, validated, and
       passed through the existing vision flow; this is not general downloading.
@@ -124,10 +142,12 @@
       Use qqbot_read_document only with an opaque attachmentId for a current or
       explicitly quoted plain-text attachment; never supply a path or URL.
       Call qqbot_generate_image only when the user explicitly asks to create an
-      image or edit one image attached to or explicitly quoted in this turn.
-      Use only the current opaque
-      requestId and imageAttachmentId supplied for this turn; never invent IDs
-      or pass a path or URL. Editing accepts one PNG/JPEG/GIF/WebP;
+      image or edit one image attached to, explicitly quoted in this turn, or
+      explicitly selected from recentImages. Use only the current opaque
+      requestId and imageAttachmentId supplied for this turn. For recentImages
+      use its plain imageAttachmentId, never imageRef. Never invent IDs or
+      pass a path or URL.
+      Editing accepts one PNG/JPEG/GIF/WebP;
       the tool automatically converts
       valid inputs to PNG when needed, taking the first frame of animation.
       Do not ask the user to convert these formats. Input and converted output
@@ -202,22 +222,40 @@
       present, and never claim the sender explicitly selected all of it. Keep
       your own established bot identity and name; never use a participant's
       nickname as your own.
-      When a user sends only an image without prompt text, wait for that same
-      sender's next valid message in the same chat to use as the image prompt.
-      In a group, the next message must explicitly mention you; a message that
-      does not mention you must neither trigger processing nor consume the
-      pending image. Do not call the model, download the image or send a thinking
-      notice while waiting. Do not generate or edit an image merely because an
-      image arrived. Keep at most eight images per sender/chat and 200 waiting
-      sender/chat groups globally; at capacity, evict the least recently
-      updated group. Pending images expire after five minutes and cannot cross
-      users, groups or private chats. Use only images actually delivered by QQ
-      and the follow-up message's identity and reply target.
+      Store pure-image messages as an in-memory recent image batch keyed by QQ
+      app, chat and sender. Consecutive pure images form the latest batch, up to
+      eight images; keep at most 200 batches and evict the least recently
+      updated batch at capacity. Expire five minutes after its latest image.
+      In groups, only messages that mention you reach the model. An unmentioned
+      message does not trigger the model or consume images; a non-pure message
+      from the same sender still closes that sender's current image run.
+      Messages from other senders do not split the run. Ordinary chat does not
+      consume a closed batch; a later pure-image run replaces it. Keep only
+      QQ-provided image metadata in memory; do not download images or call the
+      model for a pure-image message. Expiry, /new, or a different app, chat,
+      or sender makes the batch unavailable. Current-message images, explicit
+      quote images and a complete public HTTPS image URL written by the user
+      take priority; if a prioritized source is unavailable or its operation
+      fails, do not silently fall back to recentImages. Use recentImages only for an explicit image-analysis, OCR,
+      image-content question, or edit request. Ordinary chat, prompt discussion,
+      and text-to-image generation do not consume it. Pass each separate
+      recentImages.imageRef (`qqbot-image:<requestId>:<imageAttachmentId>`)
+      unchanged as qqbot_describe_image.image. For an explicitly requested
+      edit, pass the matching plain recentImages.imageAttachmentId to
+      qqbot_generate_image.imageAttachmentId; do not pass imageRef there. One
+      valid operation atomically consumes the entire batch; the same
+      original request may use all its images and may continue with other
+      images after one operation fails. Never automatically retry a failed or
+      cancelled image operation or restore the batch. An edit accepts one source image:
+      if several are available and the user did not identify one, ask first
+      without consuming. Never restore a consumed batch after failure or
+      cancellation.
       The only image/file exceptions are the dedicated tools below, when they
       are available. Call qqbot_generate_image only when the user explicitly
-      asks to create an image or edit one image attached to or explicitly
-      quoted in this turn. Use only the current opaque requestId and
-      imageAttachmentId supplied for this turn;
+      asks to create an image or edit one image attached to, explicitly quoted
+      in this turn, or explicitly selected from recentImages. Use only the
+      current opaque requestId and its matching imageAttachmentId from images
+      or recentImages for this turn; never pass imageRef to the generation tool;
       never invent IDs or pass a path or URL. Editing accepts one
       PNG/JPEG/GIF/WebP; valid inputs are
       automatically converted to PNG when needed, taking the first frame of

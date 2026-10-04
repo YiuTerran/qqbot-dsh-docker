@@ -133,12 +133,15 @@ if [ ! -e /data/AGENTS.md ]; then
     install -o node -g node -m 0644 /opt/qqbot-defaults/AGENTS.md /data/AGENTS.md
 fi
 
-# Upgrade only the exact stock instructions shipped by v0.9.0. A customized,
-# symlinked, or read-only AGENTS.md remains user-owned and is never replaced.
-previous_stock_agents_sha256=17aa60a400c6c541e11d21da1eb527ebd5330791e646d8e6ca4eb02c8ac2b02b
+# Upgrade only the exact stock instructions shipped by v0.9.0 or v0.10.0. A
+# customized, symlinked, or read-only AGENTS.md remains user-owned and is never
+# replaced.
+previous_v0_9_stock_agents_sha256=17aa60a400c6c541e11d21da1eb527ebd5330791e646d8e6ca4eb02c8ac2b02b
+previous_v0_10_stock_agents_sha256=16ccc3bdc4d3632d70874f8289362b635aa05107e69aa691b729a2e91a66cf67
 if [ -f /data/AGENTS.md ] && [ ! -L /data/AGENTS.md ] && [ -r /data/AGENTS.md ] && [ -w /data/AGENTS.md ]; then
     current_agents_sha256=$(sha256sum /data/AGENTS.md | cut -d ' ' -f 1)
-    if [ "$current_agents_sha256" = "$previous_stock_agents_sha256" ]; then
+    if [ "$current_agents_sha256" = "$previous_v0_9_stock_agents_sha256" ] \
+        || [ "$current_agents_sha256" = "$previous_v0_10_stock_agents_sha256" ]; then
         agents_migration_tmp="/data/.AGENTS.md.$$"
         if install -o node -g node -m 0644 /opt/qqbot-defaults/AGENTS.md "$agents_migration_tmp" \
             && mv -f "$agents_migration_tmp" /data/AGENTS.md; then

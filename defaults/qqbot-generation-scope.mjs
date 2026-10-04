@@ -2,6 +2,12 @@ import { randomBytes } from 'node:crypto';
 import { logGenerationBatch, logGenerationDiagnostics } from './qqbot-image-diagnostics.mjs';
 import { resolveTextDocumentType } from './qqbot-text-documents.mjs';
 import { getBoundDocumentExecution } from './qqbot-document-scope.mjs';
+import {
+    claimRecentImageSnapshot,
+    isRecentImageSnapshot,
+    recentImageSnapshotAvailable,
+    releaseRecentImageSnapshot,
+} from './qqbot-pending-images.mjs';
 
 const activeTurns = new WeakMap();
 const MAX_GENERATION_REQUESTS = 20;
@@ -69,10 +75,38 @@ function isAllowedImageAttachment(attachment) {
     return ['image/png', 'image/jpeg', 'image/gif', 'image/webp'].includes(type);
 }
 
+function mayBeImageAttachment(value) {
+    if (!value || typeof value !== 'object') return false;
+    const type = safeDeclaredContentType(value.content_type ?? value.contentType).split(';', 1)[0].trim();
+    const filename = safeFilename(value.filename);
+    if (type === 'image' || type.startsWith('image/')) return true;
+    if (['', 'file', 'application/octet-stream'].includes(type)) {
+        if (/\.(?:apng|gif|jpe?g|png|webp)$/iu.test(filename)) return true;
+        // An untyped binary attachment may still be an image whose download
+        // failed. Keep it ahead of the recent-image fallback conservatively.
+        return !resolveTextDocumentType('', filename, { allowExtensionFallback: true }).accepted;
+    }
+    return false;
+}
+
 function isPlainTextAttachment(attachment) {
     if (!attachment) return false;
     const contentType = attachment.contentType.toLowerCase() === 'file' ? '' : attachment.contentType;
     return resolveTextDocumentType(contentType, attachment.filename, { allowExtensionFallback: true }).accepted;
+}
+
+function hasExplicitRemoteSource(text) {
+    return typeof text === 'string' && /https?:\/\/[^\s<>"'`]+/iu.test(text);
+}
+
+function imageReference(requestId, imageAttachmentId) {
+    return `qqbot-image:${requestId}:${imageAttachmentId}`;
+}
+
+function parseImageReference(value) {
+    if (typeof value !== 'string') return undefined;
+    const match = /^qqbot-image:([A-Za-z0-9_-]{1,64}):([A-Za-z0-9_-]{1,64})$/u.exec(value);
+    return match ? { requestId: match[1], imageAttachmentId: match[2] } : undefined;
 }
 
 function boundedRequestText(value) {
@@ -97,6 +131,7 @@ function normalizeOriginalRequest(request) {
         text: boundedRequestText(request.text),
         currentAttachments,
         quotedAttachments,
+        recentImageSnapshot: request.recentImageSnapshot,
     };
 }
 
@@ -124,6 +159,14 @@ function lazyQuoteLimit(media) {
     return limit > 0 ? limit : undefined;
 }
 
+function lazyRecentImageLimit(media) {
+    if (media?.enabled === false) return undefined;
+    const maxMB = media?.maxMB ?? 10;
+    if (typeof maxMB !== 'number' || !Number.isFinite(maxMB) || maxMB <= 0) return undefined;
+    const limit = Math.floor(Math.min(maxMB, 10) * 1024 * 1024);
+    return limit > 0 ? limit : undefined;
+}
+
 /**
  * Start an immutable generation provenance scope from snapshots captured by
  * the merge guard before it combines message text or attachments.
@@ -137,9 +180,12 @@ export function beginGenerationTurn(agent, originalRequests, downloadedFiles, op
 
     const documentScope = options.documentScope;
     const quoteMaxBytes = lazyQuoteLimit(options.media);
+    const recentImageMaxBytes = lazyRecentImageLimit(options.media);
     const downloads = matchingDownloads(downloadedFiles);
     const requests = new Map();
     const imageAttachments = new Map();
+    const recentImageAttachments = new Map();
+    const boundRecentSnapshots = new WeakSet();
     const validSources = Array.isArray(originalRequests) ? originalRequests.slice(0, MAX_GENERATION_REQUESTS) : [];
     logGenerationBatch(validSources, downloadedFiles);
     const sourceHadDocument = validSources.some((source) => {
@@ -155,6 +201,12 @@ export function beginGenerationTurn(agent, originalRequests, downloadedFiles, op
             continue;
         }
         const diagnostics = { unsupportedType: 0, missingDownload: 0, images: 0 };
+        const candidateRecentSnapshot = normalized.recentImageSnapshot;
+        const recentSnapshot = isRecentImageSnapshot(candidateRecentSnapshot)
+            && recentImageSnapshotAvailable(candidateRecentSnapshot)
+            && !boundRecentSnapshots.has(candidateRecentSnapshot)
+            ? candidateRecentSnapshot : undefined;
+        if (recentSnapshot) boundRecentSnapshots.add(recentSnapshot);
         let requestId = opaqueId();
         while (requests.has(requestId)) requestId = opaqueId();
 
@@ -168,6 +220,8 @@ export function beginGenerationTurn(agent, originalRequests, downloadedFiles, op
             record: options.record,
             enqueueSend: typeof options.enqueueSend === 'function' ? options.enqueueSend : undefined,
             images: [],
+            recentImages: [],
+            recentImageSnapshot: recentSnapshot,
             imageCalls: new Map(),
             markdownCalls: new Map(),
         };
@@ -207,6 +261,37 @@ export function beginGenerationTurn(agent, originalRequests, downloadedFiles, op
                 request.images.push({ imageAttachmentId, filename: grant.filename, quoted });
             }
         }
+        const currentOrQuotedMayBeImage = [source?.currentAttachments, source?.quotedAttachments]
+            .some((attachments) => Array.isArray(attachments) && attachments.some(mayBeImageAttachment));
+        const recentCandidateAttachments = request.recentImageSnapshot?.attachments ?? [];
+        if (request.recentImageSnapshot && recentImageMaxBytes !== undefined && !currentOrQuotedMayBeImage
+            && !hasExplicitRemoteSource(normalized.text)
+            && documentScopeActive(documentScope) && !documentScope.documentMode) {
+            for (const candidate of recentCandidateAttachments.slice(0, 8)) {
+                const attachment = normalizedAttachment(candidate);
+                if (!isAllowedImageAttachment(attachment) || isPlainTextAttachment(attachment)) continue;
+                let imageAttachmentId = opaqueId();
+                while (imageAttachments.has(imageAttachmentId) || recentImageAttachments.has(imageAttachmentId)) {
+                    imageAttachmentId = opaqueId();
+                }
+                const grant = Object.freeze({
+                    imageAttachmentId,
+                    requestId,
+                    filename: attachment.filename,
+                    contentType: attachment.contentType,
+                    size: attachment.size,
+                    quoted: false,
+                    recent: true,
+                    localPath: undefined,
+                    sourceUrl: attachment.url,
+                    maxBytes: recentImageMaxBytes,
+                    snapshot: request.recentImageSnapshot,
+                });
+                recentImageAttachments.set(imageAttachmentId, grant);
+                request.recentImages.push({ imageAttachmentId, filename: grant.filename,
+                    imageRef: imageReference(requestId, imageAttachmentId) });
+            }
+        }
         requests.set(requestId, request);
         diagnostics.images = request.images.length;
         logGenerationDiagnostics(source, normalized, diagnostics);
@@ -218,6 +303,7 @@ export function beginGenerationTurn(agent, originalRequests, downloadedFiles, op
         documentScope,
         requests,
         imageAttachments,
+        recentImageAttachments,
         imageCalls: new Map(),
         markdownCalls: new Map(),
         pending: new Set(),
@@ -238,8 +324,12 @@ function revokeGenerationTurn(scope) {
     if (!scope || !scope.active) return;
     scope.active = false;
     scope.controller.abort(new Error('QQ generation turn ended.'));
+    for (const request of scope.requests.values()) {
+        if (request.recentImageSnapshot) releaseRecentImageSnapshot(request.recentImageSnapshot);
+    }
     scope.requests.clear();
     scope.imageAttachments.clear();
+    scope.recentImageAttachments.clear();
 }
 
 /** Revoke all per-request grants synchronously, then drain actual operations. */
@@ -299,12 +389,44 @@ export function getGenerationImageAttachment(scope, requestId, imageAttachmentId
     return image?.requestId === requestId ? image : undefined;
 }
 
+export function getGenerationRecentImageAttachment(scope, requestId, imageAttachmentId) {
+    if (!getGenerationRequest(scope, requestId, 'recent-image')) return undefined;
+    if (generationScopeFailure(scope, 'image') || typeof imageAttachmentId !== 'string') return undefined;
+    const image = scope.recentImageAttachments.get(imageAttachmentId);
+    if (!image || image.requestId !== requestId || image.snapshot !== scope.requests.get(requestId)?.recentImageSnapshot
+        || !recentImageSnapshotAvailable(image.snapshot)) return undefined;
+    return image;
+}
+
+export function getGenerationRecentImageReference(scope, imageRef) {
+    const parsed = parseImageReference(imageRef);
+    if (!parsed) return undefined;
+    const grant = getGenerationRecentImageAttachment(scope, parsed.requestId, parsed.imageAttachmentId);
+    return grant ? { ...grant, imageRef } : undefined;
+}
+
+export function claimGenerationRecentImage(scope, requestId, imageAttachmentId) {
+    const image = getGenerationRecentImageAttachment(scope, requestId, imageAttachmentId);
+    if (!image) return false;
+    try {
+        return claimRecentImageSnapshot(image.snapshot) === true;
+    }
+    catch {
+        return false;
+    }
+}
+
 export function generationRequestMetadata(scope) {
     if (!scope?.active) return [];
     return [...scope.requests.values()].map((request) => ({
         requestId: request.requestId,
         userRequest: request.text,
         images: request.images.map((image) => ({ ...image })),
+        recentImages: generationScopeFailure(scope, 'image') || !request.recentImageSnapshot
+            || !recentImageSnapshotAvailable(request.recentImageSnapshot)
+            ? []
+            : request.recentImages.filter((image) => getGenerationRecentImageAttachment(scope,
+                request.requestId, image.imageAttachmentId)).map((image) => ({ ...image })),
     }));
 }
 

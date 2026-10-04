@@ -7,6 +7,11 @@ const IMAGE_EXTENSION = /\.(?:apng|gif|jpe?g|png|webp)$/iu;
 const SLASH_COMMAND = /^\s*\/[A-Za-z0-9_-]+(?:@[A-Za-z0-9_-]+)?(?:\s|$)/u;
 const NEW_COMMAND = /^\s*\/new(?:@[A-Za-z0-9_-]+)?(?:\s|$)/iu;
 
+// Snapshot identity is an internal capability. Public attachment metadata is
+// useful to the normal request pipeline, while this WeakMap keeps its source,
+// expiry and one-request claim state out of model-visible data.
+const snapshotRecords = new WeakMap();
+
 function canonicalImageUrl(value) {
     if (typeof value !== 'string' || value.length > 8192) return undefined;
     try {
@@ -26,13 +31,24 @@ function safeFilename(value) {
         .replace(/[\u0000-\u001f\u007f-\u009f]/gu, '').trim().slice(0, 120);
 }
 
-function imageAttachment(value) {
-    if (!value || typeof value !== 'object') return undefined;
+function attachmentType(value) {
+    const declared = value?.content_type ?? value?.contentType;
+    return typeof declared === 'string' ? declared.split(';', 1)[0].trim().toLowerCase() : '';
+}
+
+function isDeclaredImageAttachment(value) {
+    if (!value || typeof value !== 'object') return false;
+    const type = attachmentType(value);
     const filename = safeFilename(value.filename);
-    const type = typeof (value.content_type ?? value.contentType) === 'string'
-        ? (value.content_type ?? value.contentType).split(';', 1)[0].trim().toLowerCase() : '';
     const extensionFallback = ['', 'file', 'application/octet-stream'].includes(type) && IMAGE_EXTENSION.test(filename);
-    if (!(type === 'image' || type.startsWith('image/') || extensionFallback)) return undefined;
+    return type === 'image' || type.startsWith('image/') || extensionFallback;
+}
+
+function imageAttachment(value) {
+    if (!isDeclaredImageAttachment(value)) return undefined;
+    const filename = safeFilename(value.filename);
+    const type = attachmentType(value);
+    const extensionFallback = ['', 'file', 'application/octet-stream'].includes(type) && IMAGE_EXTENSION.test(filename);
     const url = canonicalImageUrl(value.url);
     if (!url) return undefined;
     const size = Number(value.size);
@@ -59,34 +75,79 @@ function identityFor(message, appId) {
     if (typeof appId !== 'string' || !APP_ID.test(appId) || !message
         || typeof message.senderId !== 'string' || !IDENTITY.test(message.senderId)) return undefined;
     if (message.kind === 'group' && typeof message.groupOpenid === 'string' && IDENTITY.test(message.groupOpenid)) {
-        return JSON.stringify([appId, 'group', message.groupOpenid, message.senderId]);
+        return {
+            key: JSON.stringify([appId, 'group', message.groupOpenid, message.senderId]),
+            peerKey: JSON.stringify([appId, 'group', message.groupOpenid]),
+        };
     }
     if (message.kind === 'c2c') {
-        return JSON.stringify([appId, 'c2c', message.senderId, message.senderId]);
+        return {
+            key: JSON.stringify([appId, 'c2c', message.senderId, message.senderId]),
+            peerKey: JSON.stringify([appId, 'c2c', message.senderId]),
+        };
     }
     return undefined;
 }
 
-function isImageOnly(message, appId) {
-    const text = visibleText(message, appId);
-    if (text) return false;
+function isPureImageMessage(message, appId) {
+    if (visibleText(message, appId)) return false;
     const attachments = Array.isArray(message?.attachments) ? message.attachments : [];
-    if (attachments.length === 0) return false;
-    // Any non-image attachment (including voice and documents) keeps the
-    // message on the regular middleware path.
-    return attachments.every((attachment) => {
-        const declared = attachment?.content_type ?? attachment?.contentType;
-        const type = typeof declared === 'string' ? declared.split(';', 1)[0].trim().toLowerCase() : '';
-        const filename = safeFilename(attachment?.filename);
-        return type === 'image' || type.startsWith('image/')
-            || (['', 'file', 'application/octet-stream'].includes(type) && IMAGE_EXTENSION.test(filename));
-    });
+    return attachments.length > 0 && attachments.every(isDeclaredImageAttachment);
 }
 
 function messageId(message) {
     const value = message?.messageId ?? message?.msgId ?? message?.id;
     return typeof value === 'string' && value.length <= 256 && !/[\u0000-\u001f\u007f]/u.test(value)
         ? value : undefined;
+}
+
+/** True only for an object minted by the private recent-image snapshot cache. */
+export function isRecentImageSnapshot(snapshot) {
+    return snapshot !== null && (typeof snapshot === 'object' || typeof snapshot === 'function')
+        && snapshotRecords.has(snapshot);
+}
+
+/** Check expiry, reset revocation, and whether another request already claimed this batch. */
+export function recentImageSnapshotAvailable(snapshot) {
+    if (!isRecentImageSnapshot(snapshot)) return false;
+    const metadata = snapshotRecords.get(snapshot);
+    const { record } = metadata;
+    if (metadata.released || record.invalidated || record.now() >= record.expiresAt) return false;
+    return !record.claimedSnapshot || record.claimedSnapshot === snapshot;
+}
+
+/**
+ * Claim one frozen snapshot for one original request. The same capability can
+ * be checked repeatedly by that request, while sibling snapshots fail.
+ */
+export function claimRecentImageSnapshot(snapshot) {
+    if (!isRecentImageSnapshot(snapshot)) return false;
+    const metadata = snapshotRecords.get(snapshot);
+    const { record } = metadata;
+    if (metadata.released || record.invalidated || record.now() >= record.expiresAt) return false;
+    if (record.claimedSnapshot) return record.claimedSnapshot === snapshot;
+    record.claimedSnapshot = snapshot;
+    if (record.pendingByKey.get(record.key) === record) record.pendingByKey.delete(record.key);
+    record.status = 'claimed';
+    return true;
+}
+
+/** End the one-request scope without ever restoring a claimed batch to pending. */
+export function releaseRecentImageSnapshot(snapshot) {
+    if (!isRecentImageSnapshot(snapshot)) return false;
+    const metadata = snapshotRecords.get(snapshot);
+    if (metadata.released) return false;
+    metadata.released = true;
+    const { record } = metadata;
+    record.snapshotCount = Math.max(0, record.snapshotCount - 1);
+    if (record.snapshotCount === 0 && record.pendingByKey.get(record.key) !== record) {
+        record.invalidated = true;
+        record.status = 'released';
+        record.stopTimer();
+        record.liveRecords.delete(record.id);
+        return true;
+    }
+    return true;
 }
 
 export function createPendingImagePromptCache(options = {}) {
@@ -100,136 +161,227 @@ export function createPendingImagePromptCache(options = {}) {
     if (!Number.isSafeInteger(maxImagesPerGroup) || maxImagesPerGroup < 1) throw new TypeError('maxImagesPerGroup must be a positive integer');
     if (!Number.isSafeInteger(maxGroups) || maxGroups < 1) throw new TypeError('maxGroups must be a positive integer');
 
-    const records = new Map();
+    // pending records are eligible for new snapshots. liveRecords also retains
+    // superseded, evicted, or claimed batches that already have queued snapshots.
+    const pending = new Map();
+    const liveRecords = new Map();
+    let nextRecordId = 0;
 
-    function remove(key, expected) {
-        const record = records.get(key);
-        if (!record || (expected && expected !== record)) return false;
-        records.delete(key);
+    function stopTimer(record) {
         if (record.timer) unschedule(record.timer);
+        record.timer = undefined;
+    }
+
+    function invalidate(record, status) {
+        if (!record || record.invalidated) return false;
+        record.invalidated = true;
+        record.status = status;
+        if (pending.get(record.key) === record) pending.delete(record.key);
+        liveRecords.delete(record.id);
+        stopTimer(record);
         return true;
     }
 
-    function pruneExpired() {
-        const time = now();
-        for (const [key, record] of records) {
-            if (time - record.lastImageAt >= ttlMs) remove(key, record);
-        }
-    }
-
-    function expireLater(key, record) {
-        if (record.timer) unschedule(record.timer);
+    function expireLater(record) {
+        stopTimer(record);
         const expire = () => {
-            const remaining = ttlMs - (now() - record.lastImageAt);
-            if (remaining > 0) {
+            const remaining = record.expiresAt - now();
+            if (remaining > 0 && !record.invalidated) {
                 record.timer = schedule(expire, remaining);
                 record.timer?.unref?.();
                 return;
             }
-            remove(key, record);
+            invalidate(record, 'expired');
         };
-        record.timer = schedule(expire, ttlMs);
+        record.timer = schedule(expire, Math.max(0, record.expiresAt - now()));
         record.timer?.unref?.();
     }
 
-    function capture(message, appId) {
-        if (!isImageOnly(message, appId)) return false;
-        const key = identityFor(message, appId);
-        if (!key) return false;
-        const attachments = (Array.isArray(message.attachments) ? message.attachments : [])
-            .map(imageAttachment).filter(Boolean);
-        if (attachments.length === 0) return false;
+    function pruneExpired() {
         const time = now();
-        pruneExpired();
-        let record = records.get(key);
-        if (record && time - record.lastImageAt >= ttlMs) {
-            remove(key, record);
-            record = undefined;
+        for (const record of liveRecords.values()) {
+            if (time >= record.expiresAt) invalidate(record, 'expired');
         }
-        if (record) records.delete(key);
-        else record = { images: [], sourceMessageIds: [], timer: undefined };
+    }
+
+    function preserveOrDiscard(record, status) {
+        if (!record) return;
+        if (pending.get(record.key) === record) pending.delete(record.key);
+        record.status = status;
+        // A queued snapshot owns this old batch until its original expiry. If no
+        // request has a snapshot, release it now and cancel its timer.
+        if (record.snapshotCount === 0) invalidate(record, status);
+    }
+
+    function closeCurrent(key) {
+        const record = pending.get(key);
+        if (record && record.status === 'open') record.status = 'closed';
+    }
+
+    function appendTo(record, attachments, message, time) {
         const sourceId = messageId(message);
-        if (sourceId && !record.sourceMessageIds.includes(sourceId)) record.sourceMessageIds.push(sourceId);
-        record.sourceMessageIds = record.sourceMessageIds.slice(-maxImagesPerGroup);
-        record.images = [...record.images, ...attachments]
-            .slice(-maxImagesPerGroup);
+        const tagged = attachments.map((attachment) => ({
+            attachment,
+            ...(sourceId ? { sourceMessageId: sourceId } : {}),
+        }));
+        record.images = [...record.images, ...tagged].slice(-maxImagesPerGroup);
         record.lastImageAt = time;
-        records.set(key, record);
-        expireLater(key, record);
-        while (records.size > maxGroups) remove(records.keys().next().value);
+        record.expiresAt = time + ttlMs;
+        record.status = 'open';
+        expireLater(record);
+    }
+
+    function makeRecord(identity, attachments, message, time) {
+        const record = {
+            id: ++nextRecordId,
+            key: identity.key,
+            peerKey: identity.peerKey,
+            pendingByKey: pending,
+            liveRecords,
+            stopTimer: undefined,
+            now,
+            images: [],
+            lastImageAt: time,
+            expiresAt: time + ttlMs,
+            snapshotCount: 0,
+            claimedSnapshot: undefined,
+            invalidated: false,
+            status: 'open',
+            timer: undefined,
+        };
+        record.stopTimer = () => stopTimer(record);
+        liveRecords.set(record.id, record);
+        appendTo(record, attachments, message, time);
+        pending.set(record.key, record);
+        return record;
+    }
+
+    function evictExcessPending() {
+        while (pending.size > maxGroups) {
+            let oldest;
+            for (const record of pending.values()) {
+                if (!oldest || record.lastImageAt < oldest.lastImageAt) oldest = record;
+            }
+            if (!oldest) return;
+            preserveOrDiscard(oldest, 'evicted');
+        }
+    }
+
+    function capture(message, appId) {
+        const identity = identityFor(message, appId);
+        if (!identity) return false;
+        pruneExpired();
+        if (!isPureImageMessage(message, appId)) {
+            closeCurrent(identity.key);
+            return false;
+        }
+
+        const rawAttachments = Array.isArray(message.attachments) ? message.attachments : [];
+        const attachments = rawAttachments.map(imageAttachment);
+        // A declared pure-image message with any unsafe or malformed image is
+        // a boundary. Never append only a partial set to an older valid batch.
+        if (attachments.length === 0 || attachments.some((attachment) => !attachment)) {
+            closeCurrent(identity.key);
+            return false;
+        }
+
+        const time = now();
+        let record = pending.get(identity.key);
+        if (record && record.status === 'open') {
+            appendTo(record, attachments, message, time);
+        }
+        else {
+            if (record) preserveOrDiscard(record, 'superseded');
+            record = makeRecord(identity, attachments, message, time);
+        }
+        evictExcessPending();
         return true;
     }
 
-    function consume(message, appId, state = {}) {
-        const key = identityFor(message, appId);
-        const text = visibleText(message, appId);
-        if (!key || !text || SLASH_COMMAND.test(text)) return undefined;
-        if (message.kind === 'group' && state?.mention?.wasMentioned !== true) return undefined;
+    function snapshot(message, appId, state = {}) {
+        const identity = identityFor(message, appId);
+        if (!identity) return undefined;
         pruneExpired();
-        const record = records.get(key);
-        if (!record) return undefined;
-        // Remove synchronously before returning attachments so overlapping
-        // inbound events cannot consume the same pending set twice.
-        remove(key, record);
-        return Object.freeze({
-            attachments: Object.freeze(record.images.map((attachment) => Object.freeze({
-                ...attachment,
-                qqbotDeferredPromptSource: 'previous-image-only-message',
-            }))),
-            sourceMessageIds: Object.freeze([...record.sourceMessageIds]),
-        });
+
+        // This request is a non-image boundary even if a caller bypassed the
+        // capture middleware. Later images then start a distinct fixed-lifetime batch.
+        if (!isPureImageMessage(message, appId)) closeCurrent(identity.key);
+
+        const text = visibleText(message, appId);
+        if (!text || SLASH_COMMAND.test(text) || /https?:\/\//iu.test(text)) return undefined;
+        if (message.kind === 'group' && state?.mention?.wasMentioned !== true) return undefined;
+
+        const currentAttachments = Array.isArray(message.attachments) ? message.attachments : [];
+        const quotedAttachments = Array.isArray(state?.quote?.attachments) ? state.quote.attachments : [];
+        if (currentAttachments.some(isDeclaredImageAttachment)
+            || quotedAttachments.some(isDeclaredImageAttachment)) return undefined;
+
+        const record = pending.get(identity.key);
+        if (!record || record.invalidated || record.claimedSnapshot
+            || now() >= record.expiresAt) return undefined;
+
+        const attachments = Object.freeze(record.images.map(({ attachment }) => attachment));
+        if (attachments.length === 0) return undefined;
+        const sourceMessageIds = Object.freeze([...new Set(record.images
+            .map(({ sourceMessageId }) => sourceMessageId).filter(Boolean))]);
+        const result = Object.freeze({ attachments, sourceMessageIds });
+        record.snapshotCount++;
+        snapshotRecords.set(result, { record, released: false });
+        return result;
     }
 
     function clearForMessage(message, appId) {
         const identity = identityFor(message, appId);
         if (!identity) return false;
-        const parsed = JSON.parse(identity);
-        // /new resets the conversation peer, so clear all waiting senders in
-        // the same app and peer, regardless of who issued the command.
-        const prefix = JSON.stringify(parsed.slice(0, 3)).slice(0, -1) + ',';
+        pruneExpired();
         let cleared = false;
-        for (const key of [...records.keys()]) {
-            if (key.startsWith(prefix)) cleared = remove(key) || cleared;
+        for (const record of [...liveRecords.values()]) {
+            if (record.peerKey === identity.peerKey) cleared = invalidate(record, 'revoked') || cleared;
         }
         return cleared;
     }
 
     function size() {
         pruneExpired();
-        return records.size;
+        return pending.size;
     }
 
     function inspect(message, appId) {
-        const key = identityFor(message, appId);
-        if (!key) return undefined;
+        const identity = identityFor(message, appId);
+        if (!identity) return undefined;
         pruneExpired();
-        const record = records.get(key);
+        const record = pending.get(identity.key);
         return record ? Object.freeze({ count: record.images.length, lastImageAt: record.lastImageAt }) : undefined;
     }
 
     function clear() {
-        for (const key of [...records.keys()]) remove(key);
+        for (const record of [...liveRecords.values()]) invalidate(record, 'revoked');
     }
 
-    return Object.freeze({ capture, consume, clearForMessage, clear, inspect, size });
+    return Object.freeze({ capture, snapshot, clearForMessage, clear, inspect, size });
 }
 
 export const pendingImagePrompts = createPendingImagePromptCache();
 
-/** Render only the per-original-request image association, never cached metadata. */
-export function renderDeferredImagePromptMetadata(requests) {
+/** Render only request-local counts. Image URLs and peer/source IDs stay private. */
+export function renderRecentImagePromptMetadata(requests) {
     if (!Array.isArray(requests)) return '';
     const lines = [];
     requests.slice(0, 20).forEach((request, index) => {
-        const count = request?.deferredImagePrompt?.count;
+        const snapshot = request?.recentImageSnapshot;
+        if (!recentImageSnapshotAvailable(snapshot)) return;
+        const count = snapshot.attachments.length;
         if (!Number.isSafeInteger(count) || count < 1 || count > DEFAULT_MAX_IMAGES) return;
-        lines.push(`- Original request ${index + 1} includes ${count} image(s) from one or more earlier image-only messages by this sender in this chat within the last five minutes. Pair these images with this request's current text; the earlier image messages contained no prompt.`);
+        lines.push(`- Original request ${index + 1} has ${count} optional recent-image candidate(s) from this sender's consecutive image-only messages in this chat within the last five minutes. The candidates are separate from the current attachments. Use them only when the request explicitly asks to analyze, read, discuss, or edit a recent image, and only when there is no current-message image, quoted image, or explicit image URL. Ignore them for ordinary chat and text-to-image requests.`);
     });
     if (lines.length === 0) return '';
-    return `[Image prompt association]\n${lines.join('\n')}`;
+    return `[Recent image prompt association]\n${lines.join('\n')}`;
 }
 
-/** Capture unprompted images before the group mention gate and stop silently. */
+// Retain the established export name for upgrade compatibility.
+export const renderDeferredImagePromptMetadata = renderRecentImagePromptMetadata;
+
+/** Capture same-sender boundaries before mention handling; pure images stop silently. */
 export function createPendingImageCaptureMiddleware({ appId, cache = pendingImagePrompts } = {}) {
     if (!cache || typeof cache.capture !== 'function') throw new TypeError('pending image cache is required');
     return (ctx, next) => {
@@ -244,29 +396,20 @@ export function createPendingImageCaptureMiddleware({ appId, cache = pendingImag
     };
 }
 
-/** Attach queued images to the next eligible prompt before merge snapshots are captured. */
+/** Attach a frozen per-request capability without changing message attachments. */
 export function createPendingImagePromptMiddleware({ appId, cache = pendingImagePrompts } = {}) {
-    if (!cache || typeof cache.consume !== 'function') throw new TypeError('pending image cache is required');
+    if (!cache || typeof cache.snapshot !== 'function') throw new TypeError('pending image cache is required');
     return (ctx, next) => {
         if (ctx?.signal?.aborted) return next();
-        const pending = cache.consume(ctx?.message, appId, ctx?.state);
-        if (pending) {
-            const message = ctx.message;
-            message.attachments = [
-                ...(Array.isArray(message.attachments) ? message.attachments : []),
-                ...pending.attachments,
-            ];
-            if (!ctx.state || typeof ctx.state !== 'object') ctx.state = {};
-            ctx.state.qqbotDeferredImagePrompt = Object.freeze({
-                count: pending.attachments.length,
-                sourceMessageIds: pending.sourceMessageIds,
-            });
-        }
+        if (!ctx.state || typeof ctx.state !== 'object') ctx.state = {};
+        const snapshot = cache.snapshot(ctx?.message, appId, ctx.state);
+        if (snapshot) ctx.state.qqbotRecentImages = snapshot;
+        else delete ctx.state.qqbotRecentImages;
         return next();
     };
 }
 
-/** Clear a peer's queued images when /new is observed, then let slash handling run. */
+/** Clear all pending and queued image snapshots for a peer when /new is observed. */
 export function createPendingImageNewCommandCleanup({ appId, cache = pendingImagePrompts } = {}) {
     if (!cache || typeof cache.clearForMessage !== 'function') throw new TypeError('pending image cache is required');
     return (ctx, next) => {
