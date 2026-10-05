@@ -326,6 +326,20 @@ def main():
         # diagnostics time to reach stdout before collecting/removing fixtures.
         time.sleep(1)
         for name in (sea, bridge):
+            state = subprocess.run(["docker", "inspect", "--format",
+                                    "exit={{.State.ExitCode}} oom={{.State.OOMKilled}} running={{.State.Running}}", name],
+                                   capture_output=True, text=True)
+            print(name, state.stdout.strip(), flush=True)
+            if name == sea:
+                with tempfile.TemporaryDirectory(prefix="qqbot-panic-") as panic_dir:
+                    panic_path = Path(panic_dir) / "panic.log"
+                    copied = subprocess.run(["docker", "cp", name + ":/app/data/panic.log", str(panic_path)],
+                                            capture_output=True, text=True)
+                    if copied.returncode == 0:
+                        panic_log = panic_path.read_text(encoding="utf-8", errors="replace")[-16000:]
+                        for credential in (token, private_token, ws_token):
+                            panic_log = panic_log.replace(credential, "[redacted]")
+                        print(name, "native panic diagnostic:", panic_log, flush=True)
             diagnostic = subprocess.run(["docker", "logs", "--tail", "80", name],
                                         capture_output=True, text=True)
             runtime_log = diagnostic.stdout + diagnostic.stderr
