@@ -6,14 +6,14 @@ qq-bot 使用专用工具调用 Gensokyo-MCP；桥将请求变成虚拟 OneBot v
 
 两个 fork 固定为子模块：`third_party/gensokyo-mcp`、`third_party/sealdice-core`。初始化使用 `git submodule update --init --recursive`。海豹嵌套资源按其自己的 gitlink 检出，不改变 UI。
 
-镜像分别为 `tryao/qqbot-dsh:v0.10.0`、`tryao/gensokyo-mcp:v0.1.0`、`tryao/sealdice-core:v1.6.2-bridge.1`，只使用版本标签，没有 latest。主镜像不包含两个 Go 项目源码或运行程序。
+镜像分别为 `tryao/qqbot-dsh:v0.10.1`、`tryao/gensokyo-mcp:v0.1.0`、`tryao/sealdice-core:v1.6.2-bridge.2`，只使用版本标签，没有 latest。主镜像不包含两个 Go 项目源码或运行程序。
 
 ## 启动
 
 保留当前聊天凭据。在 `.env` 中配置三份不同的随机服务密钥；不要复用 QQ/LLM 密钥：
 
 ```dotenv
-IMAGE_TAG=v0.10.0
+IMAGE_TAG=v0.10.1
 QQBOT_ONEBOT_ENABLED=true
 QQBOT_ONEBOT_MCP_URL=http://gensokyo-mcp:8090/mcp
 QQBOT_ONEBOT_BACKENDS=sealdice
@@ -22,7 +22,7 @@ QQBOT_ONEBOT_INTERNAL_TOKEN=replace-with-different-random-internal-secret
 ONEBOT_WS_TOKEN=replace-with-different-random-onebot-secret
 QQBOT_ONEBOT_HIDDEN_ENABLED=false
 GENSOKYO_IMAGE_TAG=v0.1.0
-SEALDICE_IMAGE_TAG=v1.6.2-bridge.1
+SEALDICE_IMAGE_TAG=v1.6.2-bridge.2
 ```
 
 ```sh
@@ -46,6 +46,8 @@ docker compose -f docker-compose.qnap.yml --profile trpg up -d
 ## 生命周期与升级
 
 标准 OneBot v11 的 echo 关联 API 请求，reply 段关联源消息；完整命令结束使用明确标注的项目扩展。详见 [契约](onebot-bridge-contract.md)。每次连接重新协商，不使用静默窗口宣布完成。旧连接、缺少关联及完成后补发的输出拒绝，未知状态不自动重放。
+
+海豹桥接端点静默忽略标准 `meta_event/heartbeat` 和 `meta_event/lifecycle`；它们是连接控制事件，不是骰子命令。其他不支持的非消息事件仍会告警，普通 OneBot 模式沿用原来的事件处理。
 
 派发后超时、取消或断线时，后端旧任务可能仍在改变角色数据，桥会暂停该运行实例。只有原连接的有效完成通知，或海豹进程重启后的新实例协商，才能恢复；同一进程仅重新连接不够。桥重启会保留该隔离状态。用户需要查询实际状态，不能自动补执行不确定的指令。
 

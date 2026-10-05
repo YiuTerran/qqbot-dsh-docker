@@ -154,6 +154,15 @@ def main():
         assert "1d1" in text(roll) and "1" in text(roll), roll
         evidence["checks"].append("native registration and r1d1")
         evidence["results"].append(roll)
+        # Fresh Gensokyo data uses the pinned five-second heartbeat interval.
+        # Keep the real socket connected for two heartbeats: lifecycle and
+        # transport heartbeats must not be mistaken for rejected commands.
+        time.sleep(11)
+        sea_log = subprocess.check_output(["docker", "logs", sea], stderr=subprocess.STDOUT, text=True)
+        assert "OneBot LLM bridge event rejected: only message events are accepted" not in sea_log, \
+            "normal OneBot lifecycle or heartbeat produced a bridge rejection warning"
+        assert client.command(".r 1d1")["status"] == "ok"
+        evidence["checks"].append("normal lifecycle and periodic heartbeats stay quiet without interrupting commands")
         for forbidden in [".master", ".rhd 1d1", ".set help"]:
             rejected = client.rpc("tools/call", {"name": "call_ws", "arguments": {
                 "backend_id": "sealdice", "request_id": str(uuid.uuid4()), "audience": "group",

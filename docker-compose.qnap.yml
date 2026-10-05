@@ -78,7 +78,7 @@ services:
 
   sealdice:
     profiles: [trpg]
-    image: "tryao/sealdice-core:${SEALDICE_IMAGE_TAG:-v1.6.2-bridge.1}"
+    image: "tryao/sealdice-core:${SEALDICE_IMAGE_TAG:-v1.6.2-bridge.2}"
     restart: unless-stopped
     environment:
       TZ: Asia/Shanghai
