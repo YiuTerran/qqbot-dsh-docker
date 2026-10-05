@@ -268,10 +268,28 @@ def main():
             "-e", "QQBOT_ONEBOT_BACKENDS=sealdice", "-e", "QQBOT_ONEBOT_MCP_URL=http://gensokyo-mcp:8090/mcp",
             "-e", "QQBOT_ONEBOT_MCP_TOKEN=" + token, "-e", "QQBOT_ONEBOT_INTERNAL_TOKEN=" + private_token,
             args.qqbot_image, "/tmp/test-onebot-wrapper.mjs")
-        wrapper_result = json.loads(wrapper_output)
+        wrapper_results = [json.loads(line) for line in wrapper_output.splitlines() if line.startswith('{"result":')]
+        assert len(wrapper_results) == 1, "wrapper probe did not return one structured result"
+        wrapper_result = wrapper_results[0]
         assert wrapper_result["result"] == "PASS", wrapper_result
         evidence["results"].append(wrapper_result)
         evidence["checks"].append("production qq-bot wrapper authorization to real native backend")
+        profile_probe = str(Path(__file__).resolve().with_name("test-profile-boot.mjs"))
+        profile_output = docker("run", "--rm", "--network", network,
+            "--mount", "type=bind,src=" + profile_probe + ",dst=/tmp/test-profile-boot.mjs,readonly",
+            "-e", "QQBOT_APPID=123456789", "-e", "QQBOT_SECRET=fixture-app-secret",
+            "-e", "DEEPSEEK_API_KEY=fixture-official-key",
+            "-e", "QQBOT_ONEBOT_ENABLED=true", "-e", "QQBOT_ONEBOT_HIDDEN_ENABLED=false",
+            "-e", "QQBOT_ONEBOT_BACKENDS=sealdice", "-e", "QQBOT_ONEBOT_MCP_URL=http://gensokyo-mcp:8090/mcp",
+            "-e", "QQBOT_ONEBOT_MCP_TOKEN=" + token, "-e", "QQBOT_ONEBOT_INTERNAL_TOKEN=" + private_token,
+            "-e", "QQBOT_TEST_ONEBOT_EXPECT_READY=true",
+            args.qqbot_image, "node", "/tmp/test-profile-boot.mjs")
+        profile_results = [json.loads(line) for line in profile_output.splitlines() if line.startswith('{"ok":')]
+        assert len(profile_results) == 1, "real Harness probe did not return one structured result"
+        profile_result = profile_results[0]
+        assert profile_result["ok"] is True and "qqbot_onebot_command" in profile_result["modelNames"], profile_result
+        evidence["results"].append(profile_result)
+        evidence["checks"].append("real Harness catalog and model-facing result from native SeaDice")
         evidence["result"] = "PASS"
         print("OneBot native container integration PASS:", len(evidence["checks"]), "checks")
     except BaseException:

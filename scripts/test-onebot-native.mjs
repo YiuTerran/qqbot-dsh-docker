@@ -70,10 +70,15 @@ function deferred() {
 }
 
 function setup({ hidden = false, resultForCall, friendRegistry, testSender = false, sendPrivateText,
-    resolveHiddenRecipient, verifyProactiveEligibility, session, fetchImpl, bot } = {}) {
+    resolveHiddenRecipient, verifyProactiveEligibility, session, fetchImpl, bot, registerError,
+    onAvailability, logger } = {}) {
     let descriptor;
     const registrations = [];
-    const ctx = { get: (name) => name === 'tools' ? { register(tool) { registrations.push(tool.name); descriptor = tool; } } : undefined };
+    const ctx = { get: (name) => name === 'tools' ? { register(tool) {
+        if (registerError) throw registerError;
+        registrations.push(tool.name);
+        descriptor = tool;
+    } } : undefined };
     let calls = 0;
     const mockSession = session ?? {
         async listTools() { return [{ name: 'call_ws' }]; },
@@ -101,6 +106,8 @@ function setup({ hidden = false, resultForCall, friendRegistry, testSender = fal
         sendPrivateText,
         testOnlyProactiveC2C: testSender,
         bot,
+        logger,
+        onAvailability,
         refreshIntervalMs: 60_000,
     });
     return {
@@ -166,6 +173,88 @@ test('tool parser accepts bounded native commands and rejects generic/admin inpu
     assert.deepEqual(readOnebotConfig({ QQBOT_ONEBOT_ENABLED: 'false' }).backendIds, []);
 });
 
+test('registration failure stays unavailable and never reports a ready tool', async () => {
+    const availability = [];
+    const logs = [];
+    const originalLog = console.log;
+    console.log = (...args) => logs.push(args.map(String).join(' '));
+    let service;
+    try {
+        service = setup({
+            registerError: new Error('SECRET_TOKEN private-body https://private.example.test/mcp'),
+            onAvailability: (value) => availability.push(value),
+        });
+        assert.equal(await service.service.ready, false);
+        assert.ok(availability.length > 0 && availability.every((value) => value === false), 'availability must remain false around a failed register');
+        assert.deepEqual(service.registrations, []);
+        assert.equal(service.service.diagnostics().registered, false);
+        assert.equal(service.service.diagnostics().toolAvailable, false);
+        assert.equal(service.service.diagnostics().reason, 'register-failed');
+        assert.ok(logs.some((line) => line === '[qqbot-onebot] register-failed backends=1 available=false'));
+        assert.ok(logs.every((line) => !/SECRET_TOKEN|private-body|private\.example|https?:\/\//u.test(line)), 'registration error details leaked to logs');
+    }
+    finally {
+        console.log = originalLog;
+        await service?.service.stop();
+    }
+});
+
+test('readiness transitions log fixed redacted states once and report tool visibility', async () => {
+    const state = { backendReady: false, exposeCallWs: true };
+    const logs = [];
+    const originalLog = console.log;
+    console.log = (...args) => logs.push(args.map(String).join(' '));
+    const session = {
+        async listTools() { return state.exposeCallWs ? [{ name: 'call_ws' }] : []; },
+        async callWs() { throw new Error('unused'); },
+    };
+    const fetchImpl = async (url) => {
+        if (new URL(url).pathname !== '/internal/backends') throw new Error('unused');
+        return json({ backends: [{ id: 'sealdice', version: 1, ready: state.backendReady }] });
+    };
+    let service;
+    try {
+        service = setup({ session, fetchImpl });
+        assert.equal(await service.service.ready, false);
+        assert.deepEqual(service.service.diagnostics(), {
+            enabled: true,
+            readyBackendCount: 0,
+            registered: false,
+            toolAvailable: false,
+            reason: 'backend-not-ready',
+            hiddenEnabled: false,
+            proactivePermission: 'unsupported-by-platform',
+        });
+        await service.service.refresh();
+        assert.equal(logs.filter((line) => line.includes('backend-not-ready')).length, 1, 'unchanged state was logged repeatedly');
+
+        state.backendReady = true;
+        assert.equal(await service.service.refresh(), true);
+        assert.equal(service.service.diagnostics().toolAvailable, true);
+        state.backendReady = false;
+        assert.equal(await service.service.refresh(), false);
+        assert.equal(service.service.diagnostics().registered, true, 'registered definition should remain in the Cordis registry');
+        assert.equal(service.service.diagnostics().toolAvailable, false);
+
+        state.backendReady = true;
+        state.exposeCallWs = false;
+        assert.equal(await service.service.refresh(), false);
+        assert.equal(service.service.diagnostics().reason, 'call-ws-missing');
+        assert.equal(service.service.diagnostics().readyBackendCount, 0);
+        state.exposeCallWs = true;
+        assert.equal(await service.service.refresh(), true);
+        assert.equal(service.service.diagnostics().toolAvailable, true);
+        assert.ok(logs.some((line) => line === '[qqbot-onebot] backend-not-ready backends=0 available=false'));
+        assert.ok(logs.some((line) => line === '[qqbot-onebot] ready backends=1 available=true'));
+        assert.ok(logs.some((line) => line === '[qqbot-onebot] call-ws-missing backends=1 available=false'));
+        assert.ok(logs.every((line) => !/token|http|fixture-mcp|fixture-internal|private-body/iu.test(line)));
+    }
+    finally {
+        console.log = originalLog;
+        await service?.service.stop();
+    }
+});
+
 test('merged messages have app-scoped opaque IDs and immutable per-original authorization', async () => {
     const { agent, scope, metadata } = boundExec([groupOriginal('member-a'), groupOriginal('member-b')]);
     assert.equal(metadata.length, 2);
@@ -224,6 +313,10 @@ test('same original command shares a call and unsupported production rh never di
     ]);
     assert.deepEqual(first, duplicate);
     assert.equal(service.calls, 1);
+    const rendered = service.descriptor.output.render(args, first);
+    assert.deepEqual(rendered, [{ type: 'text', text: JSON.stringify(first) }]);
+    assert.match(rendered[0].text, /1d1 = 1/u, 'public Dice output is available to the model');
+    assert.doesNotMatch(rendered[0].text, /PRIVATE_SENTINEL|private-body/u, 'rendered content contains no private body');
     const hidden = await service.descriptor.execute({ ...args, command: '.rh 1d1' }, exec);
     assert.equal(hidden.status, 'failed');
     assert.match(hidden.notice, /no longer supports proactive private messages/u);

@@ -145,6 +145,39 @@ function fakeTool(ctx, name, execute) {
     });
 }
 
+test('native tool execution logs a failed attempt and preserves the subsequent successful result', async (t) => {
+    const ctx = await runtime(t);
+    const agent = {};
+    beginDocumentTurn(agent, { content: 'Read this public page.' });
+    t.after(() => endDocumentTurn(agent));
+    const lines = [];
+    const originalWarn = console.warn;
+    console.warn = (...values) => lines.push(values.join(' '));
+    t.after(() => { console.warn = originalWarn; });
+    let attempts = 0;
+    fakeTool(ctx, 'web_fetch', () => {
+        if (++attempts === 1) {
+            const error = new Error('OpenAI API error (503): {"error":{"code":"server_error","message":"sk-private-search-secret https://example.com/?key=secret private-prompt"}}');
+            error.status = 503;
+            throw error;
+        }
+        return 'PAGE_SUCCESS';
+    });
+    const args = { url: 'https://example.com/?key=secret' };
+    const failed = await call(ctx, 'web_fetch', args, agent);
+    assert.equal(failed.isError, true);
+    const failures = lines.filter((line) => line.startsWith('[qqbot-tool-error] '));
+    assert.equal(failures.length, 1);
+    assert.match(failures[0], /web_fetch/u);
+    assert.match(failures[0], /503/u);
+    assert.doesNotMatch(failures[0], /sk-private|example\.com|key=secret|private-prompt/u);
+    const succeeded = await call(ctx, 'web_fetch', args, agent);
+    assert.equal(succeeded.isError, false);
+    assert.match(JSON.stringify(succeeded.content), /PAGE_SUCCESS/u);
+    assert.equal(lines.filter((line) => line.startsWith('[qqbot-tool-error] ')).length, 1,
+        'a successful retry does not emit another failure');
+});
+
 test('executor rejects dangerous and unknown tools before their bodies run, even if another listener allows', async (t) => {
     const ctx = await runtime(t);
     let executed = 0;

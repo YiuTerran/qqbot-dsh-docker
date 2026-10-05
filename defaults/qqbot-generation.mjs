@@ -11,6 +11,7 @@ import {
 import { resolvePublicHttpAddresses } from './qqbot-web-pages.mjs';
 import { logDownloadDiagnostics } from './qqbot-image-diagnostics.mjs';
 import { normalizeEditImage } from './qqbot-image-input.mjs';
+import { logToolFailure } from './qqbot-provider-errors.mjs';
 
 export { createGenerationSender } from './qqbot-generation-sender.mjs';
 
@@ -501,7 +502,11 @@ export function createImageService({ route, transport, resolvePublic, fetchImpl 
                 maxRedirects: 0,
                 assertActive,
             });
-            if (!response || response.status < 200 || response.status >= 300) throw new Error('provider-response');
+            if (!response || response.status < 200 || response.status >= 300) {
+                const error = new Error('provider-response');
+                if (Number.isInteger(response?.status)) error.status = response.status;
+                throw error;
+            }
             const parsed = parseImageResponse(response.body);
             let result = parsed.bytes;
             if (!result) {
@@ -522,7 +527,11 @@ export function createImageService({ route, transport, resolvePublic, fetchImpl 
                 });
                 const mediaType = downloaded?.headers?.get?.('content-type')?.split(';')[0]?.trim().toLowerCase();
                 if (!downloaded || downloaded.status < 200 || downloaded.status >= 300
-                    || !['image/png', 'image/jpeg'].includes(mediaType)) throw new Error('provider-image-url');
+                    || !['image/png', 'image/jpeg'].includes(mediaType)) {
+                    const error = new Error('provider-image-url');
+                    if (Number.isInteger(downloaded?.status)) error.status = downloaded.status;
+                    throw error;
+                }
                 result = downloaded.body;
             }
             if (signal?.aborted || (typeof assertActive === 'function' && assertActive() !== true) || !inspectImage(result)) throw new Error('provider-image');
@@ -646,7 +655,8 @@ async function sendOperationalNotice(sender, scope, request, notice, kind, signa
     try {
         await sender.sendNotice(makeTrustedSenderRequest(scope, request, kind), notice, signal);
     }
-    catch {
+    catch (error) {
+        logToolFailure(kind === 'image' ? GENERATE_IMAGE_TOOL : CREATE_MARKDOWN_TOOL, 'send-notice', error);
         // Safe user-visible output is already represented in the tool result.
     }
 }
@@ -664,7 +674,8 @@ async function performImageTask({ scope, request, args, exec, service, quota, se
     try {
         acquired = await quota.tryAcquire({ ownerId: request.ownerId, type: 'image' });
     }
-    catch {
+    catch (error) {
+        logToolFailure(GENERATE_IMAGE_TOOL, 'quota-acquire', error);
         acquired = undefined;
     }
     if (!acquired?.ok) {
@@ -699,6 +710,7 @@ async function performImageTask({ scope, request, args, exec, service, quota, se
                 if (remote) logDownloadDiagnostics(imageGrant, 'success');
             }
             catch (error) {
+                logToolFailure(GENERATE_IMAGE_TOOL, 'download', error);
                 if (remote) logDownloadDiagnostics(imageGrant, 'failed', error);
                 if (generationScopeFailure(scope, 'image')) return result('expired');
                 const notice = notices.failed;
@@ -709,6 +721,7 @@ async function performImageTask({ scope, request, args, exec, service, quota, se
                 imageBytes = await normalizeEditImage(imageBytes, { signal: operationSignal, inspectImage });
             }
             catch (error) {
+                logToolFailure(GENERATE_IMAGE_TOOL, 'normalize-image', error);
                 if (generationScopeFailure(scope, 'image')) return result('expired');
                 const status = error?.kind === 'too-large' ? 'too-large' : error?.kind === 'image-type' ? 'image-type' : 'failed';
                 const notice = notices[status];
@@ -721,7 +734,8 @@ async function performImageTask({ scope, request, args, exec, service, quota, se
         try {
             reserved = await quota.reserve({ ownerId: request.ownerId, type: 'image' });
         }
-        catch {
+        catch (error) {
+            logToolFailure(GENERATE_IMAGE_TOOL, 'quota-reserve', error);
             reserved = undefined;
         }
         if (!reserved?.ok) {
@@ -736,6 +750,7 @@ async function performImageTask({ scope, request, args, exec, service, quota, se
             generated = await service.generate({ prompt: args.prompt, imageBytes, signal: operationSignal, assertActive });
         }
         catch (error) {
+            logToolFailure(GENERATE_IMAGE_TOOL, 'provider', error);
             if (generationScopeFailure(scope, 'image')) return result('expired');
             const status = error?.kind === 'image-type' ? 'image-type' : error?.kind === 'too-large' ? 'too-large' : 'failed';
             const notice = notices[status];
@@ -745,13 +760,17 @@ async function performImageTask({ scope, request, args, exec, service, quota, se
         if (generationScopeFailure(scope, 'image')) return result('expired');
         const sendRequest = makeTrustedSenderRequest(scope, request, 'image');
         let sent;
+        let sendThrew = false;
         try {
             sent = await sender.sendImage(sendRequest, generated, operationSignal);
         }
-        catch {
+        catch (error) {
+            sendThrew = true;
+            logToolFailure(GENERATE_IMAGE_TOOL, 'send-image', error);
             sent = { sent: false, reason: 'failed' };
         }
         if (sent?.sent) return result('sent');
+        if (!sendThrew) logToolFailure(GENERATE_IMAGE_TOOL, 'send-image', new Error(`send-${sent?.reason === 'limit' ? 'limit' : sent?.reason === 'expired' ? 'expired' : 'failed'}`));
         const status = sent?.reason === 'limit' ? 'quota' : sent?.reason === 'expired' ? 'expired' : 'failed';
         const notice = notices[status];
         await sendOperationalNotice(sender, scope, request, notice, 'image', operationSignal);
@@ -773,7 +792,8 @@ async function performMarkdownTask({ scope, request, args, exec, quota, sender }
     try {
         acquired = await quota.tryAcquire({ ownerId: request.ownerId, type: 'markdown' });
     }
-    catch {
+    catch (error) {
+        logToolFailure(CREATE_MARKDOWN_TOOL, 'quota-acquire', error);
         acquired = undefined;
     }
     if (!acquired?.ok) {
@@ -787,7 +807,8 @@ async function performMarkdownTask({ scope, request, args, exec, quota, sender }
         try {
             reserved = await quota.reserve({ ownerId: request.ownerId, type: 'markdown' });
         }
-        catch {
+        catch (error) {
+            logToolFailure(CREATE_MARKDOWN_TOOL, 'quota-reserve', error);
             reserved = undefined;
         }
         if (!reserved?.ok) {
@@ -800,21 +821,29 @@ async function performMarkdownTask({ scope, request, args, exec, quota, sender }
         const signal = getGenerationRequestSignal(scope, exec.signal, 'markdown');
         const sendRequest = makeTrustedSenderRequest(scope, request, 'markdown');
         let fileResult;
+        let fileSendThrew = false;
         try {
             fileResult = await sender.sendMarkdownFile(sendRequest, bytes, filename, signal);
         }
-        catch {
+        catch (error) {
+            fileSendThrew = true;
+            logToolFailure(CREATE_MARKDOWN_TOOL, 'send-markdown', error);
             fileResult = { sent: false, reason: 'failed' };
         }
         if (fileResult?.sent) return result('markdown', notices.markdown);
+        if (!fileSendThrew) logToolFailure(CREATE_MARKDOWN_TOOL, 'send-markdown', new Error(`send-${fileResult?.reason === 'limit' ? 'limit' : fileResult?.reason === 'expired' ? 'expired' : 'failed'}`));
         let fallbackResult;
+        let fallbackSendThrew = false;
         try {
             fallbackResult = await sender.sendMarkdownFallback(sendRequest, safeMarkdownFallbackText(content), signal);
         }
-        catch {
+        catch (error) {
+            fallbackSendThrew = true;
+            logToolFailure(CREATE_MARKDOWN_TOOL, 'send-markdown', error);
             fallbackResult = { sent: false, reason: 'failed' };
         }
         if (fallbackResult?.sent) return result('fallback');
+        if (!fallbackSendThrew) logToolFailure(CREATE_MARKDOWN_TOOL, 'send-markdown', new Error(`fallback-${fallbackResult?.reason === 'limit' ? 'limit' : fallbackResult?.reason === 'expired' ? 'expired' : 'failed'}`));
         const status = fallbackResult?.reason === 'limit' || fileResult?.reason === 'limit' ? 'quota'
             : fallbackResult?.reason === 'expired' ? 'expired' : 'failed';
         const notice = notices[status];

@@ -9,6 +9,107 @@ const STABLE_CATEGORIES = new Map([
     ['NO_MODEL', 'config'], ['INVALID_REQUEST', 'invalid'],
 ]);
 
+const LOG_TOOLS = new Set([
+    'qqbot_describe_image', 'qqbot_read_document', 'qqbot_generate_image',
+    'qqbot_create_markdown', 'qqbot_onebot_command', 'web_fetch', 'web_search',
+]);
+const LOG_STAGES = new Set([
+    'execute', 'execute-result', 'execute-throw', 'quota-acquire', 'quota-reserve',
+    'download', 'normalize-image', 'provider', 'qq-delivery', 'markdown-delivery',
+    'registration', 'probe', 'call', 'private-delivery', 'send-notice', 'send-image',
+    'send-markdown',
+]);
+const LOG_CODES = new Set([
+    ...STABLE_CATEGORIES.keys(),
+    'insufficient_quota', 'billing_hard_limit_reached', 'context_length_exceeded',
+    'content_filter', 'invalid_api_key', 'permission_denied', 'model_not_found',
+    'server_error', 'invalid_prompt', 'rate_limit_exceeded', 'UNSUPPORTED_SCHEMA',
+    'ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT',
+    'EHOSTUNREACH', 'ENETUNREACH', 'EPIPE', 'ERR_TLS_CERT_ALTNAME_INVALID',
+    'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET', 'UND_ERR_HEADERS_TIMEOUT',
+]);
+const LOG_ERROR_TYPES = new Set([
+    'Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError',
+    'AggregateError', 'DOMException', 'AbortError', 'TimeoutError',
+    'JsonSchemaError', 'ToolNotFoundError', 'HarnessError', 'FetchError',
+]);
+const LOG_RESULT_REASONS = new Map([
+    ['failed', 'generic'], ['unknown', 'generic'], ['busy', 'busy'], ['state', 'config'],
+    ['quota', 'quota'], ['too-large', 'too-large'], ['image-type', 'invalid'],
+    ['expired', 'generic'], ['invalid', 'invalid'],
+]);
+const NETWORK_CODES = new Set([
+    'ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ECONNREFUSED', 'EHOSTUNREACH',
+    'ENETUNREACH', 'EPIPE', 'ERR_TLS_CERT_ALTNAME_INVALID', 'UND_ERR_SOCKET',
+]);
+const TIMEOUT_CODES = new Set(['ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT']);
+
+function safeRead(value, key) {
+    try { return value?.[key]; } catch { return undefined; }
+}
+
+function safeLogCode(value) {
+    return typeof value === 'string' && LOG_CODES.has(value) ? value : undefined;
+}
+
+/** Log a bounded diagnostic record without copying error text or tool data. */
+export function logToolFailure(tool, stage, failure) {
+    const fallback = '[qqbot-tool-error] {"tool":"other","stage":"other","reason":"generic"}';
+    try {
+        const statusCandidates = [safeRead(failure, 'status'), safeRead(failure, 'statusCode'), safeRead(failure, 'httpStatus'),
+            safeRead(safeRead(failure, 'response'), 'status')];
+        const envelope = parseEnvelope(failure);
+        const status = statusCandidates.find((value) => Number.isInteger(value) && value >= 100 && value <= 599)
+            ?? envelope?.status;
+        const causes = [];
+        const seenCauses = new Set([failure]);
+        let cause = safeRead(failure, 'cause');
+        while (cause && causes.length < 3 && !seenCauses.has(cause)) {
+            seenCauses.add(cause);
+            causes.push(cause);
+            cause = safeRead(cause, 'cause');
+        }
+        const info = safeRead(failure, 'info');
+        const identifiers = [safeRead(failure, 'code'), safeRead(info, 'code'), safeRead(safeRead(failure, 'error'), 'code'),
+            ...(envelope?.identifiers ?? [])];
+        const code = identifiers.map(safeLogCode).find(Boolean);
+        const causeCode = causes.map((entry) => safeLogCode(safeRead(entry, 'code'))).find(Boolean);
+        const infoName = safeRead(info, 'name');
+        const constructorName = LOG_ERROR_TYPES.has(infoName) ? infoName : safeRead(safeRead(failure, 'constructor'), 'name');
+        const failureName = safeRead(failure, 'name');
+        const causeNames = causes.flatMap((entry) => [safeRead(safeRead(entry, 'constructor'), 'name'), safeRead(entry, 'name')]);
+        const resultStatus = safeRead(failure, 'kind');
+        const classifications = [
+            classifyProviderFailure(failure),
+            status === undefined ? 'generic' : classifyProviderFailure({ status }),
+            code ? classifyProviderFailure({ code }) : 'generic',
+            causeCode ? classifyProviderFailure({ code: causeCode }) : 'generic',
+        ];
+        let reason = LOG_RESULT_REASONS.get(resultStatus)
+            ?? classifications.find((category) => category !== 'generic') ?? 'generic';
+        if (reason === 'generic' && (failureName === 'AbortError' || constructorName === 'AbortError'
+            || causeNames.includes('AbortError'))) reason = 'aborted';
+        if (reason === 'generic' && (TIMEOUT_CODES.has(causeCode) || TIMEOUT_CODES.has(code)
+            || failureName === 'TimeoutError' || constructorName === 'TimeoutError'
+            || causeNames.includes('TimeoutError'))) reason = 'timeout';
+        if (reason === 'generic' && (NETWORK_CODES.has(causeCode) || NETWORK_CODES.has(code))) reason = 'network';
+        const record = {
+            tool: LOG_TOOLS.has(tool) ? tool : 'other',
+            stage: LOG_STAGES.has(stage) ? stage : 'other',
+            reason,
+            ...(typeof constructorName === 'string' && LOG_ERROR_TYPES.has(constructorName) ? { errorType: constructorName } : {}),
+            ...(status !== undefined ? { status } : {}),
+            ...(code ? { code } : {}),
+            ...(causeCode ? { causeCode } : {}),
+            ...(LOG_RESULT_REASONS.has(resultStatus) ? { resultStatus } : {}),
+        };
+        console.warn(`[qqbot-tool-error] ${JSON.stringify(record)}`);
+    }
+    catch {
+        try { console.warn(fallback); } catch { /* Logging must never change tool behavior. */ }
+    }
+}
+
 const NOTICES = Object.freeze({
     quota: '主人，模型服务的余额或额度不足啦，麻烦联系管理员检查额度或充值，本鱼暂时还答不了这条。',
     auth: '主人，模型服务的凭据或访问权限好像有问题，麻烦联系管理员检查一下配置。',

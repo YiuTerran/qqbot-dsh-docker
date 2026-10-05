@@ -23,6 +23,7 @@ import {
     getGenerationRecentImageReference,
 } from './qqbot-generation-scope.mjs';
 import { registerReadDocumentTool } from './qqbot-documents.mjs';
+import { logToolFailure } from './qqbot-provider-errors.mjs';
 import {
     CREATE_MARKDOWN_TOOL,
     GENERATE_IMAGE_TOOL,
@@ -434,43 +435,63 @@ export function installChatPolicy(ctx) {
     // AsyncLocalStorage carries its immutable turn binding into the actual
     // provider request, even when different QQ conversations run concurrently.
     ctx.on('tools/execute', async (exec, next) => {
-        if (exec.name === ONEBOT_COMMAND_TOOL) {
-            return runInOnebotExecution(exec, async () => {
-                const reason = denyUnsafeTool(exec);
-                if (reason) throw new Error(reason);
-                const scope = getBoundOnebotExecution(exec);
-                const originalSignal = exec.signal;
-                exec.signal = getOnebotRequestSignal(scope, originalSignal);
-                try {
-                    throwIfAborted(exec.signal);
-                    const result = await next();
-                    if (onebotExecutionFailure(exec)) throw new Error('This tool call belongs to an expired QQ message.');
-                    throwIfAborted(exec.signal);
-                    return result;
-                }
-                finally {
-                    exec.signal = originalSignal;
-                }
-            });
-        }
-        return runInDocumentExecution(exec, async () => {
-            const reason = denyUnsafeTool(exec);
-            if (reason) throw new Error(reason);
-            const scope = getBoundDocumentExecution(exec);
-            const originalSignal = exec.signal;
-            exec.signal = getTurnRequestSignal(scope, originalSignal);
+        try {
+            let result;
+            if (exec.name === ONEBOT_COMMAND_TOOL) {
+                result = await runInOnebotExecution(exec, async () => {
+                    const reason = denyUnsafeTool(exec);
+                    if (reason) throw new Error(reason);
+                    const scope = getBoundOnebotExecution(exec);
+                    const originalSignal = exec.signal;
+                    exec.signal = getOnebotRequestSignal(scope, originalSignal);
+                    try {
+                        throwIfAborted(exec.signal);
+                        const result = await next();
+                        if (onebotExecutionFailure(exec)) throw new Error('This tool call belongs to an expired QQ message.');
+                        throwIfAborted(exec.signal);
+                        return result;
+                    }
+                    finally {
+                        exec.signal = originalSignal;
+                    }
+                });
+            }
+            else {
+                result = await runInDocumentExecution(exec, async () => {
+                    const reason = denyUnsafeTool(exec);
+                    if (reason) throw new Error(reason);
+                    const scope = getBoundDocumentExecution(exec);
+                    const originalSignal = exec.signal;
+                    exec.signal = getTurnRequestSignal(scope, originalSignal);
+                    try {
+                        throwIfAborted(exec.signal);
+                        const result = await next();
+                        if (!isBoundDocumentExecutionActive(exec)) throw new Error('This tool call belongs to an expired QQ message.');
+                        throwIfAborted(exec.signal);
+                        if (exec.name === 'web_search') recordSuccessfulSearchSources(exec, result);
+                        return result;
+                    }
+                    finally {
+                        exec.signal = originalSignal;
+                    }
+                });
+            }
             try {
-                throwIfAborted(exec.signal);
-                const result = await next();
-                if (!isBoundDocumentExecutionActive(exec)) throw new Error('This tool call belongs to an expired QQ message.');
-                throwIfAborted(exec.signal);
-                if (exec.name === 'web_search') recordSuccessfulSearchSources(exec, result);
-                return result;
+                if (result?.isError === true) logToolFailure(exec.name, 'execute-result', result.error ?? result);
+                else {
+                    const status = result?.value?.status;
+                    if (['failed', 'unknown', 'busy', 'state', 'quota', 'too-large', 'image-type', 'expired', 'invalid'].includes(status)) {
+                        logToolFailure(exec.name, 'execute-result', { kind: status });
+                    }
+                }
             }
-            finally {
-                exec.signal = originalSignal;
-            }
-        });
+            catch { /* Inspecting a native result is diagnostic only. */ }
+            return result;
+        }
+        catch (error) {
+            logToolFailure(exec?.name, 'execute-throw', error);
+            throw error;
+        }
     });
     ctx.systemPrompt.section({
         name: 'qqbot:speaker-identity',

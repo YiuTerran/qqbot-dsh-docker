@@ -6,14 +6,14 @@ qq-bot 使用专用工具调用 Gensokyo-MCP；桥将请求变成虚拟 OneBot v
 
 两个 fork 固定为子模块：`third_party/gensokyo-mcp`、`third_party/sealdice-core`。初始化使用 `git submodule update --init --recursive`。海豹嵌套资源按其自己的 gitlink 检出，不改变 UI。
 
-镜像分别为 `tryao/qqbot-dsh:v0.10.1`、`tryao/gensokyo-mcp:v0.1.0`、`tryao/sealdice-core:v1.6.2-bridge.2`，只使用版本标签，没有 latest。主镜像不包含两个 Go 项目源码或运行程序。
+镜像分别为 `tryao/qqbot-dsh:v0.10.2`、`tryao/gensokyo-mcp:v0.1.0`、`tryao/sealdice-core:v1.6.2-bridge.3`，只使用版本标签，没有 latest。主镜像不包含两个 Go 项目源码或运行程序。
 
 ## 启动
 
 保留当前聊天凭据。在 `.env` 中配置三份不同的随机服务密钥；不要复用 QQ/LLM 密钥：
 
 ```dotenv
-IMAGE_TAG=v0.10.1
+IMAGE_TAG=v0.10.2
 QQBOT_ONEBOT_ENABLED=true
 QQBOT_ONEBOT_MCP_URL=http://gensokyo-mcp:8090/mcp
 QQBOT_ONEBOT_BACKENDS=sealdice
@@ -22,7 +22,7 @@ QQBOT_ONEBOT_INTERNAL_TOKEN=replace-with-different-random-internal-secret
 ONEBOT_WS_TOKEN=replace-with-different-random-onebot-secret
 QQBOT_ONEBOT_HIDDEN_ENABLED=false
 GENSOKYO_IMAGE_TAG=v0.1.0
-SEALDICE_IMAGE_TAG=v1.6.2-bridge.2
+SEALDICE_IMAGE_TAG=v1.6.2-bridge.3
 ```
 
 ```sh
@@ -30,6 +30,8 @@ docker compose -f docker-compose.qnap.yml --profile trpg up -d
 ```
 
 不开 profile、不启用工具时，qq-bot 独立运行；无需配置这些服务密钥。启用后端尚未就绪时聊天仍可运行，专用命令调用不可用。桥和海豹无宿主机公开端口；海豹在隔离网络运行，三者使用独立命名卷。海豹卷用于专用虚拟端点；若已有数据包含其他端点、脚本、自定义回复或未验证后台扩展，桥接启动会拒绝复用，不会覆盖它们。请使用独立卷保留原海豹部署。
+
+qq-bot 容器日志中的 `[qqbot-onebot] ready backends=1 available=true` 表示后端探测和真实 Harness 工具注册均已成功。`config-invalid`、`probe-failed`、`backend-not-ready`、`call-ws-missing`、`register-failed` 分别表示配置无效、探测失败、后端未就绪、MCP 缺少调用工具和本地工具注册失败。日志只在状态变化时输出，不包含密钥、原始响应或骰子正文。
 
 ## 可用能力与隐私
 

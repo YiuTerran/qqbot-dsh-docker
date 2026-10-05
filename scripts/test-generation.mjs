@@ -231,6 +231,20 @@ function makeImageService({ protocol = 'openai-images', onRequest, resolvePublic
     return createImageService({ route: route(protocol), transport: onRequest, resolvePublic });
 }
 
+test('image API HTTP failure retains diagnostic status without its response body', async () => {
+    const service = makeImageService({ onRequest: async () => ({
+        status: 401,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        body: Buffer.from('{"error":"sk-private-key private-image-prompt"}'),
+    }) });
+    await assert.rejects(service.generate({ prompt: 'Draw a fox.' }), (error) => {
+        assert.equal(error.status, 401);
+        assert.equal(error.message, 'provider-response');
+        assert.doesNotMatch(JSON.stringify(error), /sk-private-key|private-image-prompt/u);
+        return true;
+    });
+});
+
 function crc32(bytes) {
     let crc = 0xffffffff;
     for (const byte of bytes) {

@@ -8,7 +8,7 @@ import { pathToFileURL } from 'node:url';
 const providerErrorsUrl = process.env.QQBOT_PROVIDER_ERRORS_MODULE
     ? pathToFileURL(resolve(process.env.QQBOT_PROVIDER_ERRORS_MODULE)).href
     : new URL('../defaults/qqbot-provider-errors.mjs', import.meta.url).href;
-const { classifyProviderFailure, formatProviderFailure, formatToolFailure } = await import(providerErrorsUrl);
+const { classifyProviderFailure, formatProviderFailure, formatToolFailure, logToolFailure } = await import(providerErrorsUrl);
 const sensitive = 'sk-test-secret request-secret-id https://private.example/token?key=secret rejected-private-prompt';
 const apiFailure = (status, detail = {}, code = 'INVALID_REQUEST') => ({
     code,
@@ -19,6 +19,36 @@ const assertSafe = (text) => {
     assert.ok(text.length > 0 && text.length < 500, 'a bounded fixed notice is returned');
     assert.doesNotMatch(text, /sk-test-secret|request-secret-id|private\.example|rejected-private-prompt|OpenAI API error|INVALID_REQUEST|insufficient_quota/u);
 };
+
+test('tool failure diagnostics keep HTTP and transport evidence without raw secrets', () => {
+    const lines = [];
+    const originalWarn = console.warn;
+    console.warn = (...values) => lines.push(values.join(' '));
+    try {
+        logToolFailure('web_search', 'execute', apiFailure(429, { error: { code: 'insufficient_quota', message: sensitive } }));
+        logToolFailure('qqbot_generate_image', 'provider', new TypeError(sensitive, { cause: { code: 'ECONNRESET', message: sensitive } }));
+        logToolFailure(sensitive, sensitive, { name: sensitive, code: sensitive, message: sensitive, stack: sensitive });
+        assert.equal(lines.length, 3);
+        for (const line of lines) {
+            assert.ok(line.startsWith('[qqbot-tool-error] '));
+            assert.ok(line.length < 800, 'diagnostic remains bounded');
+            assert.doesNotMatch(line, /sk-test-secret|request-secret-id|private\.example|rejected-private-prompt/u);
+            JSON.parse(line.slice('[qqbot-tool-error] '.length));
+        }
+        assert.match(lines[0], /429/u);
+        assert.match(lines[0], /quota/u);
+        assert.match(lines[1], /ECONNRESET/u);
+        logToolFailure('web_search', 'execute-result', { message: sensitive, info: { code: 'TIMEOUT', name: 'HarnessError' } });
+        assert.match(lines[3], /TIMEOUT/u);
+        assert.match(lines[3], /timeout/u);
+        assert.doesNotMatch(lines[3], /sk-test-secret|private\.example/u);
+        console.warn = () => { throw new Error('sink unavailable'); };
+        assert.doesNotThrow(() => logToolFailure('web_search', 'execute', new Error(sensitive)));
+        const hostile = { get message() { throw new Error(sensitive); } };
+        assert.doesNotThrow(() => logToolFailure('web_search', 'execute', hostile));
+    }
+    finally { console.warn = originalWarn; }
+});
 
 test('native stable codes receive category-specific fixed notices without raw error details', () => {
     const codes = {

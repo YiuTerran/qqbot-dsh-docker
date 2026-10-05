@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import { logToolFailure } from './qqbot-provider-errors.mjs';
 import {
     bindOnebotExecution,
     getBoundOnebotRequest,
@@ -283,6 +284,7 @@ export class OnebotMcpSession {
         if (!response.ok && requestSessionId && [404, 410].includes(response.status)) {
             await response.body?.cancel().catch(() => {});
             const error = new Error('OneBot MCP session expired.');
+            if (Number.isInteger(response.status)) error.status = response.status;
             error.sessionExpired = true;
             error.sessionGeneration = requestGeneration;
             throw error;
@@ -290,13 +292,19 @@ export class OnebotMcpSession {
         if (requestGeneration === this.sessionGeneration
             && sessionId && sessionId.length <= 256 && /^[\x21-\x7e]+$/u.test(sessionId)) this.sessionId = sessionId;
         if (options.notification) {
-            if (!response.ok) throw new Error('OneBot MCP notification failed.');
+            if (!response.ok) {
+                const error = new Error('OneBot MCP notification failed.');
+                if (Number.isInteger(response.status)) error.status = response.status;
+                throw error;
+            }
             await response.body?.cancel().catch(() => {});
             return undefined;
         }
         const contentType = response.headers.get('content-type')?.toLowerCase() ?? '';
         if (!response.ok || (!contentType.includes('application/json') && !contentType.includes('text/event-stream'))) {
-            throw new Error('OneBot MCP request failed.');
+            const error = new Error('OneBot MCP request failed.');
+            if (Number.isInteger(response.status)) error.status = response.status;
+            throw error;
         }
         const message = await readRpcResponse(response, body.id);
         if (!message || message.id !== body.id) throw new Error('OneBot MCP response was invalid.');
@@ -428,7 +436,9 @@ async function internalRequest(config, path, options = {}) {
     });
     const text = await readBodyBounded(response, options.maxBytes ?? 256 * 1024);
     if (!response.ok || !response.headers.get('content-type')?.toLowerCase().includes('application/json')) {
-        throw new Error('OneBot internal request failed.');
+        const error = new Error('OneBot internal request failed.');
+        if (Number.isInteger(response.status)) error.status = response.status;
+        throw error;
     }
     try { return JSON.parse(text); }
     catch { throw new Error('OneBot internal response was invalid.'); }
@@ -951,7 +961,8 @@ async function executeCommand(args, exec, runtime) {
             blockOnebotRequest(scope, args.requestId);
             return safeToolResult('unknown', [], 'The command result is unknown and was not retried.');
         }
-        catch {
+        catch (error) {
+            logToolFailure(ONEBOT_COMMAND_TOOL, 'call', error);
             // Once call_ws dispatch begins, the Dice side may have executed.
             if (dispatched) blockOnebotRequest(scope, args.requestId);
             return dispatched
@@ -979,19 +990,45 @@ export function registerOnebotCommandTool(ctx, options = {}) {
         session: undefined,
         timer: undefined,
         stopped: false,
+        reason: undefined,
+        available: false,
+        lastStateLog: undefined,
+        lastProbeErrorKey: undefined,
         refreshController: new AbortController(),
         refreshTask: undefined,
         onAvailability: typeof options.onAvailability === 'function' ? options.onAvailability : () => {},
         fetchImpl: options.fetchImpl ?? globalThis.fetch,
     };
+    const updateAvailability = (available, reason, backendCount = runtime.readyBackends.size) => {
+        const nextAvailable = available === true && runtime.registered;
+        runtime.available = nextAvailable;
+        runtime.reason = reason;
+        const state = `${reason}:${backendCount}:${nextAvailable}`;
+        if (state !== runtime.lastStateLog) {
+            runtime.lastStateLog = state;
+            console.log(`[qqbot-onebot] ${reason} backends=${backendCount} available=${nextAvailable}`);
+        }
+        runtime.onAvailability(nextAvailable);
+        return nextAvailable;
+    };
+    const diagnostics = () => Object.freeze({
+        enabled: config.enabled,
+        readyBackendCount: runtime.readyBackends.size,
+        registered: runtime.registered,
+        toolAvailable: runtime.available,
+        reason: runtime.reason ?? 'probe-pending',
+        hiddenEnabled: config.hiddenEnabled,
+        proactivePermission: 'unsupported-by-platform',
+        ...(runtime.options.friendRegistry ? { friendState: runtime.options.friendRegistry.diagnostics() } : {}),
+    });
     if (!config.enabled) {
-        runtime.onAvailability(false);
-        return Object.freeze({ enabled: false, ready: Promise.resolve(false), stop() {} });
+        updateAvailability(false, config.invalid ? 'config-invalid' : 'config-disabled', 0);
+        return Object.freeze({ enabled: false, ready: Promise.resolve(false), stop() {}, diagnostics });
     }
     const tools = ctx.get('tools');
     if (typeof tools?.register !== 'function') {
-        runtime.onAvailability(false);
-        return Object.freeze({ enabled: false, ready: Promise.resolve(false), stop() {} });
+        updateAvailability(false, 'tools-service-unavailable', 0);
+        return Object.freeze({ enabled: false, ready: Promise.resolve(false), stop() {}, diagnostics });
     }
     runtime.options.appId = options.appId ?? '';
     runtime.options.hiddenEnabled = config.hiddenEnabled;
@@ -1018,14 +1055,14 @@ export function registerOnebotCommandTool(ctx, options = {}) {
     try {
         runtime.session = options.session ?? new OnebotMcpSession({ url: config.url, token: config.mcpToken, fetchImpl: runtime.fetchImpl });
     }
-    catch {
-        runtime.onAvailability(false);
+    catch (error) {
+        logToolFailure(ONEBOT_COMMAND_TOOL, 'registration', error);
+        updateAvailability(false, 'session-init-failed', 0);
         runtime.detachFriendEvents?.();
-        return Object.freeze({ enabled: true, ready: Promise.resolve(false), stop() {} });
+        return Object.freeze({ enabled: true, ready: Promise.resolve(false), stop() {}, diagnostics });
     }
 
-    const availability = (value) => {
-        runtime.onAvailability(value);
+    const availability = (value, reason, backendCount = runtime.readyBackends.size) => {
         if (value && !runtime.registered) {
             try {
                 tools.register({
@@ -1037,24 +1074,26 @@ export function registerOnebotCommandTool(ctx, options = {}) {
                             type: 'object',
                             properties: {
                                 status: { type: 'string', enum: ['ok', 'failed', 'unknown'] },
-                                outputs: { type: 'array', items: { type: 'string' }, maxItems: MAX_OUTPUTS },
+                                outputs: { type: 'array', items: { type: 'string' } },
                                 notice: { type: 'string' },
                                 privateDelivery: { type: 'string', enum: ['sent', 'failed', 'unknown'] },
                             },
                             required: ['status', 'outputs'],
                             additionalProperties: false,
                         },
-                        render: () => [],
+                        render: (_args, result) => [{ type: 'text', text: JSON.stringify(result) }],
                     },
                     async execute(args, exec) { return executeCommand(args, exec, runtime); },
                     timeoutMs: 60_000,
                 });
                 runtime.registered = true;
             }
-            catch {
-                runtime.onAvailability(false);
+            catch (error) {
+                logToolFailure(ONEBOT_COMMAND_TOOL, 'registration', error);
+                return updateAvailability(false, 'register-failed', backendCount);
             }
         }
+        return updateAvailability(value && runtime.registered, reason, backendCount);
     };
 
     const refresh = () => {
@@ -1071,19 +1110,27 @@ export function registerOnebotCommandTool(ctx, options = {}) {
                     runtime.session.listTools(runtime.refreshController.signal),
                 ]);
                 if (runtime.stopped) return false;
+                runtime.lastProbeErrorKey = undefined;
                 const readyIds = new Set((Array.isArray(result?.backends) ? result.backends : [])
                     .filter((backend) => backend && backend.version === 1 && config.backendIds.includes(backend.id) && backend.ready === true)
                     .map((backend) => backend.id));
-                if (!tools.some((tool) => tool?.name === 'call_ws')) readyIds.clear();
+                if (!tools.some((tool) => tool?.name === 'call_ws')) {
+                    runtime.readyBackends = new Set();
+                    return availability(false, 'call-ws-missing', readyIds.size);
+                }
                 runtime.readyBackends = readyIds;
-                availability(readyIds.size > 0);
-                return readyIds.size > 0;
+                return availability(readyIds.size > 0, readyIds.size > 0 ? 'ready' : 'backend-not-ready');
             }
-            catch {
+            catch (error) {
                 if (runtime.stopped) return false;
                 runtime.readyBackends = new Set();
-                availability(false);
-                return false;
+                const key = typeof error?.code === 'string' ? error.code
+                    : typeof error?.name === 'string' ? error.name : 'probe-failed';
+                if (key !== runtime.lastProbeErrorKey) {
+                    runtime.lastProbeErrorKey = key;
+                    logToolFailure(ONEBOT_COMMAND_TOOL, 'probe', error);
+                }
+                return availability(false, 'probe-failed');
             }
         })().finally(() => { runtime.refreshTask = undefined; });
         return runtime.refreshTask;
@@ -1096,17 +1143,10 @@ export function registerOnebotCommandTool(ctx, options = {}) {
         clearInterval(runtime.timer);
         runtime.refreshController.abort(new Error('OneBot service is stopping.'));
         runtime.readyBackends.clear();
-        availability(false);
+        availability(false, 'stopped');
         runtime.detachFriendEvents?.();
         await runtime.refreshTask?.catch(() => {});
         return await runtime.options.friendRegistry?.flush?.();
     };
-    const diagnostics = () => Object.freeze({
-        enabled: true,
-        readyBackendCount: runtime.readyBackends.size,
-        hiddenEnabled: config.hiddenEnabled,
-        proactivePermission: 'unsupported-by-platform',
-        ...(runtime.options.friendRegistry ? { friendState: runtime.options.friendRegistry.diagnostics() } : {}),
-    });
     return Object.freeze({ enabled: true, ready, refresh, stop, diagnostics, runtime });
 }

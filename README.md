@@ -182,6 +182,12 @@ Compose 会创建并使用命名卷 `dsh-qqbot-data` 和 `dsh-qqbot-workspace`�
 
 镜像还会报告网关连接前初始化过程中的异常，包括媒体和视觉工具注册错误。现有 `/data` 卷会在启动时打补丁，因此这项诊断增强无需删除会话或设置。若要临时隔离启动问题，可设置 `QQBOT_VISION_ENABLED=false`；必要时也可设置 `QQBOT_MEDIA_ENABLED=false`。这两项默认均为启用。
 
+搜索、生图和内部工具失败时，默认输出 `[qqbot-tool-error]` 日志，无需开启调试开关。日志记录工具名、失败阶段、错误类别，以及可识别的 HTTP 状态码和网络错误码；不输出工具参数、提示词、原始服务响应、密钥、URL 或暗骰正文。工具重试后成功仍保留失败日志供排查，但不会因此额外向用户发送失败提示。
+
+```sh
+docker compose logs --since 10m qqbot 2>&1 | grep -F '[qqbot-tool-error]'
+```
+
 ### 引用图片诊断
 
 排查“引用图片可见，但生成请求 `images: []`”时，在 Compose 服务的 `environment` 中添加 `QQBOT_IMAGE_DEBUG: "true"`，再执行 `docker compose up -d --force-recreate qqbot`。使用仓库的 Compose 文件时也可以在 `.env` 中设置 `QQBOT_IMAGE_DEBUG=true`；仅修改 `.env` 而未将变量传入容器不会生效。默认关闭，只有精确值 `true` 才开启。
