@@ -1,0 +1,520 @@
+// Run inside the built image; exercise the pinned QQ middleware and bootstrap
+// without connecting to QQ, OneBot, SeaDice, or a paid model API.
+import assert from 'node:assert/strict';
+import { mkdir, readFile, symlink } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import vm from 'node:vm';
+import { test } from 'node:test';
+
+const appId = '123456789';
+const logger = { info() {}, warn() {}, debug() {}, error() {} };
+const dshRoot = '/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/';
+const profilePeers = '/data/profiles/qqbot/node_modules/@deepseek-ai';
+await mkdir(join(profilePeers, '..'), { recursive: true });
+try {
+    await symlink(dshRoot, profilePeers, 'dir');
+}
+catch (error) {
+    if (error.code !== 'EEXIST') throw error;
+}
+
+const adapterRoot = resolve(process.env.QQBOT_ADAPTER_DIST
+    ?? '/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist');
+const directModulePath = process.env.QQBOT_ONEBOT_DIRECT_MODULE
+    ?? '/opt/qqbot-defaults/qqbot-onebot-direct.mjs';
+const { setupMiddlewares } = await import(pathToFileURL(join(adapterRoot, 'gateway/middleware-setup.js')).href);
+const { createOnebotDirectRouter } = await import(pathToFileURL(directModulePath).href);
+const { getMergedGenerationRequests } = await import(new URL('./qqbot-concurrency.mjs', pathToFileURL(directModulePath)).href);
+const { getOnebotDirectFallback, renderOnebotDirectFallbackMetadata } = await import(new URL('./qqbot-onebot-scope.mjs', pathToFileURL(directModulePath)).href);
+
+function deferred() {
+    let resolvePromise;
+    let rejectPromise;
+    const promise = new Promise((resolve, reject) => {
+        resolvePromise = resolve;
+        rejectPromise = reject;
+    });
+    return { promise, resolve: resolvePromise, reject: rejectPromise };
+}
+
+function gatewayConfig({ requireMention = false, groupAllow = ['busy-group', 'direct-group', 'cancel-group', 'quote-group', 'history-group', 'attachment-group'] } = {}) {
+    return {
+        appId,
+        debug: false,
+        access: { c2cMode: 'open', c2cAllow: [], groupMode: 'allowlist', groupAllow },
+        requireMention,
+        historyLimit: 16,
+        maxQueue: 8,
+        processingTimeoutMs: 0,
+        textChunkLimit: 2000,
+        media: { enabled: false, maxMB: 10 },
+        vision: {},
+    };
+}
+
+function makeService(execute) {
+    return {
+        runtime: {
+            config: { enabled: true, backendIds: ['sealdice'] },
+            readyBackends: new Set(['sealdice']),
+            stopped: false,
+        },
+        diagnostics() { return { reason: 'ready' }; },
+        execute,
+        async stop() { this.runtime.stopped = true; },
+    };
+}
+
+function assembleProductionChain({ service, groupAllow, requireMention = false, sender, manager } = {}) {
+    const directRouter = createOnebotDirectRouter({
+        service,
+        appId,
+        sender,
+        env: {},
+        logger,
+    });
+    const layers = [];
+    const actualManager = manager ?? { questionChannel: { tryAnswer() { return false; } }, async remove() {} };
+    setupMiddlewares({ use(middleware) { layers.push(middleware); } },
+        gatewayConfig({ groupAllow, requireMention }), actualManager, logger, sender, directRouter);
+    return { directRouter, layers, manager: actualManager };
+}
+
+function makeContext({
+    group = 'direct-group',
+    senderId = 'member-direct',
+    messageId,
+    content,
+    attachments = [],
+    refMsgIdx,
+    msgElements,
+    rawEventType,
+    state = {},
+} = {}, replies = []) {
+    const replyTarget = { scope: 'group', targetId: group, msgId: messageId };
+    const controller = new AbortController();
+    const ctx = {
+        message: {
+            kind: 'group',
+            groupOpenid: group,
+            senderId,
+            senderName: 'native fixture',
+            messageId,
+            msgIdx: messageId,
+            content,
+            attachments,
+            timestamp: new Date().toISOString(),
+            replyTarget,
+            ...(rawEventType ? { rawEventType } : {}),
+            ...(refMsgIdx ? { refMsgIdx } : {}),
+            ...(msgElements ? { msgElements } : {}),
+        },
+        state,
+        replyTarget,
+        get signal() { return controller.signal; },
+        abort(reason) { controller.abort(reason); ctx.stopped = true; ctx.stopReason = reason; },
+        log: logger,
+        bot: {
+            appId,
+            async sendMarkdown(target, text) { replies.push({ source: 'bot', target, text }); },
+            async sendText(target, text) { replies.push({ source: 'bot', target, text }); },
+            async sendTyping() {},
+        },
+        async reply(text) { replies.push({ source: 'slash', target: replyTarget, text }); },
+        stop(reason) { ctx.stopped = true; ctx.stopReason = reason; },
+    };
+    return ctx;
+}
+
+async function runChain(layers, ctx, terminal = async () => {}) {
+    let index = 0;
+    const next = async () => {
+        if (ctx.stopped) return;
+        const middleware = layers[index++];
+        if (middleware) await middleware(ctx, next);
+        else await terminal(ctx);
+    };
+    await next();
+}
+
+async function waitFor(predicate, label) {
+    const deadline = Date.now() + 2_000;
+    while (!predicate()) {
+        if (Date.now() >= deadline) throw new Error(`timed out waiting for ${label}`);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+}
+
+test('native fallback reaches model once with original provenance and sanitized error, bypassing pending answers', async (t) => {
+    const sent = [];
+    const sender = { async sendMarkdown(target, text) { sent.push({ target, text }); } };
+    let attempts = 0;
+    let answers = 0;
+    const service = makeService(async () => { attempts++; return { status: 'failed', outputs: ['参数不适用 https://secret.invalid/path'] }; });
+    const manager = { questionChannel: { tryAnswer() { answers++; return true; } }, async remove() {} };
+    const { layers, directRouter } = assembleProductionChain({ service, sender, manager });
+    t.after(() => directRouter.stop());
+    const ctx = makeContext({ messageId: 'native-fallback', content: '.r2d7' }, sent);
+    let models = 0;
+    let captured;
+    await runChain(layers, ctx, async (modelContext) => {
+        models++;
+        captured = getMergedGenerationRequests(modelContext);
+    });
+    assert.equal(captured.length, 1);
+    assert.equal(captured[0].text, '.r2d7', 'sanitized SDK current text is preserved before envelope formatting');
+    assert.equal(getOnebotDirectFallback(ctx).reason, 'backend_rejected');
+    const metadata = renderOnebotDirectFallbackMetadata(captured);
+    assert.ok(metadata.includes('参数不适用'));
+    assert.equal(metadata.includes('secret.invalid'), false);
+    assert.equal(sent.some(({ text }) => text.includes('未能完成')), false, 'no backend failure notice before model');
+    await runChain(layers, makeContext({ messageId: 'native-fallback', content: '.r2d7' }, sent), async () => { models++; });
+    assert.equal(attempts, 1);
+    assert.equal(models, 1);
+    assert.equal(answers, 0, 'a pending tool answer cannot swallow trusted fallback diagnostics');
+    const inbound = await readFile(join(adapterRoot, 'transport/inbound.js'), 'utf8');
+    assert.ok(inbound.includes('const onebotFallbackMetadata = renderOnebotDirectFallbackMetadata(getMergedGenerationRequests(ctx));'));
+    assert.ok(inbound.includes('generationMetadata, onebotMetadata, onebotFallbackMetadata]'));
+});
+
+test('native unavailable-backend fallback still renders diagnostics without an available tool', async (t) => {
+    let executions = 0;
+    const service = makeService(async () => { executions++; assert.fail('unready backend dispatched'); });
+    service.runtime.readyBackends.clear();
+    const sender = { async sendMarkdown() {} };
+    const { layers, directRouter } = assembleProductionChain({ service, sender });
+    t.after(() => directRouter.stop());
+    let models = 0;
+    let metadata;
+    await runChain(layers, makeContext({ messageId: 'unready-fallback', content: '.r2d7' }), async (ctx) => {
+        models++;
+        metadata = renderOnebotDirectFallbackMetadata(getMergedGenerationRequests(ctx));
+    });
+    assert.equal(models, 1);
+    assert.ok(metadata.includes('backend_not_ready'));
+    assert.equal(executions, 0);
+});
+
+test('queued native fallback is cancelled by /new or stop without cancelling the earlier model turn', async (t) => {
+    for (const cancel of ['new', 'stop']) {
+        const entered = deferred();
+        const release = deferred();
+        const sender = { async sendMarkdown() {} };
+        const service = makeService(async () => ({ status: 'failed', outputs: ['参数不适用'] }));
+        const { layers, directRouter } = assembleProductionChain({ service, sender });
+        t.after(() => directRouter.stop());
+        const busy = makeContext({ group: 'busy-group', messageId: `busy-${cancel}`, content: '普通聊天' });
+        const earlier = runChain(layers, busy, async () => { entered.resolve(); await release.promise; });
+        await entered.promise;
+        const fallback = makeContext({ group: 'busy-group', messageId: `fallback-${cancel}`, content: '.r2d7' });
+        let lateModels = 0;
+        const queued = runChain(layers, fallback, async () => { lateModels++; });
+        await waitFor(() => Boolean(getOnebotDirectFallback(fallback)), 'fallback queued');
+        if (cancel === 'new') directRouter.cancelConversation(makeContext({ group: 'busy-group', messageId: 'reset', content: '/new' }));
+        else directRouter.stop();
+        assert.equal(fallback.signal.aborted, true, 'native getter signal is aborted using ctx.abort');
+        assert.equal(busy.signal.aborted, false, 'independent direct lifecycle does not cancel the earlier model');
+        release.resolve();
+        await Promise.all([earlier, queued]);
+        assert.equal(lateModels, 0);
+    }
+});
+
+test('the real SDK chain routes .r2d7 directly while same-group model work is blocked', async (t) => {
+    const calls = [];
+    const sent = [];
+    const sender = {
+        async sendMarkdown(target, text) { sent.push({ target, text }); },
+    };
+    const service = makeService(async (args, exec) => {
+        calls.push({ args, exec });
+        return { status: 'ok', outputs: ['2d7 = 9'] };
+    });
+    const { layers, directRouter } = assembleProductionChain({ service, sender });
+    t.after(() => directRouter.stop());
+
+    const middlewareSource = await readFile(join(adapterRoot, 'gateway/middleware-setup.js'), 'utf8');
+    const orderedCalls = [
+        'bot.use(accessPolicy({',
+        'bot.use(mentionGate({',
+        'bot.use(contentSanitizer({',
+        'bot.use(rateLimiter());',
+        '// Chat-only OneBot /new cancellation v1.',
+        'bot.use(slash.middleware);',
+        '// Chat-only OneBot direct router middleware v1.',
+        'bot.use(questionAnswer(manager));',
+        '// Chat-only serialized merge guard v1.',
+        'bot.use(attachmentProcessor(config, logger));',
+    ].map((needle) => middlewareSource.indexOf(needle));
+    assert.ok(orderedCalls.every((position) => position >= 0), 'the source contains the complete gated route order');
+    assert.ok(orderedCalls.every((position, index) => index === 0 || position > orderedCalls[index - 1]),
+        'access, mention, sanitization, rate, /new, slash, direct, QA, merge, and attachment middleware remain ordered');
+    assert.ok(layers.includes(directRouter.middleware), 'the actual direct router middleware is installed in the production SDK chain');
+    const directIndex = layers.indexOf(directRouter.middleware);
+    const rateIndex = layers.findIndex((layer) => /rate-limit/u.test(layer.toString()));
+    const mergeIndex = layers.findIndex((layer) => layer.name === 'mergeConcurrencyGuard');
+    assert.ok(rateIndex >= 0 && rateIndex < directIndex, 'the native SDK rate limiter runs before direct routing');
+    assert.ok(directIndex < mergeIndex, 'direct routing runs before the serialized chat merge guard');
+
+    const modelStarted = deferred();
+    const releaseModel = deferred();
+    let modelCalls = 0;
+    const blockedChat = runChain(layers, makeContext({
+        group: 'busy-group', senderId: 'busy-member', messageId: 'busy-chat', content: 'ordinary chat request',
+    }, sent), async () => {
+        modelCalls++;
+        modelStarted.resolve();
+        await releaseModel.promise;
+    });
+    await modelStarted.promise;
+
+    let directModelCalls = 0;
+    await runChain(layers, makeContext({
+        group: 'busy-group', senderId: 'busy-member', messageId: 'direct-r2d7', content: '.r2d7',
+    }, sent), async () => { directModelCalls++; });
+    assert.equal(calls.length, 1, 'the current .r2d7 message makes exactly one OneBot service call');
+    assert.equal(calls[0].args.backend, 'sealdice');
+    assert.equal(calls[0].args.command, '.r 2d7');
+    assert.equal(Object.hasOwn(calls[0].args, 'ownerId'), false, 'QQ identities are not copied into service arguments');
+    assert.equal(Object.hasOwn(calls[0].args, 'replyTarget'), false, 'QQ reply targets are not copied into service arguments');
+    assert.equal(directModelCalls, 0, 'the native direct command does not enter the downstream model handler');
+    assert.deepEqual(sent.find(({ text }) => text === '2d7 = 9'), {
+        target: { scope: 'group', targetId: 'busy-group', msgId: 'direct-r2d7' },
+        text: '2d7 = 9',
+    }, 'the OneBot result replies to the current SDK message while earlier same-group model work is blocked');
+    assert.equal(modelCalls, 1, 'the blocked ordinary message remains the only model turn so far');
+
+    releaseModel.resolve();
+    await blockedChat;
+});
+
+test('access, mention, current quote and history context keep direct-looking text out of OneBot', async (t) => {
+    const calls = [];
+    const sent = [];
+    const sender = { async sendMarkdown(target, text) { sent.push({ target, text }); } };
+    const service = makeService(async (args) => {
+        calls.push(args);
+        return { status: 'ok', outputs: ['unexpected direct result'] };
+    });
+    const { layers, directRouter } = assembleProductionChain({ service, sender });
+    t.after(() => directRouter.stop());
+
+    let modelCalls = 0;
+    const denied = makeContext({ group: 'denied-group', messageId: 'denied-direct', content: '.r2d7' }, sent);
+    await runChain(layers, denied, async () => { modelCalls++; });
+    assert.match(denied.stopReason, /^access:/u);
+    assert.equal(calls.length, 0, 'access policy blocks direct routing before the OneBot middleware');
+
+    const quote = makeContext({
+        group: 'quote-group',
+        messageId: 'quoted-direct',
+        content: 'What happened in this quote?',
+        refMsgIdx: 'quoted-r2d7',
+        msgElements: [{ content: '.r2d7', attachments: [{
+            content_type: 'image/png', url: 'https://cdn.invalid/quoted.png', filename: 'quoted.png',
+        }] }],
+    }, sent);
+    await runChain(layers, quote, async () => { modelCalls++; });
+    assert.match(quote.state.quote?.text ?? '', /\.r2d7/u);
+    assert.equal(calls.length, 0, 'a quoted command and quoted attachment do not become the current command');
+
+    const historic = makeContext({
+        group: 'history-group',
+        messageId: 'history-text',
+        content: 'Please explain the earlier roll.',
+        state: { history: [{ content: '.r2d7' }] },
+    }, sent);
+    await runChain(layers, historic, async () => { modelCalls++; });
+    assert.equal(calls.length, 0, 'a command in prior history does not execute for the current natural-language message');
+
+    const attached = makeContext({
+        group: 'attachment-group',
+        messageId: 'attachment-direct',
+        content: '.r2d7',
+        attachments: [{ content_type: 'image/png', url: 'https://cdn.invalid/current.png', filename: 'current.png' }],
+    }, sent);
+    await runChain(layers, attached, async () => { modelCalls++; });
+    assert.equal(calls.length, 0, 'a current message with attachments continues through normal chat processing');
+    assert.equal(modelCalls, 3, 'quoted, historic, and attached inputs continue to downstream chat exactly once');
+});
+
+test('mention gating precedes direct routing and sanitized /new cancels the active conversation before slash handling', async (t) => {
+    let executeCalls = 0;
+    let pendingSignal;
+    const started = deferred();
+    const sender = { async sendMarkdown() {} };
+    const service = makeService(async (_args, exec) => {
+        executeCalls++;
+        pendingSignal = exec.signal;
+        started.resolve();
+        return new Promise((_resolve, reject) => {
+            exec.signal.addEventListener('abort', () => reject(exec.signal.reason ?? new Error('aborted')), { once: true });
+        });
+    });
+    const gateChain = assembleProductionChain({ service, sender, requireMention: true });
+    t.after(() => gateChain.directRouter.stop());
+    const unmentioned = makeContext({ group: 'direct-group', messageId: 'unmentioned-direct', content: '.r2d7' });
+    await runChain(gateChain.layers, unmentioned);
+    assert.match(unmentioned.stopReason, /^mention-gate:/u);
+    assert.equal(executeCalls, 0, 'a group command without the required mention never reaches OneBot');
+
+    const slashCalls = [];
+    const runChainForCancel = assembleProductionChain({
+        service,
+        sender,
+        manager: {
+            questionChannel: { tryAnswer() { return false; } },
+            async remove(...args) { slashCalls.push(args); },
+        },
+    });
+    t.after(() => runChainForCancel.directRouter.stop());
+    const active = runChain(runChainForCancel.layers, makeContext({
+        group: 'cancel-group', senderId: 'cancel-member', messageId: 'active-r2d7', content: '.r2d7',
+    }));
+    await started.promise;
+    const newReply = [];
+    await runChain(runChainForCancel.layers, makeContext({
+        group: 'cancel-group', senderId: 'cancel-member', messageId: 'new-command', content: '/new',
+        rawEventType: 'GROUP_AT_MESSAGE_CREATE',
+    }, newReply));
+    await active;
+    assert.equal(executeCalls, 1, 'the /new message is not mistaken for a second direct dice command');
+    assert.equal(pendingSignal.aborted, true, 'the /new middleware aborts the active native execution before the slash command runs');
+    assert.deepEqual(slashCalls, [['group', 'cancel-group']],
+        'the real /new slash handler removes the current group session after cancellation');
+    assert.ok(newReply.some(({ source, text }) => source === 'bot' && text === '已开启新会话 ✓'),
+        'the native SDK sends the /new handler result through bot.sendText');
+});
+
+test('bootstrap executes with stubs and passes the registered service and sender to real middleware setup', async () => {
+    const sourcePath = join(adapterRoot, 'gateway/bootstrap.js');
+    const original = await readFile(sourcePath, 'utf8');
+    const imports = new Map();
+    const order = [];
+    let lifecycleCleanup;
+    let bootServiceOptions;
+    let routerOptions;
+    let bootBot;
+
+    const service = { async stop() { order.push('service-stop'); } };
+    const fakeRouter = {
+        middleware: async (_ctx, next) => next(),
+        async cancelConversation() {},
+        async stop() { order.push('router-stop'); },
+    };
+    class FakeBot {
+        constructor(options) {
+            this.options = options;
+            this.middlewares = [];
+            this.listeners = new Map();
+            bootBot = this;
+        }
+        use(middleware) {
+            if (this.middlewares.length === 0) order.push('middleware-setup');
+            this.middlewares.push(middleware);
+        }
+        on(event, listener) { this.listeners.set(event, listener); return this; }
+        openStream() { return {}; }
+        async start() { order.push('bot-start'); }
+        stop() { order.push('bot-stop'); }
+    }
+    class FakeManager {
+        constructor() {
+            this.questionChannel = { tryAnswer() { return false; } };
+        }
+        async disposeAll() { order.push('manager-dispose'); }
+        async remove() {}
+    }
+    class FakeQuestionChannel { install() {} }
+    class FakeApprovalChannel { install() {} }
+    class FakeReplyLimiter { constructor() {} }
+
+    imports.set('/opt/qqbot-defaults/qqbot-chat-policy.mjs', {
+        installChatPolicy() {}, setOnebotToolAvailable() {},
+    });
+    imports.set('/opt/qqbot-defaults/qqbot-onebot.mjs', {
+        registerOnebotCommandTool(_ctx, options) {
+            order.push('service-register');
+            bootServiceOptions = options;
+            return service;
+        },
+    });
+    imports.set('/opt/qqbot-defaults/qqbot-onebot-direct.mjs', {
+        createOnebotDirectRouter(options) {
+            order.push('router-create');
+            routerOptions = options;
+            return fakeRouter;
+        },
+    });
+    imports.set('/opt/qqbot-defaults/qqbot-generation.mjs', {
+        createGenerationSender() { return {}; },
+        registerGenerationTools() {},
+    });
+    imports.set('@tencent-connect/qqbot-nodejs/protocol', { MediaApi: {}, MessageApi: {}, messagePath: '/messages' });
+    imports.set('@tencent-connect/qqbot-nodejs', { QQBot: FakeBot });
+    imports.set('../session/index.js', { SessionManager: FakeManager });
+    imports.set('../transport/index.js', { handleInbound() {}, createOutboundHandler() { return async () => {}; } });
+    imports.set('../transport/reply-limiter.js', { ReplyLimiter: FakeReplyLimiter });
+    imports.set('../transport/msgid-cache.js', { cacheMsgId() {}, cacheEventId() {} });
+    imports.set('../transport/reply-target.js', {
+        resolveReplyTarget(_bot, target) { return target; },
+        sendResolvedMarkdown: async () => {},
+    });
+    imports.set('../features/question-channel.js', { QuestionChannel: FakeQuestionChannel });
+    imports.set('../features/approval-channel.js', { ApprovalChannel: FakeApprovalChannel });
+    imports.set('../features/button-utils.js', { decodeButtonData() { return undefined; } });
+    imports.set('../shared/index.js', { buildUserAgent() { return 'native-direct-test'; } });
+    imports.set('./middleware-setup.js', { setupMiddlewares });
+    imports.set('../media/media-cleaner.js', { startMediaCleanup() {} });
+    imports.set('../media/vision-tool.js', { ensureVisionInputModal() {}, registerDescribeImageTool() {} });
+    imports.set('../media/send-file-tool.js', { registerSendFileTool() {} });
+
+    const rewritten = original.replace(
+        /^import\s+\{\s*([^}\n]+?)\s*\}\s+from\s+(['"])([^'"]+)\2;\s*$/gmu,
+        (_match, names, _quote, specifier) => `const { ${names} } = globalThis.__imports.get(${JSON.stringify(specifier)});`,
+    );
+    assert.equal(/^import\s/mu.test(rewritten), false, 'the pinned bootstrap uses named imports that can be mapped to local stubs');
+    const executable = rewritten.replace('export async function bootstrapGateway', 'async function bootstrapGateway')
+        + '\nglobalThis.__bootstrapGateway = bootstrapGateway;';
+    const vmContext = vm.createContext({
+        __imports: imports,
+        console,
+        process: { env: {} },
+        setTimeout,
+        clearTimeout,
+    });
+    vm.runInContext(executable, vmContext, { filename: sourcePath });
+
+    const ctx = {
+        get() { return undefined; },
+        on() { return this; },
+        effect(callback) { lifecycleCleanup = callback(); },
+    };
+    const config = {
+        appId,
+        appSecret: 'fixture-secret',
+        debug: false,
+        access: { c2cMode: 'open', c2cAllow: [], groupMode: 'open', groupAllow: [] },
+        historyLimit: 16,
+        requireMention: false,
+        maxQueue: 8,
+        processingTimeoutMs: 0,
+        media: { enabled: false, maxMB: 10 },
+        vision: {},
+    };
+    await vmContext.__bootstrapGateway(ctx, {}, config, logger);
+
+    assert.ok(bootServiceOptions?.bot === bootBot, 'bootstrap registers OneBot after constructing the QQ SDK bot');
+    assert.ok(routerOptions?.service === service, 'bootstrap gives the registered OneBot service to the router');
+    assert.ok(routerOptions?.sender && typeof routerOptions.sender.sendMarkdown === 'function',
+        'bootstrap gives the reply sender to the router');
+    assert.ok(bootBot.middlewares.includes(fakeRouter.middleware), 'the real setupMiddlewares call installs the router middleware');
+    assert.ok(order.indexOf('service-register') < order.indexOf('router-create')
+        && order.indexOf('router-create') < order.indexOf('middleware-setup'),
+    'service registration and router construction happen before middleware setup');
+
+    await lifecycleCleanup();
+    assert.ok(order.indexOf('router-stop') < order.indexOf('service-stop'),
+        'shutdown awaits direct conversation cancellation before stopping the OneBot service');
+});

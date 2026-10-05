@@ -7,6 +7,7 @@ import {
     getBoundOnebotRequest,
     getBoundOnebotExecution,
     getOnebotRequestSignal,
+    getOnebotBridgeRequestId,
     onebotExecutionFailure,
     getOrCreateOnebotCall,
     blockOnebotRequest,
@@ -19,6 +20,7 @@ const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_OUTPUTS = 64;
 const MAX_OUTPUT_BYTES = 128 * 1024;
 const MAX_COMMAND_CHARS = 4000;
+const MAX_BACKEND_IN_FLIGHT = 21;
 const REQUEST_TIMEOUT_MS = 30_000;
 const HTTP_TIMEOUT_MS = 5_000;
 const PLATFORM_DENIAL_TTL_MS = 24 * 60 * 60 * 1000;
@@ -683,11 +685,15 @@ export function createOnebotPrivateSender(options = {}) {
     };
 }
 
-function validateToolArguments(args, backendIds) {
-    return args && typeof args === 'object' && Object.keys(args).length === 3
+function validateToolArguments(args, backendIds, scope) {
+    if (!(args && typeof args === 'object' && Object.keys(args).length === 3
         && typeof args.requestId === 'string' && /^[A-Za-z0-9_-]{16,64}$/u.test(args.requestId)
-        && typeof args.backend === 'string' && backendIds.includes(args.backend)
-        && validateOnebotCommand(args.command);
+        && typeof args.backend === 'string' && backendIds.includes(args.backend))) return false;
+    if (!scope?.direct) return validateOnebotCommand(args.command);
+    return scope.directAuthorization?.backend === args.backend
+        && scope.directAuthorization?.command === args.command
+        && typeof args.command === 'string' && args.command.length > 0 && args.command.length <= MAX_COMMAND_CHARS
+        && !/[\r\n\u2028\u2029\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/u.test(args.command);
 }
 
 function toolSchema(backendIds) {
@@ -847,6 +853,30 @@ function safeToolResult(status, outputs, notice, privateDelivery) {
     };
 }
 
+const DIRECT_FAILURE_REASONS = Object.freeze({
+    'The OneBot backend queue is full.': 'queue_full',
+    'The selected OneBot backend is unavailable.': 'backend_not_ready',
+    'This command belongs to an expired QQ message.': 'expired',
+    'This original QQ message already had an uncertain command result; no further commands were run.': 'uncertain',
+    'The command result is unknown and was not retried.': 'uncertain',
+    'Private output was withheld because this command did not request a hidden group roll.': 'privacy_withheld',
+    'Private output was withheld because delivery could not be verified.': 'privacy_withheld',
+    'The OneBot command could not be completed.': 'backend_rejected',
+    'The OneBot command was rejected.': 'backend_rejected',
+    'Hidden group rolls are disabled.': 'hidden_disabled',
+    'QQ no longer supports proactive private messages for hidden group rolls.': 'hidden_disabled',
+    'Private delivery eligibility could not be verified.': 'private_unavailable',
+    'Private delivery was not confirmed.': 'private_unavailable',
+    'Private delivery status is unknown and was not retried.': 'private_unavailable',
+});
+
+function directExecutionResult(result, exec) {
+    if (!getBoundOnebotExecution(exec)?.direct || result?.status === 'ok') return result;
+    const failureReason = result?.failureReason ?? DIRECT_FAILURE_REASONS[result?.notice]
+        ?? (result?.status === 'unknown' ? 'uncertain' : 'backend_rejected');
+    return { ...result, failureReason };
+}
+
 function normalizedCommandKey(command) {
     const value = normalizeOnebotCommand(command);
     const match = value.match(/^\.([a-z]+)([\s\S]*)$/iu);
@@ -854,13 +884,16 @@ function normalizedCommandKey(command) {
 }
 
 async function executeCommand(args, exec, runtime) {
-    if (!validateToolArguments(args, runtime.config.backendIds)) return safeToolResult('failed', [], 'Command arguments are invalid.');
     bindOnebotExecution(exec);
     const scope = getBoundOnebotExecution(exec);
+    if (!validateToolArguments(args, runtime.config.backendIds, scope)) return safeToolResult('failed', [], 'Command arguments are invalid.');
     const source = getBoundOnebotRequest(exec, args.requestId);
     const activeFailure = onebotExecutionFailure(exec);
     if (activeFailure || !source || scope?.documentScope?.documentMode) {
         return safeToolResult('failed', [], 'This command is not available for the current QQ message.');
+    }
+    if (source.onebotDirectFallback) {
+        return safeToolResult('failed', [], 'This original QQ message is a direct-command fallback; explain its error without running another OneBot command.');
     }
     const callKey = `${args.backend}\u0000${normalizedCommandKey(args.command)}`;
     const result = await getOrCreateOnebotCall(scope, args.requestId, callKey, async () => {
@@ -889,38 +922,51 @@ async function executeCommand(args, exec, runtime) {
             if (!hiddenRecipient) return safeToolResult('failed', [], 'Private delivery eligibility could not be verified.');
         }
         const expected = {
-            requestId: randomBytes(18).toString('base64url'),
+            requestId: getOnebotBridgeRequestId(scope, args.requestId, args.backend),
             backend: args.backend,
             audience: source.audience,
         };
         let dispatched = false;
+        const inFlight = runtime.inFlightByBackend.get(args.backend) ?? 0;
+        if (inFlight >= MAX_BACKEND_IN_FLIGHT) {
+            return safeToolResult('failed', [], 'The OneBot backend queue is full.');
+        }
+        runtime.inFlightByBackend.set(args.backend, inFlight + 1);
         try {
-            const result = await runtime.session.callWs({
-                backend_id: args.backend,
-                request_id: expected.requestId,
-                payload: normalizeOnebotCommand(args.command),
-                audience: source.audience,
-                user_key: source.userKey,
-                ...(source.groupKey ? { group_key: source.groupKey } : {}),
-                timeout: Math.ceil(REQUEST_TIMEOUT_MS / 1000),
-            }, signal, async () => {
-                if (onebotExecutionFailure(exec) || signal.aborted || !runtime.readyBackends.has(args.backend)) return false;
-                if (source.audience === 'group' && commandKind === 'rh') {
-                    if (!runtime.config.hiddenEnabled || runtime.options.proactiveC2CAvailable !== true || !hiddenRecipient
-                        || !runtime.options.friendRegistry?.isFriend(hiddenRecipient.userOpenId)) return false;
-                    try {
-                        if (await runtime.options.verifyProactiveEligibility({
-                            userOpenId: hiddenRecipient.userOpenId,
-                            appId: runtime.options.appId,
-                        }) !== true) return false;
+            let result;
+            try {
+                result = await runtime.session.callWs({
+                    backend_id: args.backend,
+                    request_id: expected.requestId,
+                    payload: normalizeOnebotCommand(args.command),
+                    audience: source.audience,
+                    user_key: source.userKey,
+                    ...(source.groupKey ? { group_key: source.groupKey } : {}),
+                    timeout: Math.ceil(REQUEST_TIMEOUT_MS / 1000),
+                }, signal, async () => {
+                    if (onebotExecutionFailure(exec) || signal.aborted || !runtime.readyBackends.has(args.backend)) return false;
+                    if (source.audience === 'group' && commandKind === 'rh') {
+                        if (!runtime.config.hiddenEnabled || runtime.options.proactiveC2CAvailable !== true || !hiddenRecipient
+                            || !runtime.options.friendRegistry?.isFriend(hiddenRecipient.userOpenId)) return false;
+                        try {
+                            if (await runtime.options.verifyProactiveEligibility({
+                                userOpenId: hiddenRecipient.userOpenId,
+                                appId: runtime.options.appId,
+                            }) !== true) return false;
+                        }
+                        catch { return false; }
+                        if (onebotExecutionFailure(exec) || signal.aborted
+                            || !runtime.options.friendRegistry?.isFriend(hiddenRecipient.userOpenId)) return false;
                     }
-                    catch { return false; }
-                    if (onebotExecutionFailure(exec) || signal.aborted
-                        || !runtime.options.friendRegistry?.isFriend(hiddenRecipient.userOpenId)) return false;
-                }
-                dispatched = true;
-                return true;
-            });
+                    dispatched = true;
+                    return true;
+                });
+            }
+            finally {
+                const remaining = (runtime.inFlightByBackend.get(args.backend) ?? 1) - 1;
+                if (remaining > 0) runtime.inFlightByBackend.set(args.backend, remaining);
+                else runtime.inFlightByBackend.delete(args.backend);
+            }
             if (onebotExecutionFailure(exec)) {
                 if (dispatched) blockOnebotRequest(scope, args.requestId);
                 return dispatched
@@ -932,7 +978,12 @@ async function executeCommand(args, exec, runtime) {
                 if (dispatched) blockOnebotRequest(scope, args.requestId);
                 return safeToolResult('unknown', [], 'The command result is unknown and was not retried.');
             }
-            if (normalized.status === 'failed') return safeToolResult('failed', [], 'The OneBot command was rejected.');
+            if (normalized.status === 'failed') {
+                const publicOutputs = scope.direct
+                    && !(source.audience === 'group' && normalized.privateCount > 0)
+                    ? normalized.outputs : [];
+                return safeToolResult('failed', publicOutputs, 'The OneBot command was rejected.');
+            }
             if (source.audience === 'group' && normalized.privateCount > 0 && commandKind !== 'rh') {
                 blockOnebotRequest(scope, args.requestId);
                 return safeToolResult('unknown', [], 'Private output was withheld because this command did not request a hidden group roll.');
@@ -965,9 +1016,12 @@ async function executeCommand(args, exec, runtime) {
             logToolFailure(ONEBOT_COMMAND_TOOL, 'call', error);
             // Once call_ws dispatch begins, the Dice side may have executed.
             if (dispatched) blockOnebotRequest(scope, args.requestId);
-            return dispatched
-                ? safeToolResult('unknown', [], 'The command result is unknown and was not retried.')
-                : safeToolResult('failed', [], 'The OneBot command could not be completed.');
+            if (dispatched) {
+                const unknown = safeToolResult('unknown', [], 'The command result is unknown and was not retried.');
+                if (scope.direct && error?.name === 'TimeoutError') unknown.failureReason = 'timeout';
+                return unknown;
+            }
+            return safeToolResult('failed', [], 'The OneBot command could not be completed.');
         }
     });
     if (result?.blocked === true) {
@@ -996,9 +1050,11 @@ export function registerOnebotCommandTool(ctx, options = {}) {
         lastProbeErrorKey: undefined,
         refreshController: new AbortController(),
         refreshTask: undefined,
+        inFlightByBackend: new Map(),
         onAvailability: typeof options.onAvailability === 'function' ? options.onAvailability : () => {},
         fetchImpl: options.fetchImpl ?? globalThis.fetch,
     };
+    runtime.execute = async (args, exec) => directExecutionResult(await executeCommand(args, exec, runtime), exec);
     const updateAvailability = (available, reason, backendCount = runtime.readyBackends.size) => {
         const nextAvailable = available === true && runtime.registered;
         runtime.available = nextAvailable;
@@ -1023,12 +1079,24 @@ export function registerOnebotCommandTool(ctx, options = {}) {
     });
     if (!config.enabled) {
         updateAvailability(false, config.invalid ? 'config-invalid' : 'config-disabled', 0);
-        return Object.freeze({ enabled: false, ready: Promise.resolve(false), stop() {}, diagnostics });
+        return Object.freeze({
+            enabled: false,
+            ready: Promise.resolve(false),
+            async execute() { return safeToolResult('failed', [], 'The optional OneBot service is disabled.'); },
+            stop() {},
+            diagnostics,
+        });
     }
     const tools = ctx.get('tools');
     if (typeof tools?.register !== 'function') {
         updateAvailability(false, 'tools-service-unavailable', 0);
-        return Object.freeze({ enabled: false, ready: Promise.resolve(false), stop() {}, diagnostics });
+        return Object.freeze({
+            enabled: false,
+            ready: Promise.resolve(false),
+            async execute() { return safeToolResult('failed', [], 'The OneBot tool service is unavailable.'); },
+            stop() {},
+            diagnostics,
+        });
     }
     runtime.options.appId = options.appId ?? '';
     runtime.options.hiddenEnabled = config.hiddenEnabled;
@@ -1059,7 +1127,13 @@ export function registerOnebotCommandTool(ctx, options = {}) {
         logToolFailure(ONEBOT_COMMAND_TOOL, 'registration', error);
         updateAvailability(false, 'session-init-failed', 0);
         runtime.detachFriendEvents?.();
-        return Object.freeze({ enabled: true, ready: Promise.resolve(false), stop() {}, diagnostics });
+        return Object.freeze({
+            enabled: true,
+            ready: Promise.resolve(false),
+            async execute() { return safeToolResult('failed', [], 'The OneBot service could not be initialized.'); },
+            stop() {},
+            diagnostics,
+        });
     }
 
     const availability = (value, reason, backendCount = runtime.readyBackends.size) => {
@@ -1077,13 +1151,14 @@ export function registerOnebotCommandTool(ctx, options = {}) {
                                 outputs: { type: 'array', items: { type: 'string' } },
                                 notice: { type: 'string' },
                                 privateDelivery: { type: 'string', enum: ['sent', 'failed', 'unknown'] },
+                                failureReason: { type: 'string', enum: ['queue_full', 'backend_not_ready', 'expired', 'uncertain', 'timeout', 'privacy_withheld', 'hidden_disabled', 'private_unavailable', 'backend_rejected'] },
                             },
                             required: ['status', 'outputs'],
                             additionalProperties: false,
                         },
                         render: (_args, result) => [{ type: 'text', text: JSON.stringify(result) }],
                     },
-                    async execute(args, exec) { return executeCommand(args, exec, runtime); },
+                    async execute(args, exec) { return runtime.execute(args, exec); },
                     timeoutMs: 60_000,
                 });
                 runtime.registered = true;
@@ -1148,5 +1223,5 @@ export function registerOnebotCommandTool(ctx, options = {}) {
         await runtime.refreshTask?.catch(() => {});
         return await runtime.options.friendRegistry?.flush?.();
     };
-    return Object.freeze({ enabled: true, ready, refresh, stop, diagnostics, runtime });
+    return Object.freeze({ enabled: true, ready, refresh, stop, diagnostics, execute: runtime.execute, runtime });
 }

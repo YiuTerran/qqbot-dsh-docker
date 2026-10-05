@@ -5,6 +5,7 @@ const root = process.argv[2];
 if (!root) throw new Error('usage: prepare-pre-concurrency-fixture.mjs <dsh-qqbot-dist-directory>');
 const helper = '/opt/qqbot-defaults/qqbot-concurrency.mjs';
 const thinkingOnly = process.argv[3] === 'thinking-only';
+const directOnly = process.argv[3] === 'direct-only';
 
 function replaceOnce(source, before, after, label) {
     const parts = source.split(before);
@@ -15,6 +16,99 @@ function replaceOnce(source, before, after, label) {
 async function edit(file, operation) {
     const path = join(root, file);
     await writeFile(path, operation(await readFile(path, 'utf8')));
+}
+
+await edit('transport/inbound.js', (source) => {
+    if (!source.includes('// Chat-only OneBot direct fallback v1.')) return source;
+    source = replaceOnce(source, "import { renderOnebotDirectFallbackMetadata } from '/opt/qqbot-defaults/qqbot-onebot-scope.mjs';\n", '', 'direct fallback import');
+    source = replaceOnce(source, '        // Chat-only OneBot direct fallback v1.\n        const onebotFallbackMetadata = renderOnebotDirectFallbackMetadata(getMergedGenerationRequests(ctx));\n', '', 'direct fallback binding');
+    return replaceOnce(source, 'generationMetadata, onebotMetadata, onebotFallbackMetadata]', 'generationMetadata, onebotMetadata]', 'direct fallback body');
+});
+await edit('middleware/question-answer.js', (source) => {
+    if (!source.includes('// Chat-only OneBot fallback question bypass v1.')) return source;
+    source = replaceOnce(source, "import { getOnebotDirectFallback } from '/opt/qqbot-defaults/qqbot-onebot-scope.mjs';\n", '', 'direct fallback question import');
+    return replaceOnce(source, '        // Chat-only OneBot fallback question bypass v1.\n        if (getOnebotDirectFallback(ctx)) return await next();\n', '', 'direct fallback question guard');
+});
+
+if (!thinkingOnly) {
+    await edit('gateway/bootstrap.js', (source) => {
+        const directImport = "import { createOnebotDirectRouter } from '/opt/qqbot-defaults/qqbot-onebot-direct.mjs';\n";
+        const directBlock = [
+            '    // Chat-only native OneBot command v1.',
+            '    const onebotService = registerOnebotCommandTool(ctx, {',
+            '        appId: config.appId,',
+            '        bot,',
+            '        messagePath,',
+            '        logger,',
+            '        onAvailability: setOnebotToolAvailable,',
+            '    });',
+            '    // Chat-only native OneBot direct router v1.',
+            '    const directRouter = createOnebotDirectRouter({',
+            '        service: onebotService,',
+            '        appId: config.appId,',
+            '        sender,',
+            '        env: process.env,',
+            '        logger,',
+            '    });',
+            '    setupMiddlewares(bot, config, manager, logger, sender, directRouter);',
+        ].join('\n');
+        const serviceRegistration = [
+            '    // Chat-only native OneBot command v1.',
+            '    const onebotService = registerOnebotCommandTool(ctx, {',
+            '        appId: config.appId,',
+            '        bot,',
+            '        messagePath,',
+            '        logger,',
+            '        onAvailability: setOnebotToolAvailable,',
+            '    });',
+        ].join('\n');
+        if (!source.includes('// Chat-only native OneBot direct router v1.')) {
+            if (source.includes('directRouter') || source.includes(directImport.trim()))
+                throw new Error('pre-concurrency fixture found a partial direct router bootstrap');
+            return source;
+        }
+        source = replaceOnce(source, directBlock,
+            '    setupMiddlewares(bot, config, manager, logger, sender);', 'OneBot direct router bootstrap block');
+        source = replaceOnce(source, directImport, '', 'OneBot direct router import');
+        source = replaceOnce(source,
+            '            await directRouter.stop();\n            await onebotService.stop();',
+            '            await onebotService.stop();', 'OneBot direct router shutdown');
+        source = replaceOnce(source, '    // ── 生命周期 ──',
+            `${serviceRegistration}\n    // ── 生命周期 ──`, 'OneBot service legacy registration point');
+        if (source.includes('directRouter')) throw new Error('pre-concurrency fixture left a direct router reference in bootstrap');
+        return source;
+    });
+
+    await edit('gateway/middleware-setup.js', (source) => {
+        const cancelBlock = [
+            '    // Chat-only OneBot /new cancellation v1.',
+            '    bot.use(async (ctx, next) => {',
+            "        if (ctx.message.content?.trim() === '/new') await directRouter?.cancelConversation(ctx);",
+            '        await next();',
+            '    });',
+        ].join('\n');
+        const directBlock = [
+            '    // Chat-only OneBot direct router middleware v1.',
+            '    if (directRouter) bot.use(directRouter.middleware);',
+        ].join('\n');
+        const directSignature = 'export function setupMiddlewares(bot, config, manager, logger, sender, directRouter) {';
+        if (!source.includes('// Chat-only OneBot direct router middleware v1.')) {
+            if (source.includes('directRouter') || source.includes('// Chat-only OneBot /new cancellation v1.'))
+                throw new Error('pre-concurrency fixture found a partial direct router middleware');
+            return source;
+        }
+        source = replaceOnce(source, directBlock, '', 'OneBot direct router middleware');
+        source = replaceOnce(source, cancelBlock, '', 'OneBot /new cancellation middleware');
+        source = replaceOnce(source, directSignature,
+            'export function setupMiddlewares(bot, config, manager, logger, sender) {', 'OneBot optional router signature');
+        if (source.includes('directRouter')) throw new Error('pre-concurrency fixture left a direct router reference in middleware setup');
+        return source;
+    });
+}
+
+if (directOnly) {
+    process.stdout.write('Prepared pre-OneBot-direct v10.2 adapter volume fixture.\n');
+    process.exit(0);
 }
 
 await edit('gateway/middleware-setup.js', (source) => {

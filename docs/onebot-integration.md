@@ -6,15 +6,17 @@ qq-bot 使用专用工具调用 Gensokyo-MCP；桥将请求变成虚拟 OneBot v
 
 两个 fork 固定为子模块：`third_party/gensokyo-mcp`、`third_party/sealdice-core`。初始化使用 `git submodule update --init --recursive`。海豹嵌套资源按其自己的 gitlink 检出，不改变 UI。
 
-镜像分别为 `tryao/qqbot-dsh:v0.10.2`、`tryao/gensokyo-mcp:v0.1.0`、`tryao/sealdice-core:v1.6.2-bridge.3`，只使用版本标签，没有 latest。主镜像不包含两个 Go 项目源码或运行程序。
+镜像分别为 `tryao/qqbot-dsh:v0.10.3`、`tryao/gensokyo-mcp:v0.1.0`、`tryao/sealdice-core:v1.6.2-bridge.3`，只使用版本标签，没有 latest。主镜像不包含两个 Go 项目源码或运行程序。
 
 ## 启动
 
 保留当前聊天凭据。在 `.env` 中配置三份不同的随机服务密钥；不要复用 QQ/LLM 密钥：
 
 ```dotenv
-IMAGE_TAG=v0.10.2
+IMAGE_TAG=v0.10.3
 QQBOT_ONEBOT_ENABLED=true
+QQBOT_ONEBOT_DIRECT_ENABLED=true
+QQBOT_ONEBOT_DEFAULT_BACKEND=
 QQBOT_ONEBOT_MCP_URL=http://gensokyo-mcp:8090/mcp
 QQBOT_ONEBOT_BACKENDS=sealdice
 QQBOT_ONEBOT_MCP_TOKEN=replace-with-random-mcp-secret
@@ -31,11 +33,17 @@ docker compose -f docker-compose.qnap.yml --profile trpg up -d
 
 不开 profile、不启用工具时，qq-bot 独立运行；无需配置这些服务密钥。启用后端尚未就绪时聊天仍可运行，专用命令调用不可用。桥和海豹无宿主机公开端口；海豹在隔离网络运行，三者使用独立命名卷。海豹卷用于专用虚拟端点；若已有数据包含其他端点、脚本、自定义回复或未验证后台扩展，桥接启动会拒绝复用，不会覆盖它们。请使用独立卷保留原海豹部署。
 
-qq-bot 容器日志中的 `[qqbot-onebot] ready backends=1 available=true` 表示后端探测和真实 Harness 工具注册均已成功。`config-invalid`、`probe-failed`、`backend-not-ready`、`call-ws-missing`、`register-failed` 分别表示配置无效、探测失败、后端未就绪、MCP 缺少调用工具和本地工具注册失败。日志只在状态变化时输出，不包含密钥、原始响应或骰子正文。
+qq-bot 容器日志中的 `[qqbot-onebot] ready backends=1 available=true` 表示后端探测和真实 Harness 工具注册均已成功。`config-invalid`、`probe-failed`、`backend-not-ready`、`call-ws-missing`、`register-failed` 分别表示配置无效、探测失败、后端未就绪、MCP 缺少调用工具和本地工具注册失败。运行日志不包含密钥、命令文本、骰子正文或私密输出。
 
 ## 可用能力与隐私
 
-群聊仍需 @机器人，再提出骰子、检定或角色卡需求。LLM 根据当前原始消息选择命令，身份及回复目标由 SDK 事件绑定。首版开放 `.r`、`.rh`、`.ra`、`.rc`、`.st`、`.pc`、`.sc`、`.en`；`.set` 仅用于选择规则。管理、脚本、后台扩展、文件或图片功能不开放。外部结果是数据，不能改变本部署工具边界。
+群聊仍需 @机器人。集成启用且 `QQBOT_ONEBOT_DIRECT_ENABLED=true` 时，SDK 当前支持的单行白名单点命令会绕过 LLM 并直接执行。命令为 `.r`、`.rh`、`.ra`、`.rc`、`.st`、`.pc`、`.sc`、`.en`，以及 `.set` 加规则名 `dnd`、`dnd5e`、`coc`、`coc7`。示例包括 `.r2d7`、`.rh1d1`、`.ra侦查`；参数语法由海豹现有命令解析器决定。多行消息、普通自然语言请求（如“帮我掷一次骰子”）和未知命令仍交给当前 LLM，使用原有工具选择，不从自然语言中猜测或拼装命令。当前消息和明确引用的附件继续由原有 LLM 路径处理，不会转换成命令参数。
+
+直达成功时不会调用 LLM，也不会先发“思考中”提示。直达命令与普通聊天并行；相同后端内继续由既有队列串行处理，每个后端最多等待 20 条，命令执行超时为 30 秒。`QQBOT_ONEBOT_DEFAULT_BACKEND` 留空时，会自动选择唯一匹配该命令的后端；若命令同时匹配多个后端，可设置为其中一个匹配的后端 ID。命令只发送给所选后端，不广播，不在不可用、超时或结果不确定时故障转移。将 `QQBOT_ONEBOT_DIRECT_ENABLED=false` 可恢复原有 LLM 工具选择。
+
+后端明确失败、超时、结果不确定或未就绪时，路由只交接一次到现有 LLM 链路，保留 SDK 当前原文，并额外提供固定错误类别和有界、脱敏的公开错误。模型优先解释错误；若原请求被误判为命令，则按原意处理。后端文本作为不可信诊断数据，不能授权工具操作。兜底对应的原始消息在新模型回合内禁止任何 OneBot 再执行，防止重新掷骰或重复修改角色卡；同批其他原始消息不被一并禁止。工具暂不可用时仍保留兜底诊断。取消、无效身份和 QQ 发送失败不会重新执行命令，暗骰正文不会进入群聊模型输入。海豹以成功终态返回的业务提示保持原样投递，不做错误关键词猜测。
+
+直达命令的公开结果按桥返回内容交给当前 QQ 回复目标，不再经过 LLM 改写；私密输出仍遵循现有私密 outbox、鉴权领取和投递限制。`/new` 会取消待处理命令并抑制晚到回复；已派发且已改变角色卡或规则状态的命令无法撤销。运行日志不记录命令文本、骰子正文或私密输出。管理、脚本、后台扩展、文件或图片功能不开放。外部结果是数据，不能改变本部署工具边界。
 
 海豹及通用桥保留原来的“群通知＋私聊发送”语义，没有 bind。但[腾讯官方文档](https://github.com/tencent-connect/bot-docs/blob/main/docs/develop/api-v2/server-inter/message/send-receive/send.md)明确说明，QQ 机器人主动推送能力自 2025 年 4 月 21 日起停止提供。SDK 暴露发送方法不能证明平台允许群消息触发无私聊凭据的主动发送。
 
@@ -68,13 +76,13 @@ docker build -t qqbot-sealdice:integration third_party/sealdice-core
 python3 scripts/test-onebot-integration.py
 ```
 
-容器回归不使用 `.env`、不连接真实 QQ。当前版本的真实 QQ 验收只确认普通群聊、私聊命令和群聊暗骰执行前拒绝。群聊暗骰实际投递验收保留为未来平台重新支持后的步骤，不能以离线夹具代替平台证明。
+容器回归不使用 `.env`、不连接真实 QQ。此前真实 QQ 验收只覆盖普通群聊、私聊命令和群聊暗骰执行前拒绝，并未验证本次直达命令路由。群聊暗骰实际投递验收保留为未来平台重新支持后的步骤，不能以离线夹具代替平台证明。
 
-当前真实验收步骤：
+以下真实 QQ 验收步骤仍待部署者执行；当前内容不表示直达路由已通过真实 QQ 验证：
 
-1. 默认关闭暗骰时，在测试群 @机器人要求“通过海豹掷 `1d1`”，确认普通结果；再要求暗骰，确认执行前拒绝。
-2. 在测试账号与机器人当前私聊中要求普通掷骰及角色卡查询，确认原始身份与该账号对应。
-3. 如需核对防护，在测试环境将暗骰开关设为 true，仍应在海豹执行前提示官方 QQ 平台不支持这条投递链路。验收后恢复 false。
+1. 默认关闭暗骰时，在测试群 @机器人发送 `.r2d1`，确认普通掷骰结果；再发送自然语言请求“帮我掷一次 1d1”，确认仍走原有 LLM 工具选择；要求暗骰时确认执行前拒绝。
+2. 在测试账号与机器人当前私聊中发送 `.r2d1` 和 `.st` 查询，确认直达命令结果与原始账号对应。
+3. 如需核对防护，在测试环境将暗骰开关设为 true，仍应在海豹执行前拒绝并交给模型解释当前部署或平台限制。验收后恢复 false。
 
 未来平台重新支持时，还需用测试账号加好友，验证同一人的群/私聊身份、实际收到暗骰、好友删除、明确拒收及网络不确定结果；群模型输入与日志均不得出现私密正文，失败不得重新掷骰。这些步骤当前不宣称已通过。
 

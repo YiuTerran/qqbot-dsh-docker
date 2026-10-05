@@ -39,6 +39,10 @@ services:
       QQBOT_IMAGE_MAX_CONCURRENT: ${QQBOT_IMAGE_MAX_CONCURRENT:-2}
       QQBOT_MARKDOWN_MAX_CONCURRENT: ${QQBOT_MARKDOWN_MAX_CONCURRENT:-4}
       QQBOT_ONEBOT_ENABLED: ${QQBOT_ONEBOT_ENABLED:-false}
+      # Directly route supported commands only when OneBot is enabled.
+      QQBOT_ONEBOT_DIRECT_ENABLED: ${QQBOT_ONEBOT_DIRECT_ENABLED:-true}
+      # Empty auto-selects a command's unique matching backend; set an ID for ambiguous matches.
+      QQBOT_ONEBOT_DEFAULT_BACKEND: ${QQBOT_ONEBOT_DEFAULT_BACKEND:-}
       QQBOT_ONEBOT_MCP_URL: ${QQBOT_ONEBOT_MCP_URL:-http://gensokyo-mcp:8090/mcp}
       QQBOT_ONEBOT_MCP_TOKEN: ${QQBOT_ONEBOT_MCP_TOKEN:-}
       QQBOT_ONEBOT_INTERNAL_TOKEN: ${QQBOT_ONEBOT_INTERNAL_TOKEN:-}

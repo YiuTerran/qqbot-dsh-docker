@@ -95,6 +95,7 @@ COPY defaults/cordis.safety.patch.yml /opt/qqbot-defaults/cordis.safety.patch.ym
 COPY defaults/qqbot-chat-policy.mjs /opt/qqbot-defaults/qqbot-chat-policy.mjs
 COPY defaults/qqbot-onebot.mjs /opt/qqbot-defaults/qqbot-onebot.mjs
 COPY defaults/qqbot-onebot-scope.mjs /opt/qqbot-defaults/qqbot-onebot-scope.mjs
+COPY defaults/qqbot-onebot-direct.mjs /opt/qqbot-defaults/qqbot-onebot-direct.mjs
 COPY defaults/qqbot-image-diagnostics.mjs /opt/qqbot-defaults/qqbot-image-diagnostics.mjs
 COPY defaults/qqbot-quote-images.mjs /opt/qqbot-defaults/qqbot-quote-images.mjs
 COPY defaults/qqbot-web-pages.mjs /opt/qqbot-defaults/qqbot-web-pages.mjs
@@ -113,6 +114,8 @@ COPY defaults/qqbot-image-input-worker.mjs /opt/qqbot-defaults/qqbot-image-input
 COPY defaults/qqbot-generation-scope.mjs /opt/qqbot-defaults/qqbot-generation-scope.mjs
 COPY defaults/qqbot-generation-quotas.mjs /opt/qqbot-defaults/qqbot-generation-quotas.mjs
 COPY defaults/qqbot-generation-sender.mjs /opt/qqbot-defaults/qqbot-generation-sender.mjs
+
+RUN node --check /opt/qqbot-defaults/qqbot-onebot-direct.mjs
 
 RUN node --input-type=module -e "import '/opt/qqbot-defaults/qqbot-chat-policy.mjs'; import '/opt/qqbot-defaults/qqbot-generation-scope.mjs'; import '/opt/qqbot-defaults/qqbot-memory-images.mjs'; import sharp from '/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/sharp/dist/index.cjs'; import { normalizeEditImage } from '/opt/qqbot-defaults/qqbot-image-input.mjs'; const source = await sharp({ create: { width: 1, height: 1, channels: 4, background: { r: 255, g: 0, b: 0, alpha: 1 } } }).webp({ lossless: true }).toBuffer(); const output = await normalizeEditImage(source, { inspectImage: bytes => bytes[0] === 137 ? 'image/png' : undefined }); const metadata = await sharp(output).metadata(); if (metadata.format !== 'png' || metadata.width !== 1 || metadata.height !== 1) process.exit(1)"
 

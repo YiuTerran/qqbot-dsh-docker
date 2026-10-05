@@ -49,9 +49,21 @@ async function assertCurrentPatch(root) {
     const expected = {
         'gateway/bootstrap.js': [
             '// Chat-only merge batch reply adapter v1.',
-            'setupMiddlewares(bot, config, manager, logger, sender);',
+            'setupMiddlewares(bot, config, manager, logger, sender, directRouter);',
+            "import { createOnebotDirectRouter } from '/opt/qqbot-defaults/qqbot-onebot-direct.mjs';",
+            '// Chat-only native OneBot command v1.',
+            '// Chat-only native OneBot direct router v1.',
+            'const directRouter = createOnebotDirectRouter({',
+            'service: onebotService,',
+            'await directRouter.stop();',
+            'await onebotService.stop();',
         ],
         'gateway/middleware-setup.js': [
+            'export function setupMiddlewares(bot, config, manager, logger, sender, directRouter) {',
+            '// Chat-only OneBot /new cancellation v1.',
+            "if (ctx.message.content?.trim() === '/new') await directRouter?.cancelConversation(ctx);",
+            '// Chat-only OneBot direct router middleware v1.',
+            'if (directRouter) bot.use(directRouter.middleware);',
             "import { createMergeConcurrencyGuard, sendMergeQueueFullNotice, sendMergeThinkingNotice } from '/opt/qqbot-defaults/qqbot-concurrency.mjs';",
             "import { createHistorySnapshotBuffer } from '/opt/qqbot-defaults/qqbot-history-snapshot.mjs';",
             '// Chat-only history snapshot epoch guard v1.',
@@ -82,7 +94,9 @@ async function assertCurrentPatch(root) {
             'const deferredImagePromptMetadata = renderDeferredImagePromptMetadata(getMergedGenerationRequests(ctx));',
             'generationTurn = beginGenerationTurn(',
             'const generationMetadata = renderGenerationRequestMetadata(generationTurn);',
-            "const requestBody = [documentBody, deferredImagePromptMetadata, generationMetadata, onebotMetadata].filter(Boolean).join('\\n\\n');",
+            "const requestBody = [documentBody, deferredImagePromptMetadata, generationMetadata, onebotMetadata, onebotFallbackMetadata].filter(Boolean).join('\\n\\n');",
+            '// Chat-only OneBot direct fallback v1.',
+            'renderOnebotDirectFallbackMetadata(getMergedGenerationRequests(ctx))',
             'if (generationTurn) await endGenerationTurn(chatOnlyAgent, generationTurn);',
             'if (onebotTurn) await endOnebotTurn(chatOnlyAgent, onebotTurn);',
             'await closeMergeBatch(replyBatch);',
@@ -133,6 +147,7 @@ async function assertCurrentPatch(root) {
         ],
     };
     const inbound = await readFile(join(root, 'transport/inbound.js'), 'utf8');
+    const bootstrap = await readFile(join(root, 'gateway/bootstrap.js'), 'utf8');
     const middlewareSetup = await readFile(join(root, 'gateway/middleware-setup.js'), 'utf8');
     for (const obsolete of ['QQBOT_GROUP_CURRENT_ONLY', 'beginGroupModelContext', 'projectGroupModelMessages',
         'logContextInbound', 'logContextProjection', 'quoteFilter', 'createGroupHistoryBuffer']) {
@@ -141,8 +156,26 @@ async function assertCurrentPatch(root) {
     }
     assert.equal(inbound.split("const requestBody = [documentBody, generationMetadata].filter(Boolean).join('\\n\\n');").length - 1, 0,
         'obsolete request body without OneBot provenance is absent');
-    assert.equal(inbound.split("const requestBody = [documentBody, deferredImagePromptMetadata, generationMetadata, onebotMetadata].filter(Boolean).join('\\n\\n');").length - 1, 1,
+    assert.equal(inbound.split("const requestBody = [documentBody, deferredImagePromptMetadata, generationMetadata, onebotMetadata, onebotFallbackMetadata].filter(Boolean).join('\\n\\n');").length - 1, 1,
         'the availability-gated request body includes OneBot provenance exactly once');
+    const servicePosition = bootstrap.indexOf('const onebotService = registerOnebotCommandTool(ctx, {');
+    const senderPosition = bootstrap.indexOf('const sender = {');
+    const routerPosition = bootstrap.indexOf('const directRouter = createOnebotDirectRouter({');
+    const setupPosition = bootstrap.indexOf('setupMiddlewares(bot, config, manager, logger, sender, directRouter);');
+    assert.ok(senderPosition < servicePosition && servicePosition < routerPosition && routerPosition < setupPosition,
+        'the service and sender exist before the direct router is passed to middleware setup');
+    assert.ok(bootstrap.indexOf('await directRouter.stop();') < bootstrap.indexOf('await onebotService.stop();'),
+        'direct conversation scopes stop before the underlying OneBot service');
+    const ratePosition = middlewareSetup.indexOf('bot.use(rateLimiter());');
+    const cancelPosition = middlewareSetup.indexOf("if (ctx.message.content?.trim() === '/new') await directRouter?.cancelConversation(ctx);");
+    const slashPosition = middlewareSetup.indexOf('bot.use(slash.middleware);');
+    const routerMiddlewarePosition = middlewareSetup.indexOf('if (directRouter) bot.use(directRouter.middleware);');
+    const qaPosition = middlewareSetup.indexOf('bot.use(questionAnswer(manager));');
+    const attachmentPosition = middlewareSetup.indexOf('bot.use(attachmentProcessor(config, logger));');
+    assert.ok(ratePosition < cancelPosition && cancelPosition < slashPosition
+        && slashPosition < routerMiddlewarePosition && routerMiddlewarePosition < qaPosition
+        && routerMiddlewarePosition < attachmentPosition,
+    'sanitized /new cancels before slash handling and direct commands run after slash handling before QA and attachments');
     for (const [file, markers] of Object.entries(expected)) {
         const content = await readFile(join(root, file), 'utf8');
         for (const marker of markers) assert.equal(content.split(marker).length, 2, `${file}: exactly one ${marker}`);
@@ -150,11 +183,12 @@ async function assertCurrentPatch(root) {
     }
 }
 
-for (const version of ['pre-thinking', 'pre-concurrency', 'pre-recovery', 'recovery-v1']) {
+for (const version of ['pre-thinking', 'pre-concurrency', 'pre-recovery', 'recovery-v1', 'onebot-v10.2']) {
     integration(`${version} adapter upgrades completely and a second patch pass changes no file hashes`, async (t) => {
         const root = await isolatedAdapter(t);
         if (version === 'pre-thinking') await run(concurrencyFixture, [root, 'thinking-only']);
         else if (version === 'pre-concurrency') await run(concurrencyFixture, [root]);
+        else if (version === 'onebot-v10.2') await run(concurrencyFixture, [root, 'direct-only']);
         else await run(fixture, [root, ...(version === 'recovery-v1' ? ['recovery-v1'] : [])]);
         const before = await hashes(root);
         await run(enforcer, [root]);
@@ -241,6 +275,38 @@ integration('a markerless partial thinking hook fails closed without changing an
     await assert.rejects(run(enforcer, [root]), (error) => {
         assert.notEqual(error.code, 0);
         assert.match(error.stderr, /partial idle thinking notice/u);
+        return true;
+    });
+    assert.deepEqual(await hashes(root), before, 'strict rejection performs zero adapter writes');
+});
+
+integration('a marked but incomplete OneBot router shutdown fails closed without changing any dist file', async (t) => {
+    const root = await isolatedAdapter(t);
+    const bootstrapPath = join(root, 'gateway/bootstrap.js');
+    const bootstrap = await readFile(bootstrapPath, 'utf8');
+    const stop = '            await directRouter.stop();';
+    assert.equal(bootstrap.split(stop).length, 2, 'fixture begins with one direct router shutdown');
+    await writeFile(bootstrapPath, bootstrap.replace(stop, '            // fixture removed direct router shutdown'));
+    const before = await hashes(root);
+    await assert.rejects(run(enforcer, [root]), (error) => {
+        assert.notEqual(error.code, 0);
+        assert.match(error.stderr, /native OneBot direct router shutdown is missing or duplicated/u);
+        return true;
+    });
+    assert.deepEqual(await hashes(root), before, 'strict rejection performs zero adapter writes');
+});
+
+integration('a marked but incomplete OneBot /new hook fails closed without changing any dist file', async (t) => {
+    const root = await isolatedAdapter(t);
+    const middlewarePath = join(root, 'gateway/middleware-setup.js');
+    const middleware = await readFile(middlewarePath, 'utf8');
+    const cancellation = "        if (ctx.message.content?.trim() === '/new') await directRouter?.cancelConversation(ctx);";
+    assert.equal(middleware.split(cancellation).length, 2, 'fixture begins with one direct cancellation call');
+    await writeFile(middlewarePath, middleware.replace(cancellation, '        // fixture removed direct cancellation call'));
+    const before = await hashes(root);
+    await assert.rejects(run(enforcer, [root]), (error) => {
+        assert.notEqual(error.code, 0);
+        assert.match(error.stderr, /serialized merge middleware, overflow notice, or ordering is incomplete/u);
         return true;
     });
     assert.deepEqual(await hashes(root), before, 'strict rejection performs zero adapter writes');

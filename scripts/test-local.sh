@@ -17,6 +17,8 @@ pending_images_test="${repo_root}/scripts/test-pending-images.mjs"
 pending_images_native_test="${repo_root}/scripts/test-pending-images-native.mjs"
 memory_images_test="${repo_root}/scripts/test-memory-images.mjs"
 onebot_native_test="${repo_root}/scripts/test-onebot-native.mjs"
+onebot_direct_test="${repo_root}/scripts/test-onebot-direct.mjs"
+onebot_direct_native_test="${repo_root}/scripts/test-onebot-direct-native.mjs"
 recovery_upgrade_test="${repo_root}/scripts/test-recovery-upgrade.mjs"
 pre_recovery_fixture="${repo_root}/scripts/prepare-pre-recovery-fixture.mjs"
 pre_concurrency_fixture="${repo_root}/scripts/prepare-pre-concurrency-fixture.mjs"
@@ -153,6 +155,16 @@ fi
 
 if [[ ! -r "$pending_images_native_test" ]]; then
     echo "missing native pending image prompt regression script: $pending_images_native_test" >&2
+    exit 66
+fi
+
+if [[ ! -r "$onebot_direct_test" ]]; then
+    echo "missing OneBot direct router regression script: $onebot_direct_test" >&2
+    exit 66
+fi
+
+if [[ ! -r "$onebot_direct_native_test" ]]; then
+    echo "missing native OneBot direct router regression script: $onebot_direct_native_test" >&2
     exit 66
 fi
 
@@ -442,6 +454,8 @@ docker create \
     --mount "type=bind,src=${pending_images_native_test},dst=/tmp/test-pending-images-native.mjs,readonly" \
     --mount "type=bind,src=${memory_images_test},dst=/tmp/test-memory-images.mjs,readonly" \
     --mount "type=bind,src=${onebot_native_test},dst=/tmp/test-onebot-native.mjs,readonly" \
+    --mount "type=bind,src=${onebot_direct_test},dst=/tmp/test-onebot-direct.mjs,readonly" \
+    --mount "type=bind,src=${onebot_direct_native_test},dst=/tmp/test-onebot-direct-native.mjs,readonly" \
     --mount "type=bind,src=${recovery_upgrade_test},dst=/tmp/test-recovery-upgrade.mjs,readonly" \
     --mount "type=bind,src=${pre_recovery_fixture},dst=/tmp/prepare-pre-recovery-fixture.mjs,readonly" \
     --mount "type=bind,src=${pre_concurrency_fixture},dst=/tmp/prepare-pre-concurrency-fixture.mjs,readonly" \
@@ -533,6 +547,8 @@ docker create \
         QQBOT_GENERATION_SCOPE_MODULE=/opt/qqbot-defaults/qqbot-generation-scope.mjs node --test /tmp/test-generation-scope.mjs
         QQBOT_GENERATION_QUOTA_MODULE=/opt/qqbot-defaults/qqbot-generation-quotas.mjs node --test /tmp/test-generation-quotas.mjs
         QQBOT_ONEBOT_MODULE_ROOT=/opt/qqbot-defaults QQBOT_ONEBOT_PATCHER_SOURCE=/usr/local/lib/enforce-chat-only.mjs QQBOT_SDK_API_CLIENT_MODULE=/data/profiles/qqbot/node_modules/@tencent-connect/qqbot-nodejs/dist/protocol/api/api-client.js node --test /tmp/test-onebot-native.mjs
+        QQBOT_ONEBOT_MODULE_ROOT=/opt/qqbot-defaults node --test /tmp/test-onebot-direct.mjs
+        QQBOT_ONEBOT_DIRECT_MODULE=/opt/qqbot-defaults/qqbot-onebot-direct.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-onebot-direct-native.mjs
         QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist QQBOT_ENFORCER_SCRIPT=/usr/local/lib/enforce-chat-only.mjs node --test /tmp/test-recovery-upgrade.mjs
         node /tmp/test-profile-boot.mjs
         QQBOT_TEST_ONEBOT_FIXTURE=true QQBOT_APPID=123456789 node /tmp/test-profile-boot.mjs
@@ -660,7 +676,7 @@ for recovery_boot in 1 2; do
     '
 done
 
-log "Checking pre-concurrency data-volume upgrade, idempotence, and native FIFO regressions"
+log "Checking pre-concurrency/v10.2 data-volume upgrade, direct routing, and native FIFO regressions"
 docker run --rm --network none --entrypoint sh --volume "${pre_concurrency_data_volume}:/data" "$IMAGE" -ec '
     cp -a /opt/dsh-seed/. /data/
     : > /data/.initialized
@@ -674,9 +690,13 @@ for concurrency_boot in 1 2; do
     docker run --rm --network none \
         --volume "${pre_concurrency_data_volume}:/data" \
         --mount "type=bind,src=${concurrency_test},dst=/tmp/test-concurrency.mjs,readonly" \
+        --mount "type=bind,src=${onebot_direct_native_test},dst=/tmp/test-onebot-direct-native.mjs,readonly" \
         "$IMAGE" sh -ec '
             test "$(cat /data/AGENTS.md)" = "pre-concurrency user instructions"
             root=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
+            test "$(grep -Fc "Chat-only native OneBot direct router v1." "$root/gateway/bootstrap.js")" -eq 1
+            test "$(grep -Fc "Chat-only OneBot /new cancellation v1." "$root/gateway/middleware-setup.js")" -eq 1
+            test "$(grep -Fc "Chat-only OneBot direct router middleware v1." "$root/gateway/middleware-setup.js")" -eq 1
             test "$(grep -Fc "Chat-only serialized merge guard v1." "$root/gateway/middleware-setup.js")" -eq 1
             test "$(grep -Fc "Chat-only batch cancellation and reply binding v1." "$root/transport/inbound.js")" -eq 1
             test "$(grep -Fc "Chat-only safe batch finalization v1." "$root/transport/inbound.js")" -eq 1
@@ -691,6 +711,8 @@ for concurrency_boot in 1 2; do
             node --check "$root/transport/outbound-buffer.js"
             QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs \
                 QQBOT_ADAPTER_DIST="$root" node --test /tmp/test-concurrency.mjs
+            QQBOT_ONEBOT_DIRECT_MODULE=/opt/qqbot-defaults/qqbot-onebot-direct.mjs \
+                QQBOT_ADAPTER_DIST="$root" node --test /tmp/test-onebot-direct-native.mjs
         '
 done
 

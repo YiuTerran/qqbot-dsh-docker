@@ -1,4 +1,5 @@
 import { isRecentImageSnapshot } from './qqbot-pending-images.mjs';
+import { getOnebotDirectFallback } from './qqbot-onebot-scope.mjs';
 
 const DEFAULT_MAX_QUEUE = 20;
 const BUSY_NOTICE = '主人，本鱼太忙啦，请等一会儿再来找本鱼吧。';
@@ -28,10 +29,12 @@ function snapshotGenerationRequest(ctx) {
     const replyTarget = snapshotReplyTarget(message?.replyTarget ?? ctx?.replyTarget);
     if (!message || !replyTarget) return undefined;
     const recentImageSnapshot = ctx?.state?.qqbotRecentImages;
+    const directFallback = getOnebotDirectFallback(ctx);
     return Object.freeze({
         ownerId: message.senderId,
         replyTarget,
         text: typeof message.content === 'string' ? message.content.slice(0, 4000) : '',
+        ...(directFallback ? { onebotDirectFallback: directFallback } : {}),
         currentAttachments: Object.freeze((Array.isArray(message.attachments) ? message.attachments : [])
             .map(snapshotGenerationAttachment).filter(Boolean)),
         quotedAttachments: Object.freeze((Array.isArray(ctx?.state?.quote?.attachments) ? ctx.state.quote.attachments : [])

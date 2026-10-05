@@ -18,6 +18,7 @@ const generationScopePolicy = '/opt/qqbot-defaults/qqbot-generation-scope.mjs';
 const memoryImagesPolicy = '/opt/qqbot-defaults/qqbot-memory-images.mjs';
 const onebotPolicy = '/opt/qqbot-defaults/qqbot-onebot.mjs';
 const onebotScopePolicy = '/opt/qqbot-defaults/qqbot-onebot-scope.mjs';
+const onebotDirectPolicy = '/opt/qqbot-defaults/qqbot-onebot-direct.mjs';
 const imageToolPolicyImport = `import { loadChatImageBytes } from '${policy}';`;
 const imageLoaderV3Marker = '// Chat-only scoped image loader v3.';
 const imageSchemaV3Marker = '// Chat-only image schema: scoped QQ media paths or public HTTPS image URLs v3.';
@@ -134,6 +135,52 @@ await patch('gateway/bootstrap.js', '// Chat-only merge batch reply adapter v1.'
     return content;
 });
 
+await patch('gateway/bootstrap.js', '// Chat-only native OneBot direct router v1.', (content, file) => {
+    const directImport = `import { createOnebotDirectRouter } from '${onebotDirectPolicy}';`;
+    if (content.includes(directImport) || content.includes('directRouter'))
+        throw new Error(`Chat-only patch: partial native OneBot direct router in ${file}`);
+    content = `${directImport}\n${content}`;
+    const oldRegistration = [
+        '    // Chat-only native OneBot command v1.',
+        '    const onebotService = registerOnebotCommandTool(ctx, {',
+        '        appId: config.appId,',
+        '        bot,',
+        '        messagePath,',
+        '        logger,',
+        '        onAvailability: setOnebotToolAvailable,',
+        '    });',
+        '    // ── 生命周期 ──',
+    ].join('\n');
+    if (!content.includes(oldRegistration))
+        throw new Error(`Chat-only patch: expected canonical native OneBot registration before lifecycle in ${file}`);
+    content = replaceOne(content, oldRegistration, '    // ── 生命周期 ──', file);
+    const directRegistration = [
+        '    // Chat-only native OneBot command v1.',
+        '    const onebotService = registerOnebotCommandTool(ctx, {',
+        '        appId: config.appId,',
+        '        bot,',
+        '        messagePath,',
+        '        logger,',
+        '        onAvailability: setOnebotToolAvailable,',
+        '    });',
+        '    // Chat-only native OneBot direct router v1.',
+        '    const directRouter = createOnebotDirectRouter({',
+        '        service: onebotService,',
+        '        appId: config.appId,',
+        '        sender,',
+        '        env: process.env,',
+        '        logger,',
+        '    });',
+        '    setupMiddlewares(bot, config, manager, logger, sender, directRouter);',
+    ].join('\n');
+    content = replaceOne(content,
+        '    setupMiddlewares(bot, config, manager, logger, sender);',
+        directRegistration, file);
+    return replaceOne(content,
+        '            await onebotService.stop();',
+        '            await directRouter.stop();\n            await onebotService.stop();', file);
+});
+
 await patch('gateway/middleware-setup.js', '// Chat-only serialized merge guard v1.', (content, file) => {
     const helperImport = `import { createMergeConcurrencyGuard, sendMergeQueueFullNotice } from '${concurrencyPolicy}';`;
     if (!content.includes(helperImport)) content = `${helperImport}\n${content}`;
@@ -186,6 +233,45 @@ await patch('gateway/middleware-setup.js', '// Chat-only idle group thinking not
         '        },',
         '        onDrop: async (droppedCtx) => {',
     ].join('\n'), file);
+});
+
+await patch('gateway/middleware-setup.js', '// Chat-only OneBot direct router middleware v1.', (content, file) => {
+    const originalSignature = 'export function setupMiddlewares(bot, config, manager, logger, sender) {';
+    const patchedSignature = 'export function setupMiddlewares(bot, config, manager, logger, sender, directRouter) {';
+    if (!content.includes(patchedSignature)) content = replaceOne(content, originalSignature, patchedSignature, file);
+    const cancelBlock = [
+        '    // Chat-only OneBot /new cancellation v1.',
+        '    bot.use(async (ctx, next) => {',
+        "        if (ctx.message.content?.trim() === '/new') await directRouter?.cancelConversation(ctx);",
+        '        await next();',
+        '    });',
+    ].join('\n');
+    const cancellationAnchor = '    bot.use(rateLimiter());';
+    if (!content.includes('// Chat-only OneBot /new cancellation v1.')) {
+        content = replaceOne(content, cancellationAnchor, `${cancellationAnchor}\n${cancelBlock}`, file);
+    }
+    else if (!content.includes("if (ctx.message.content?.trim() === '/new') await directRouter?.cancelConversation(ctx);")) {
+        throw new Error(`Chat-only patch: native OneBot /new cancellation is partial in ${file}`);
+    }
+    const routerBlock = [
+        '    // Chat-only OneBot direct router middleware v1.',
+        '    if (directRouter) bot.use(directRouter.middleware);',
+    ].join('\n');
+    const slashAnchor = '    bot.use(slash.middleware);';
+    if (!content.includes('// Chat-only OneBot direct router middleware v1.')) {
+        content = replaceOne(content, slashAnchor, `${slashAnchor}\n${routerBlock}`, file);
+    }
+    else if (!content.includes('if (directRouter) bot.use(directRouter.middleware);')) {
+        throw new Error(`Chat-only patch: native OneBot direct router middleware is partial in ${file}`);
+    }
+    return content;
+});
+
+await patch('middleware/question-answer.js', '// Chat-only OneBot fallback question bypass v1.', (content, file) => {
+    const fallbackImport = `import { getOnebotDirectFallback } from '${onebotScopePolicy}';`;
+    if (!content.includes(fallbackImport)) content = `${fallbackImport}\n${content}`;
+    return replaceOne(content, '    return async (ctx, next) => {',
+        '    return async (ctx, next) => {\n        // Chat-only OneBot fallback question bypass v1.\n        if (getOnebotDirectFallback(ctx)) return await next();', file);
 });
 
 await patch('gateway/middleware-setup.js', `import {createScopedQuoteRef} from '${policy}';`, (content, file) => {
@@ -398,6 +484,12 @@ const promptCleanupPosition = patchedMiddlewareSetup.indexOf('bot.use(createPend
 const promptAssociationPosition = patchedMiddlewareSetup.indexOf('bot.use(createPendingImagePromptMiddleware({ appId: config.appId }));');
 const scopedQuotePosition = patchedMiddlewareSetup.indexOf('bot.use(createScopedQuoteRef(quoteRef));');
 const slashMiddlewarePosition = patchedMiddlewareSetup.indexOf('bot.use(slash.middleware);');
+const onebotCancelMarker = '// Chat-only OneBot /new cancellation v1.';
+const onebotCancelPosition = patchedMiddlewareSetup.indexOf(onebotCancelMarker);
+const onebotCancelCall = "if (ctx.message.content?.trim() === '/new') await directRouter?.cancelConversation(ctx);";
+const onebotDirectMarker = '// Chat-only OneBot direct router middleware v1.';
+const onebotDirectPosition = patchedMiddlewareSetup.indexOf(onebotDirectMarker);
+const onebotDirectCall = 'if (directRouter) bot.use(directRouter.middleware);';
 if (patchedMiddlewareSetup.split(historySnapshotMarker).length !== 2
     || patchedMiddlewareSetup.split(historySnapshotImport).length !== 2
     || patchedMiddlewareSetup.split(canonicalHistorySnapshot).length !== 2
@@ -461,10 +553,18 @@ if (patchedMiddlewareSetup.split(mergeGuardImport).length !== 2
     || capturePosition >= historySnapshotCallPosition || historySnapshotCallPosition >= mentionPosition
     || promptCleanupPosition <= mentionPosition || promptCleanupPosition >= slashMiddlewarePosition
     || promptAssociationPosition <= answerPosition || promptAssociationPosition >= mergeGuardPosition
+    || patchedMiddlewareSetup.split(onebotCancelMarker).length !== 2
+    || patchedMiddlewareSetup.split(onebotCancelCall).length !== 2
+    || patchedMiddlewareSetup.split(onebotDirectMarker).length !== 2
+    || patchedMiddlewareSetup.split(onebotDirectCall).length !== 2
+    || !patchedMiddlewareSetup.includes('export function setupMiddlewares(bot, config, manager, logger, sender, directRouter) {')
+    || onebotCancelPosition <= rateLimitPosition || onebotCancelPosition >= slashPosition
+    || onebotDirectPosition <= slashMiddlewarePosition || onebotDirectPosition >= answerPosition
+    || onebotDirectPosition >= mergeGuardPosition || onebotDirectPosition >= attachmentPosition
     || thinkingNoticePosition <= mergeGuardPosition || onStartPosition <= thinkingNoticePosition
     || thinkingSendPosition <= onStartPosition || onDropPosition <= thinkingSendPosition
     || attachmentPosition <= mergeGuardEndPosition || typingPosition <= mergeGuardEndPosition
-    || !patchedMiddlewareSetup.includes('setupMiddlewares(bot, config, manager, logger, sender)')) {
+    || !patchedMiddlewareSetup.includes('setupMiddlewares(bot, config, manager, logger, sender, directRouter)')) {
     throw new Error('Chat-only patch: serialized merge middleware, overflow notice, or ordering is incomplete');
 }
 if (patchedMiddlewareSetup.split(`import { createPendingImageCaptureMiddleware, createPendingImagePromptMiddleware, createPendingImageNewCommandCleanup } from '${pendingImagesPolicy}';`).length !== 2
@@ -777,6 +877,15 @@ await patch('transport/inbound.js', '// Chat-only deferred image prompt metadata
     if (content.includes(oldBody)) content = replaceOne(content, oldBody, newBody, file);
     else if (!content.includes(newBody)) throw new Error(`Chat-only patch: deferred image prompt metadata is not bound to the model input in ${file}`);
     return content;
+});
+
+await patch('transport/inbound.js', '// Chat-only OneBot direct fallback v1.', (content, file) => {
+    const fallbackImport = `import { renderOnebotDirectFallbackMetadata } from '${onebotScopePolicy}';`;
+    if (!content.includes(fallbackImport)) content = `${fallbackImport}\n${content}`;
+    const oldBody = "        const requestBody = [documentBody, deferredImagePromptMetadata, generationMetadata, onebotMetadata].filter(Boolean).join('\\n\\n');";
+    const newBody = "        const requestBody = [documentBody, deferredImagePromptMetadata, generationMetadata, onebotMetadata, onebotFallbackMetadata].filter(Boolean).join('\\n\\n');";
+    return replaceOne(content, oldBody,
+        '        // Chat-only OneBot direct fallback v1.\n        const onebotFallbackMetadata = renderOnebotDirectFallbackMetadata(getMergedGenerationRequests(ctx));\n' + newBody, file);
 });
 
 await patch('transport/inbound.js', '// Chat-only lazy quoted image grants v1.', (content, file) => {
@@ -2066,7 +2175,11 @@ assertOnce(finalInbound, `import { setCurrentImages, clearCurrentImages, isOnebo
 assertOnce(finalInbound, '// Chat-only OneBot provenance v1.', 'OneBot provenance marker');
 assertOnce(finalInbound, 'if (isOnebotToolAvailable()) onebotTurn = beginOnebotTurn(', 'OneBot availability-gated turn binding');
 assertOnce(finalInbound, "const onebotMetadata = onebotTurn ? renderOnebotRequestMetadata(onebotTurn) : '';", 'OneBot request metadata');
-assertOnce(finalInbound, "const requestBody = [documentBody, deferredImagePromptMetadata, generationMetadata, onebotMetadata].filter(Boolean).join('\\n\\n');", 'OneBot model input with deferred image prompt metadata');
+assertOnce(finalInbound, "const requestBody = [documentBody, deferredImagePromptMetadata, generationMetadata, onebotMetadata, onebotFallbackMetadata].filter(Boolean).join('\\n\\n');", 'OneBot model input with independent fallback diagnostics');
+assertOnce(finalInbound, `import { renderOnebotDirectFallbackMetadata } from '${onebotScopePolicy}';`, 'OneBot independent fallback import');
+assertOnce(finalInbound, 'const onebotFallbackMetadata = renderOnebotDirectFallbackMetadata(getMergedGenerationRequests(ctx));', 'OneBot fallback even without tool availability');
+const finalQuestionAnswer = await finalText('middleware/question-answer.js');
+assertOnce(finalQuestionAnswer, 'if (getOnebotDirectFallback(ctx)) return await next();', 'OneBot fallback bypasses pending questions');
 assertOnce(finalInbound, 'await endOnebotTurn(chatOnlyAgent, onebotTurn);', 'OneBot scope cleanup');
 assertOnce(finalInbound, '// Chat-only safe inbound errors v1.', 'safe inbound errors marker');
 assertOnce(finalInbound, "logger.warn('whenIdle/followup rejected');", 'safe inbound exception log');
@@ -2095,21 +2208,33 @@ if (historyGuardPosition > finalInbound.indexOf('const agentBody = assembleAgent
 }
 const finalBootstrap = await finalText('gateway/bootstrap.js');
 assertOnce(finalBootstrap, '// Chat-only merge batch reply adapter v1.', 'early merge sender adapter');
-assertOnce(finalBootstrap, 'setupMiddlewares(bot, config, manager, logger, sender);', 'merge sender injection');
+assertOnce(finalBootstrap, 'setupMiddlewares(bot, config, manager, logger, sender, directRouter);', 'merge sender and direct router injection');
 assertOnce(finalBootstrap, `import { registerOnebotCommandTool } from '${onebotPolicy}';`, 'native OneBot command import');
 assertOnce(finalBootstrap, `import { setOnebotToolAvailable } from '${policy}';`, 'native OneBot availability import');
+assertOnce(finalBootstrap, `import { createOnebotDirectRouter } from '${onebotDirectPolicy}';`, 'native OneBot direct router import');
 assertOnce(finalBootstrap, "import { MediaApi, MessageApi, messagePath } from '@tencent-connect/qqbot-nodejs/protocol';", 'QQ proactive C2C route import');
 assertOnce(finalBootstrap, '// Chat-only native OneBot command v1.', 'native OneBot command registration');
+assertOnce(finalBootstrap, '// Chat-only native OneBot direct router v1.', 'native OneBot direct router registration');
+assertOnce(finalBootstrap, 'const directRouter = createOnebotDirectRouter({', 'native OneBot direct router construction');
+assertOnce(finalBootstrap, 'service: onebotService,', 'direct router OneBot service binding');
+assertOnce(finalBootstrap, 'await directRouter.stop();', 'native OneBot direct router shutdown');
 assertOnce(finalBootstrap, "await onebotService.stop();", 'native OneBot shutdown');
-if (finalBootstrap.indexOf('// Chat-only merge batch reply adapter v1.') > finalBootstrap.indexOf('setupMiddlewares(bot, config, manager, logger, sender);')
-    || finalBootstrap.includes('const replyLimiter = new ReplyLimiter({ limit: 4 });', finalBootstrap.indexOf('setupMiddlewares(bot, config, manager, logger, sender);'))) {
+if (finalBootstrap.indexOf('// Chat-only merge batch reply adapter v1.') > finalBootstrap.indexOf('setupMiddlewares(bot, config, manager, logger, sender, directRouter);')
+    || finalBootstrap.includes('const replyLimiter = new ReplyLimiter({ limit: 4 });', finalBootstrap.indexOf('setupMiddlewares(bot, config, manager, logger, sender, directRouter);'))) {
     throw new Error('Chat-only patch: merge overflow sender is not initialized before inbound middleware');
 }
-if (finalBootstrap.indexOf('const onebotService = registerOnebotCommandTool(ctx, {')
-    < finalBootstrap.indexOf('const bot = new QQBot({')
-    || finalBootstrap.indexOf('const onebotService = registerOnebotCommandTool(ctx, {')
-    > finalBootstrap.indexOf("await onebotService.stop();")) {
-    throw new Error('Chat-only patch: native OneBot tool must bind after the SDK bot exists and stop with its lifecycle');
+const nativeServicePosition = finalBootstrap.indexOf('const onebotService = registerOnebotCommandTool(ctx, {');
+const directRouterPosition = finalBootstrap.indexOf('const directRouter = createOnebotDirectRouter({');
+const setupMiddlewaresPosition = finalBootstrap.indexOf('setupMiddlewares(bot, config, manager, logger, sender, directRouter);');
+const directRouterStopPosition = finalBootstrap.indexOf('await directRouter.stop();');
+const onebotServiceStopPosition = finalBootstrap.indexOf('await onebotService.stop();');
+if (nativeServicePosition < finalBootstrap.indexOf('const bot = new QQBot({')
+    || nativeServicePosition <= finalBootstrap.indexOf('const sender = {')
+    || directRouterPosition <= nativeServicePosition
+    || setupMiddlewaresPosition <= directRouterPosition
+    || directRouterStopPosition < 0 || onebotServiceStopPosition <= directRouterStopPosition
+    || finalBootstrap.includes('setupMiddlewares(bot, config, manager, logger, sender);')) {
+    throw new Error('Chat-only patch: native OneBot direct router must bind after its service and sender, before middleware setup, and stop before its service');
 }
 
 const finalOutbound = await finalText('transport/outbound.js');
