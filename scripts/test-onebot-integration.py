@@ -4,12 +4,15 @@ import argparse
 import concurrent.futures
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import time
+import tempfile
 import urllib.error
 import urllib.request
 import uuid
+import zipfile
 
 
 def docker(*args):
@@ -89,7 +92,7 @@ def main():
     suffix = uuid.uuid4().hex[:12]
     network, sea, bridge = ("qqbot-trpg-" + suffix + part for part in ("-net", "-sea", "-bridge"))
     control_network = "qqbot-trpg-" + suffix + "-control"
-    volumes = ["qqbot-trpg-" + suffix + part for part in ("-sea-data", "-bridge-data")]
+    volumes = ["qqbot-trpg-" + suffix + part for part in ("-sea-data", "-bridge-data", "-sea-backups")]
     token, private_token, ws_token = (uuid.uuid4().hex for _ in range(3))
     evidence = {"synthetic_only": True, "checks": [], "results": []}
     try:
@@ -103,6 +106,7 @@ def main():
         docker("run", "-d", "--name", bridge, "--network", control_network,
                "-p", "127.0.0.1::8090", "-v", volumes[1] + ":/data",
                "-e", "LLM_BRIDGE_ENABLED=true", "-e", "LLM_BRIDGE_DATA_DIR=/data",
+               "-e", 'LLM_BRIDGE_MASTER_USER_KEYS=["123456789:fixtureMaster"]',
                "-e", "LLM_BRIDGE_MCP_TOKEN=" + token, "-e", "LLM_BRIDGE_INTERNAL_TOKEN=" + private_token,
                "-e", "ONEBOT_WS_TOKEN=" + ws_token, "-e", "ONEBOT_BACKEND_ID=sealdice",
                "-e", "ONEBOT_WS_URL=ws://sealdice:18081/ws", args.bridge_image)
@@ -126,7 +130,7 @@ def main():
         # the backend online. Readiness must recover without a bridge restart.
         time.sleep(6)
         docker("run", "-d", "--name", sea, "--network", network, "--network-alias", "sealdice",
-               "-v", volumes[0] + ":/app/data", "-e", "SEALDICE_LLM_BRIDGE_ENABLED=true",
+               "-v", volumes[0] + ":/app/data", "-v", volumes[2] + ":/app/backups", "-e", "SEALDICE_LLM_BRIDGE_ENABLED=true",
                "-e", "SEALDICE_ONEBOT_BIND=0.0.0.0:18081", "-e", "ONEBOT_WS_TOKEN=" + ws_token,
                args.sealdice_image)
         client = Client(client.origin, token)
@@ -203,27 +207,14 @@ def main():
             "payload": ".r 2d1", "user_id": 11001, "group_id": 22001}})
         assert conflicting.get("isError"), "same invocation accepted different command parameters"
         evidence["checks"].append("same invocation with different parameters is rejected")
-        hidden = client.command(".rh 1d1")
-        assert hidden.get("private_count", 0) > 0 and hidden.get("private_receipt"), hidden
-        assert "1d1" not in text(hidden), "private dice content leaked in public result"
-        claim = client.http("/internal/private/claim", {"backend_id": "sealdice",
-                            "request_id": hidden["request_id"], "receipt": hidden["private_receipt"]}, private_token)
-        assert claim["outputs"] and all(item["target_id"] == 11001 for item in claim["outputs"])
-        assert "1d1" in "\n".join(item["message"] for item in claim["outputs"])
-        # Inspect actual runtime logs without persisting private bodies in the
-        # evidence. The virtual send must not leak its full dark-roll reply.
-        for name in (sea, bridge):
-            runtime_log = subprocess.check_output(["docker", "logs", name], stderr=subprocess.STDOUT, text=True)
-            assert all(item["message"] not in runtime_log for item in claim["outputs"]), "private reply entered runtime logs"
-        try:
-            client.http("/internal/private/claim", {"backend_id": "sealdice",
-                        "request_id": hidden["request_id"], "receipt": hidden["private_receipt"]}, private_token)
-        except urllib.error.HTTPError as error:
-            assert error.code in (400, 404, 409, 410), error.code
-        else:
-            raise AssertionError("private receipt was claimed twice")
-        client.http("/internal/private/ack", {"delivery_id": claim["delivery_id"], "status": "sent"}, private_token)
-        evidence["checks"].append("native rh public/private split, log privacy and claim/ack")
+        for hidden_command in [".rh 1d1", ".rah 力量", ".rxh 1d1", ".drlh"]:
+            rejected = client.rpc("tools/call", {"name": "call_ws", "arguments": {
+                "backend_id": "sealdice", "request_id": str(uuid.uuid4()), "audience": "group",
+                "payload": hidden_command, "user_id": 11001, "group_id": 22001}})
+            terminal = json.loads(rejected["content"][0]["text"])
+            assert terminal["status"] == "failed" and not terminal["outputs"], terminal
+            assert not terminal.get("private_receipt"), "blocked hidden command created an outbox receipt"
+        evidence["checks"].append("all hidden aliases rejected before native execution without private receipts")
         # Persist both game data and dedup state, but never replay an uncertain command.
         docker("restart", "-t", "30", sea)
         docker("restart", "-t", "30", bridge)
@@ -265,7 +256,8 @@ def main():
         wrapper_output = docker("run", "--rm", "--network", network, "--entrypoint", "node",
             "--mount", "type=bind,src=" + wrapper_probe + ",dst=/tmp/test-onebot-wrapper.mjs,readonly",
             "-e", "QQBOT_ONEBOT_ENABLED=true", "-e", "QQBOT_ONEBOT_HIDDEN_ENABLED=false",
-            "-e", "QQBOT_ONEBOT_BACKENDS=sealdice", "-e", "QQBOT_ONEBOT_MCP_URL=http://gensokyo-mcp:8090/mcp",
+            "-e", "QQBOT_ONEBOT_BACKENDS=sealdice",
+            "-e", 'QQBOT_ONEBOT_MASTER_USERS=["123456789:fixtureMaster"]', "-e", "QQBOT_ONEBOT_MCP_URL=http://gensokyo-mcp:8090/mcp",
             "-e", "QQBOT_ONEBOT_MCP_TOKEN=" + token, "-e", "QQBOT_ONEBOT_INTERNAL_TOKEN=" + private_token,
             args.qqbot_image, "/tmp/test-onebot-wrapper.mjs")
         wrapper_results = [json.loads(line) for line in wrapper_output.splitlines() if line.startswith('{"result":')]
@@ -274,13 +266,50 @@ def main():
         assert wrapper_result["result"] == "PASS", wrapper_result
         evidence["results"].append(wrapper_result)
         evidence["checks"].append("production qq-bot wrapper authorization to real native backend")
+        archives = docker("exec", sea, "find", "/app/backups", "-type", "f", "-name", "*.zip").splitlines()
+        assert archives, "native Master backup did not create an archive in its volume"
+        with tempfile.TemporaryDirectory(prefix="qqbot-bridge-backup-") as backup_dir:
+            archive = str(Path(backup_dir) / "backup.zip")
+            docker("cp", sea + ":" + archives[-1], archive)
+            with zipfile.ZipFile(archive) as backup:
+                assert backup.namelist(), "backup archive was empty"
+                assert backup.testzip() is None, "backup archive could not be read completely"
+        evidence["checks"].append("native Master backup archive can be fully read")
+        def private_command(owner, command):
+            result = client.rpc("tools/call", {"name": "call_ws", "arguments": {
+                "backend_id": "sealdice", "request_id": str(uuid.uuid4()), "audience": "private",
+                "payload": command, "user_key": "123456789:" + owner}})
+            assert not result.get("isError"), result
+            return json.loads(result["content"][0]["text"])
+        assert private_command("fixtureRestartBanTarget", ".r 1d1")["status"] == "ok"
+        identity = private_command("fixtureRestartBanTarget", ".userid")
+        target = re.search(r"QQ:[0-9]+", text(identity)).group(0)
+        assert private_command("fixtureMaster", ".ban add " + target)["status"] == "ok"
+        docker("restart", "-t", "30", sea)
+        time.sleep(2)
+        deadline = time.monotonic() + 90
+        while not any(item["ready"] for item in client.http("/internal/backends", token=private_token)["backends"]):
+            assert time.monotonic() < deadline, "restart did not restore Master ACL"
+            time.sleep(0.25)
+        assert private_command("fixtureMaster", ".ban query " + target)["status"] == "ok"
+        assert private_command("fixtureRestartBanTarget", ".r 1d1")["status"] == "failed", "ban was not persisted"
+        assert private_command("fixtureMaster", ".ban rm " + target)["status"] == "ok"
+        docker("restart", "-t", "30", sea)
+        time.sleep(2)
+        deadline = time.monotonic() + 90
+        while not any(item["ready"] for item in client.http("/internal/backends", token=private_token)["backends"]):
+            assert time.monotonic() < deadline, "second restart did not restore Master ACL"
+            time.sleep(0.25)
+        assert private_command("fixtureRestartBanTarget", ".r 1d1")["status"] == "ok"
+        evidence["checks"].append("ban persists and Master can query/remove a target after restart")
         profile_probe = str(Path(__file__).resolve().with_name("test-profile-boot.mjs"))
         profile_output = docker("run", "--rm", "--network", network,
             "--mount", "type=bind,src=" + profile_probe + ",dst=/tmp/test-profile-boot.mjs,readonly",
             "-e", "QQBOT_APPID=123456789", "-e", "QQBOT_SECRET=fixture-app-secret",
             "-e", "DEEPSEEK_API_KEY=fixture-official-key",
             "-e", "QQBOT_ONEBOT_ENABLED=true", "-e", "QQBOT_ONEBOT_HIDDEN_ENABLED=false",
-            "-e", "QQBOT_ONEBOT_BACKENDS=sealdice", "-e", "QQBOT_ONEBOT_MCP_URL=http://gensokyo-mcp:8090/mcp",
+            "-e", "QQBOT_ONEBOT_BACKENDS=sealdice",
+            "-e", 'QQBOT_ONEBOT_MASTER_USERS=["123456789:fixtureMaster"]', "-e", "QQBOT_ONEBOT_MCP_URL=http://gensokyo-mcp:8090/mcp",
             "-e", "QQBOT_ONEBOT_MCP_TOKEN=" + token, "-e", "QQBOT_ONEBOT_INTERNAL_TOKEN=" + private_token,
             "-e", "QQBOT_TEST_ONEBOT_EXPECT_READY=true",
             args.qqbot_image, "node", "/tmp/test-profile-boot.mjs")

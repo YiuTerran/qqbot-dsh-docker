@@ -67,7 +67,7 @@ function deferred() {
 
 test('SeaDice direct matcher accepts only safe full-line forms and keeps compact boundaries clear', () => {
     assert.deepEqual(matchOnebotDirectCommand('.r2d7/card'), { command: '.r 2d7/card' });
-    assert.deepEqual(matchOnebotDirectCommand('.rhD100'), { command: '.rh D100' });
+    assert.deepEqual(matchOnebotDirectCommand('.rhD100'), { issue: 'hidden_disabled' });
     assert.deepEqual(matchOnebotDirectCommand('.ra力量'), { command: '.ra 力量' });
     assert.deepEqual(matchOnebotDirectCommand('.rc敏捷'), { command: '.rc 敏捷' });
     assert.deepEqual(matchOnebotDirectCommand('.st意志'), { command: '.st 意志' });
@@ -711,16 +711,16 @@ test('shared service.execute preserves model behavior while binding direct autho
         appId: APP_ID,
         sender: { async sendMarkdown(_target, text) { customSent.push(text); } },
         env: { QQBOT_ONEBOT_ENABLED: 'true' },
-        policies: { sealdice: { family: 'test-custom', match(text) { return text === '.ping' ? { command: '.ping' } : undefined; } } },
+        policies: { sealdice: { family: 'test-custom', match(text) { return text === '.echo' ? { command: '.echo' } : undefined; } } },
     });
-    await customRouter.middleware(context({ content: '.ping', msgId: 'custom-ping' }), async () => assert.fail('registered custom command must be intercepted'));
+    await customRouter.middleware(context({ content: '.echo', msgId: 'custom-ping' }), async () => assert.fail('registered custom command must be intercepted'));
     assert.equal(bridgeCalls.length, 4);
-    assert.equal(bridgeCalls[3].payload, '.ping', 'a custom direct policy reaches the shared service executor');
+    assert.equal(bridgeCalls[3].payload, '.echo', 'a custom direct policy reaches the shared service executor');
     assert.equal(customSent.length, 1);
     const modelCustomResult = await descriptor.execute({
         requestId: modelMetadata.requestId,
         backend: 'sealdice',
-        command: '.ping',
+        command: '.echo',
     }, modelExec);
     assert.equal(modelCustomResult.status, 'failed', 'custom direct authorization does not widen the model tool whitelist');
     assert.equal(bridgeCalls.length, 4);

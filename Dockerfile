@@ -96,6 +96,7 @@ COPY defaults/qqbot-chat-policy.mjs /opt/qqbot-defaults/qqbot-chat-policy.mjs
 COPY defaults/qqbot-onebot.mjs /opt/qqbot-defaults/qqbot-onebot.mjs
 COPY defaults/qqbot-onebot-scope.mjs /opt/qqbot-defaults/qqbot-onebot-scope.mjs
 COPY defaults/qqbot-onebot-direct.mjs /opt/qqbot-defaults/qqbot-onebot-direct.mjs
+COPY defaults/qqbot-sealdice-policy.mjs /opt/qqbot-defaults/qqbot-sealdice-policy.mjs
 COPY defaults/qqbot-image-diagnostics.mjs /opt/qqbot-defaults/qqbot-image-diagnostics.mjs
 COPY defaults/qqbot-quote-images.mjs /opt/qqbot-defaults/qqbot-quote-images.mjs
 COPY defaults/qqbot-web-pages.mjs /opt/qqbot-defaults/qqbot-web-pages.mjs

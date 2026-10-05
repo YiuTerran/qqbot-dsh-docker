@@ -319,7 +319,7 @@ test('same original command shares a call and unsupported production rh never di
     assert.doesNotMatch(rendered[0].text, /PRIVATE_SENTINEL|private-body/u, 'rendered content contains no private body');
     const hidden = await service.descriptor.execute({ ...args, command: '.rh 1d1' }, exec);
     assert.equal(hidden.status, 'failed');
-    assert.match(hidden.notice, /no longer supports proactive private messages/u);
+    assert.match(hidden.notice, /不支持暗骰/u);
     assert.equal(service.calls, 1, 'production hidden roll must be rejected before backend dispatch');
     await endOnebotTurn(agent, scope);
     await service.service.stop();
@@ -342,7 +342,7 @@ test('same original dedupes prefix and command-name case but preserves argument 
 
         await service.descriptor.execute({ requestId, backend: 'sealdice', command: '.pc create Alice Smith' }, exec);
         assert.equal(service.calls, 2, 'different interior argument whitespace remains a distinct invocation');
-        assert.deepEqual(payloads, ['.PC create Alice   Smith', '.pc create Alice Smith']);
+        assert.deepEqual(payloads, ['.pc create Alice   Smith', '.pc create Alice Smith']);
     }
     finally {
         await endOnebotTurn(agent, scope);

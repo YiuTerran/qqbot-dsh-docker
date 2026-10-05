@@ -5,7 +5,7 @@ import {
     beginOnebotTurn,
     onebotRequestMetadata,
 } from './qqbot-onebot-scope.mjs';
-import { validateOnebotCommand } from './qqbot-onebot.mjs';
+import { inspectSeaDiceCommand } from './qqbot-sealdice-policy.mjs';
 
 const EVENT_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_EVENT_CACHE = 50_000;
@@ -48,70 +48,26 @@ const FAILURE_TEXT = Object.freeze({
     uncertain: '骰子结果未能确认，请勿重复发送同一条命令。',
     timeout: '骰子请求等待超时，结果未能确认，请勿重复发送同一条命令。',
     privacy_withheld: '私密骰子结果未能安全送达，本次已停止。',
-    hidden_disabled: '当前部署未开放群聊暗骰，本次命令未执行。',
+    hidden_disabled: '当前平台不支持暗骰私聊投递，本次命令未执行。',
     private_unavailable: '当前无法安全投递私密结果，本次操作已停止。',
     backend_rejected: '海豹骰未能完成这条命令。',
+    permission_denied: '管理命令需要配置的用户在私聊中明确发送原始命令，并完成后端权限协商；本次未执行。',
     send_failed: '骰子结果发送失败，请查看当前会话后再决定下一步。',
     no_output: '海豹骰没有返回可显示的结果。',
     result_too_large: '海豹骰返回内容过长，本次未发送完整结果。',
     cache_full: '骰子请求队列暂满，本次未执行，请稍后再试。',
 });
 
-const DIRECT_CANDIDATES = Object.freeze(['rh', 'ra', 'rc', 'st', 'en', 'pc', 'sc', 'r', 'set']);
-
 function isLineBreak(value) {
     return /[\r\n\u2028\u2029]/u.test(value);
 }
 
 function onebotCommandCandidate(line) {
-    const value = line.trim();
-    if (!value.startsWith('.')) return undefined;
-
-    for (const verb of DIRECT_CANDIDATES) {
-        if (!value.slice(1).toLowerCase().startsWith(verb)) continue;
-        const tail = value.slice(1 + verb.length);
-        const next = Array.from(tail)[0] ?? '';
-        const spaced = /^\s/u.test(tail);
-        const exact = tail.length === 0;
-
-        if (verb === 'set') {
-            if (exact || spaced) {
-                const command = `.set${tail ? ` ${tail.trim()}` : ''}`;
-                if (!validateOnebotCommand(command) || !/^\.set\s+(?:dnd|dnd5e|coc|coc7)$/iu.test(command)) {
-                    return undefined;
-                }
-                return { command };
-            }
-            return undefined;
-        }
-
-        if (spaced || exact) {
-            const command = `.${verb}${tail ? ` ${tail.trim()}` : ''}`;
-            if (!validateOnebotCommand(command)) return { issue: 'invalid_command' };
-            return { command };
-        }
-
-        if (verb === 'pc' || verb === 'sc') return undefined;
-
-        if (verb === 'r' || verb === 'rh') {
-            // The compact form only needs an unambiguous numeric/dice start.
-            // SeaDice remains responsible for interpreting the rest, including
-            // its own modifiers such as `/card`.
-            if (/^(?:\d|[dD](?:\d|$))/u.test(tail)) {
-                const command = `.${verb} ${tail}`;
-                if (validateOnebotCommand(command)) return { command };
-            }
-            return undefined;
-        }
-
-        if (/^[^\x00-\x7f]/u.test(next) && /^[\p{L}\p{N}]/u.test(next)) {
-            const command = `.${verb} ${tail}`;
-            if (validateOnebotCommand(command)) return { command };
-            return { issue: 'invalid_command' };
-        }
-        return undefined;
-    }
-    return undefined;
+    const policy = inspectSeaDiceCommand(line, { direct: true });
+    if (!policy) return undefined;
+    // Unknown/ambiguous rule selection retains the existing LLM route.
+    if (policy.kind === 'set' && !policy.allowed) return undefined;
+    return policy.allowed ? { command: policy.command } : { issue: policy.reason };
 }
 
 /** Match one complete direct command. Unknown dot commands remain normal chat. */
@@ -135,6 +91,8 @@ function snapshotMessage(ctx) {
     });
     return Object.freeze({
         text: message.content,
+        originalTextLength: message.content.length,
+        hasQuote: Boolean(ctx?.state?.quote || message.refMsgIdx || message.raw?.message_reference || message.raw?.quote),
         ownerId: message.senderId,
         replyTarget,
         currentAttachments: Array.isArray(message.attachments) ? message.attachments : [],

@@ -18,12 +18,15 @@ pending_images_native_test="${repo_root}/scripts/test-pending-images-native.mjs"
 memory_images_test="${repo_root}/scripts/test-memory-images.mjs"
 onebot_native_test="${repo_root}/scripts/test-onebot-native.mjs"
 onebot_direct_test="${repo_root}/scripts/test-onebot-direct.mjs"
+sealdice_policy_test="${repo_root}/scripts/test-sealdice-policy.mjs"
+sealdice_policy_fixture="${repo_root}/third_party/sealdice-core/dice/testdata/onebot-bridge-policy.json"
 onebot_direct_native_test="${repo_root}/scripts/test-onebot-direct-native.mjs"
 recovery_upgrade_test="${repo_root}/scripts/test-recovery-upgrade.mjs"
 pre_recovery_fixture="${repo_root}/scripts/prepare-pre-recovery-fixture.mjs"
 pre_concurrency_fixture="${repo_root}/scripts/prepare-pre-concurrency-fixture.mjs"
 previous_stock_agents_fixture="${repo_root}/scripts/fixtures/agents-v0.9.0-stock.md"
 previous_stock_agents_v0_10_fixture="${repo_root}/scripts/fixtures/agents-v0.10.0-stock.md"
+previous_stock_agents_v0_10_3_fixture="${repo_root}/scripts/fixtures/agents-v0.10.3-stock.md"
 persistent_reset_probe="${repo_root}/scripts/test-persistent-reset.mjs"
 suffix="$(date +%s)-$$"
 data_volume="dsh-qqbot-test-data-${suffix}"
@@ -392,6 +395,18 @@ docker run --rm \
     '
 
 log "Checking exact stock AGENTS.md migration and read-only preservation"
+docker run --rm --entrypoint sh \
+    --volume "${stock_agents_v0_10_data_volume}:/data" \
+    --mount "type=bind,src=${previous_stock_agents_v0_10_3_fixture},dst=/tmp/agents-stock.md,readonly" \
+    "$IMAGE" -ec 'cp /tmp/agents-stock.md /data/AGENTS.md; chmod 0644 /data/AGENTS.md'
+docker run --rm \
+    --volume "${stock_agents_v0_10_data_volume}:/data" \
+    "$IMAGE" sh -ec 'cmp /data/AGENTS.md /opt/qqbot-defaults/AGENTS.md'
+docker run --rm \
+    --volume "${readonly_stock_agents_v0_10_data_volume}:/data" \
+    --mount "type=bind,src=${previous_stock_agents_v0_10_3_fixture},dst=/data/AGENTS.md,readonly" \
+    --mount "type=bind,src=${previous_stock_agents_v0_10_3_fixture},dst=/tmp/agents-stock.md,readonly" \
+    "$IMAGE" sh -ec 'cmp /data/AGENTS.md /tmp/agents-stock.md'
 docker run --rm --network none --entrypoint sh \
     --volume "${stock_agents_data_volume}:/data" \
     --mount "type=bind,src=${previous_stock_agents_fixture},dst=/tmp/agents-v0.9.0-stock.md,readonly" \
@@ -455,6 +470,8 @@ docker create \
     --mount "type=bind,src=${memory_images_test},dst=/tmp/test-memory-images.mjs,readonly" \
     --mount "type=bind,src=${onebot_native_test},dst=/tmp/test-onebot-native.mjs,readonly" \
     --mount "type=bind,src=${onebot_direct_test},dst=/tmp/test-onebot-direct.mjs,readonly" \
+    --mount "type=bind,src=${sealdice_policy_test},dst=/tmp/test-sealdice-policy.mjs,readonly" \
+    --mount "type=bind,src=${sealdice_policy_fixture},dst=/tmp/onebot-bridge-policy.json,readonly" \
     --mount "type=bind,src=${onebot_direct_native_test},dst=/tmp/test-onebot-direct-native.mjs,readonly" \
     --mount "type=bind,src=${recovery_upgrade_test},dst=/tmp/test-recovery-upgrade.mjs,readonly" \
     --mount "type=bind,src=${pre_recovery_fixture},dst=/tmp/prepare-pre-recovery-fixture.mjs,readonly" \
@@ -548,6 +565,7 @@ docker create \
         QQBOT_GENERATION_QUOTA_MODULE=/opt/qqbot-defaults/qqbot-generation-quotas.mjs node --test /tmp/test-generation-quotas.mjs
         QQBOT_ONEBOT_MODULE_ROOT=/opt/qqbot-defaults QQBOT_ONEBOT_PATCHER_SOURCE=/usr/local/lib/enforce-chat-only.mjs QQBOT_SDK_API_CLIENT_MODULE=/data/profiles/qqbot/node_modules/@tencent-connect/qqbot-nodejs/dist/protocol/api/api-client.js node --test /tmp/test-onebot-native.mjs
         QQBOT_ONEBOT_MODULE_ROOT=/opt/qqbot-defaults node --test /tmp/test-onebot-direct.mjs
+        QQBOT_ONEBOT_MODULE_ROOT=/opt/qqbot-defaults QQBOT_SEALDICE_POLICY_FIXTURE=/tmp/onebot-bridge-policy.json node --test /tmp/test-sealdice-policy.mjs
         QQBOT_ONEBOT_DIRECT_MODULE=/opt/qqbot-defaults/qqbot-onebot-direct.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-onebot-direct-native.mjs
         QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist QQBOT_ENFORCER_SCRIPT=/usr/local/lib/enforce-chat-only.mjs node --test /tmp/test-recovery-upgrade.mjs
         node /tmp/test-profile-boot.mjs

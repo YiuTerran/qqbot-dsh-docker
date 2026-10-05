@@ -34,6 +34,10 @@ function snapshotGenerationRequest(ctx) {
         ownerId: message.senderId,
         replyTarget,
         text: typeof message.content === 'string' ? message.content.slice(0, 4000) : '',
+        originalTextLength: typeof message.content === 'string' ? message.content.length : 0,
+        hasAttachments: (Array.isArray(message.attachments) && message.attachments.length > 0)
+            || (Array.isArray(ctx?.state?.quote?.attachments) && ctx.state.quote.attachments.length > 0),
+        hasQuote: Boolean(ctx?.state?.quote || message.refMsgIdx || message.raw?.message_reference || message.raw?.quote),
         ...(directFallback ? { onebotDirectFallback: directFallback } : {}),
         currentAttachments: Object.freeze((Array.isArray(message.attachments) ? message.attachments : [])
             .map(snapshotGenerationAttachment).filter(Boolean)),

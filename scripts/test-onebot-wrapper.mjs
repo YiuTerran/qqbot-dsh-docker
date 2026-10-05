@@ -75,6 +75,64 @@ try {
     await endOnebotTurn(privateAgent, privateScope);
     summary.push({ check: 'private-user-scope' });
 
+    const freshCommand = async (ownerId, command, { group, text = command } = {}) => {
+        const agent = {};
+        const scope = beginOnebotTurn(agent, [{ ownerId, text, replyTarget: {
+            scope: group ? 'group' : 'c2c', targetId: group || ownerId,
+        } }], { appId });
+        try {
+            return await descriptor.execute({ requestId: onebotRequestMetadata(scope)[0].requestId,
+                backend: 'sealdice', command }, { agent });
+        } finally { await endOnebotTurn(agent, scope); }
+    };
+    assert.ok(controller.runtime.adminBackends.has('sealdice'), 'real Master ACL was not negotiated');
+    for (const command of ['.master list', '.master backup']) {
+        const result = await freshCommand('fixtureMaster', command);
+        assert.equal(result.status, 'ok', command);
+        assert.ok(result.outputs.length > 0);
+        if (command.endsWith('backup')) assert.ok(result.outputs.some(line => line.includes('备份成功')));
+    }
+    for (const [ownerId, command, options] of [
+        ['fixtureOwnerA', '.master list', {}], ['fixtureMaster', '.master list', { group: 'fixtureGroupA' }],
+        ['fixtureMaster', '.master backup', { text: '请解释 .master backup' }],
+        ['fixtureMaster', '.master reboot', {}], ['fixtureMaster', '.master add me', {}],
+    ]) assert.equal((await freshCommand(ownerId, command, options)).status, 'failed', command);
+    const identity = await freshCommand('fixtureBanTarget', '.userid');
+    assert.equal(identity.status, 'ok');
+    assert.ok(identity.outputs.join('\n').includes(`${appId}:fixtureBanTarget`));
+    const target = identity.outputs.join('\n').match(/QQ:[0-9]+/)?.[0];
+    assert.ok(target, 'native virtual ID was not included');
+    assert.equal((await freshCommand('fixtureMaster', `.ban add ${target}`)).status, 'ok');
+    assert.equal((await freshCommand('fixtureBanTarget', '.r 1d1')).status, 'failed', 'banned player executed a command');
+    assert.equal((await freshCommand('fixtureMaster', `.ban query ${target}`)).status, 'ok');
+    assert.equal((await freshCommand('fixtureMaster', `.ban rm ${target}`)).status, 'ok');
+    assert.equal((await freshCommand('fixtureBanTarget', '.r 1d1')).status, 'ok');
+    assert.equal((await freshCommand('fixtureMaster', `.ban trust ${target}`)).status, 'ok');
+    assert.equal((await freshCommand('fixtureBanTarget', '.master list')).status, 'failed', 'trust granted Master');
+    for (const target of ['UI:1001', 'QQ:17', 'QQ:8999999999999000', 'Discord:8999999999999999']) {
+        assert.equal((await freshCommand('fixtureMaster', `.ban add ${target}`)).status, 'failed', target);
+    }
+    summary.push({ check: 'real-master-private-exact-source-backup-ban-trust-and-known-target-boundary' });
+
+    for (const command of ['.set coc7', '.coc 2', '.ti', '.li', '.ww 3a10', '.dx 3c10', '.ek 潜行', '.rsr 3',
+        '.jrrp', '.gugu', '.ping', '.set info', '.setcoc', '.setcoc details']) {
+        const result = await freshCommand('fixtureQueryOwner', command, { group: 'fixtureQueryGroup' });
+        assert.equal(result.status, 'ok', command);
+        assert.ok(result.outputs.length > 0, command);
+    }
+    await freshCommand('fixtureQueryOwner', '.set dnd', { group: 'fixtureQueryGroup' });
+    for (const command of ['.dnd 2', '.dndx 2', '.ss', '.buff', '.ds stat', '.init', '.init list']) {
+        assert.equal((await freshCommand('fixtureQueryOwner', command, { group: 'fixtureQueryGroup' })).status, 'ok', command);
+    }
+    const beforeQuery = await freshCommand('fixtureQueryOwner', '.set info', { group: 'fixtureQueryGroup' });
+    assert.equal((await freshCommand('fixtureQueryOwner', '.setcoc', { group: 'fixtureQueryGroup' })).status, 'ok');
+    const afterQuery = await freshCommand('fixtureQueryOwner', '.set info', { group: 'fixtureQueryGroup' });
+    assert.deepEqual(afterQuery.outputs, beforeQuery.outputs, 'CoC query silently changed the active rule');
+    for (const command of ['.coc 11', '.r 11#1d1', '.ww set clr', '.ss init 1', '.buff hp:30', '.init end', '.rxh 1d1']) {
+        assert.equal((await freshCommand('fixtureQueryOwner', command, { group: 'fixtureQueryGroup' })).status, 'failed', command);
+    }
+    summary.push({ check: 'real-expanded-native-commands-query-rule-stability-and-per-call-limits' });
+
     // Invoke the production router against the actual MCP/SeaDice containers.
     // The downstream callback is the model path: native commands must skip it.
     const sent = [];

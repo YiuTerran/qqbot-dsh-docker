@@ -191,6 +191,9 @@ test('merge guard snapshots every original sender, target, current attachment, a
     const requests = merged[0].requests;
     assert.equal(requests.length, 2);
     assert.deepEqual(requests.map((request) => request.ownerId), ['user-b', 'user-c']);
+    assert.deepEqual(requests.map((request) => request.hasAttachments), [true, true]);
+    assert.deepEqual(requests.map((request) => request.hasQuote), [true, true]);
+    assert.deepEqual(requests.map((request) => request.originalTextLength), [1, 1]);
     assert.deepEqual(requests.map((request) => request.replyTarget.msgId), ['generation-b', 'generation-c']);
     assert.deepEqual(requests.map((request) => request.currentAttachments.map((attachment) => attachment.url)), [
         [currentB.url], [currentC.url],

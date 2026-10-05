@@ -9,7 +9,7 @@ const KEY_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
 const DIRECT_FALLBACK_REASONS = new Set([
     'config_invalid', 'backend_conflict', 'backend_not_ready', 'service_unavailable',
     'backend_rejected', 'queue_full', 'expired', 'uncertain', 'timeout',
-    'privacy_withheld', 'hidden_disabled', 'private_unavailable',
+    'privacy_withheld', 'hidden_disabled', 'private_unavailable', 'permission_denied',
 ]);
 
 function validWeakKey(value) {
@@ -108,6 +108,11 @@ function snapshotRequest(source, appId) {
             ...(typeof target.msgId === 'string' && target.msgId ? { msgId: target.msgId } : {}),
         }),
         text: text.slice(0, 4000),
+        originalTextLength: Math.max(text.length, Number.isSafeInteger(source.originalTextLength) ? source.originalTextLength : 0),
+        hasAttachments: source.hasAttachments === true
+            || (Array.isArray(source.currentAttachments) && source.currentAttachments.length > 0)
+            || (Array.isArray(source.quotedAttachments) && source.quotedAttachments.length > 0),
+        hasQuote: source.hasQuote === true,
         ...(directFallback ? { onebotDirectFallback: directFallback } : {}),
     });
 }

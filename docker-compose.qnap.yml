@@ -47,6 +47,8 @@ services:
       QQBOT_ONEBOT_MCP_TOKEN: ${QQBOT_ONEBOT_MCP_TOKEN:-}
       QQBOT_ONEBOT_INTERNAL_TOKEN: ${QQBOT_ONEBOT_INTERNAL_TOKEN:-}
       QQBOT_ONEBOT_BACKENDS: ${QQBOT_ONEBOT_BACKENDS:-sealdice}
+      # JSON array of appId:SDK-openid identities from private .userid results.
+      QQBOT_ONEBOT_MASTER_USERS: ${QQBOT_ONEBOT_MASTER_USERS:-[]}
       QQBOT_ONEBOT_HIDDEN_ENABLED: ${QQBOT_ONEBOT_HIDDEN_ENABLED:-false}
       # A diagnostic only; it does not contain or print credentials.
       QQBOT_STARTUP_WARN_MS: ${QQBOT_STARTUP_WARN_MS:-20000}
@@ -61,7 +63,7 @@ services:
 
   gensokyo-mcp:
     profiles: [trpg]
-    image: "tryao/gensokyo-mcp:${GENSOKYO_IMAGE_TAG:-v0.1.0}"
+    image: "tryao/gensokyo-mcp:${GENSOKYO_IMAGE_TAG:-v0.2.0}"
     restart: unless-stopped
     environment:
       TZ: Asia/Shanghai
@@ -69,6 +71,7 @@ services:
       LLM_BRIDGE_DATA_DIR: /data
       LLM_BRIDGE_MCP_TOKEN: ${QQBOT_ONEBOT_MCP_TOKEN:-}
       LLM_BRIDGE_INTERNAL_TOKEN: ${QQBOT_ONEBOT_INTERNAL_TOKEN:-}
+      LLM_BRIDGE_MASTER_USER_KEYS: ${QQBOT_ONEBOT_MASTER_USERS:-[]}
       ONEBOT_WS_TOKEN: ${ONEBOT_WS_TOKEN:-}
       ONEBOT_WS_URL: ws://sealdice:18081/ws
       ONEBOT_BACKEND_ID: sealdice
@@ -82,7 +85,7 @@ services:
 
   sealdice:
     profiles: [trpg]
-    image: "tryao/sealdice-core:${SEALDICE_IMAGE_TAG:-v1.6.2-bridge.3}"
+    image: "tryao/sealdice-core:${SEALDICE_IMAGE_TAG:-v1.6.2-bridge.4}"
     restart: unless-stopped
     environment:
       TZ: Asia/Shanghai
@@ -91,6 +94,7 @@ services:
       ONEBOT_WS_TOKEN: ${ONEBOT_WS_TOKEN:-}
     volumes:
       - sealdice-data:/app/data
+      - sealdice-backups:/app/backups
     networks:
       - trpg-backend
 
@@ -103,6 +107,8 @@ volumes:
     name: dsh-qqbot-gensokyo-data
   sealdice-data:
     name: dsh-qqbot-sealdice-data
+  sealdice-backups:
+    name: dsh-qqbot-sealdice-backups
 
 networks:
   trpg-control:
