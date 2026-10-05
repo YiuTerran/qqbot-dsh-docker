@@ -34,6 +34,8 @@ const notices = Object.freeze({
     sent: '主人，图片已经生成并发到对应消息啦。',
     markdown: '主人，Markdown 文件已经发到对应消息啦。',
     fallback: '主人，附件没能发送；我把可复制的原文发在下面了。',
+    text: '主人，附件没能发送；我已改为发送可复制的正文。',
+    unknown: '主人，投递结果未知；为避免重复，本鱼没有再次发送。',
     quota: '主人，这项功能的小时额度用完啦，过一会儿再试吧。',
     busy: '主人，本鱼这会儿正忙着处理同类任务，稍后再试吧。',
     state: '主人，这项功能的本地额度记录暂时不可用，稍后再试吧。',
@@ -580,6 +582,16 @@ function result(status, notice = notices[status] ?? notices.failed) {
     return { status, notice };
 }
 
+function markdownReceipt(status, notice, filename, bytes, delivery = 'none', truncated = false) {
+    return {
+        ...result(status, notice),
+        filename: filename ?? '',
+        utf8Bytes: bytes?.length ?? 0,
+        delivery,
+        truncated,
+    };
+}
+
 function executionFailure(exec, args, kind, route) {
     if (!validCallId(exec?.callId)) return 'A valid generation tool-call id is required.';
     const scope = getBoundGenerationTurn(exec);
@@ -622,7 +634,7 @@ function getCallRecord(scope, type, callId, fingerprintValue) {
     return record;
 }
 
-function publishCallResult(recordValue, promise) {
+function publishCallResult(recordValue, promise, failedValue = result('failed')) {
     recordValue.promise = Promise.resolve(promise).then(
         (value) => {
             recordValue.pending = false;
@@ -631,7 +643,7 @@ function publishCallResult(recordValue, promise) {
         },
         () => {
             recordValue.pending = false;
-            recordValue.value = result('failed');
+            recordValue.value = failedValue;
             return recordValue.value;
         },
     );
@@ -770,6 +782,12 @@ async function performImageTask({ scope, request, args, exec, service, quota, se
             sent = { sent: false, reason: 'failed' };
         }
         if (sent?.sent) return result('sent');
+        // The message may already be visible in QQ; do not follow an unknown
+        // acknowledgement with a contradictory failure notice or another send.
+        if (sent?.reason === 'unknown') {
+            logToolFailure(GENERATE_IMAGE_TOOL, 'send-image', new Error('send-unknown'));
+            return result('unknown');
+        }
         if (!sendThrew) logToolFailure(GENERATE_IMAGE_TOOL, 'send-image', new Error(`send-${sent?.reason === 'limit' ? 'limit' : sent?.reason === 'expired' ? 'expired' : 'failed'}`));
         const status = sent?.reason === 'limit' ? 'quota' : sent?.reason === 'expired' ? 'expired' : 'failed';
         const notice = notices[status];
@@ -786,8 +804,8 @@ async function performMarkdownTask({ scope, request, args, exec, quota, sender }
     const content = args.content;
     const filename = validMarkdownFilename(args.filename);
     const bytes = markdownBuffer(content);
-    if (!filename || !bytes) return result('invalid');
-    if (generationScopeFailure(scope, 'markdown')) return result('expired');
+    if (!filename || !bytes) return markdownReceipt('invalid', notices.invalid, filename, bytes);
+    if (generationScopeFailure(scope, 'markdown')) return markdownReceipt('expired', notices.expired, filename, bytes);
     let acquired;
     try {
         acquired = await quota.tryAcquire({ ownerId: request.ownerId, type: 'markdown' });
@@ -800,7 +818,7 @@ async function performMarkdownTask({ scope, request, args, exec, quota, sender }
         const status = acquired?.reason === 'busy' ? 'busy' : 'state';
         const notice = notices[status];
         await sendOperationalNotice(sender, scope, request, notice, 'markdown', noticeSignal);
-        return result(status, notice);
+        return markdownReceipt(status, notice, filename, bytes);
     }
     try {
         let reserved;
@@ -815,9 +833,9 @@ async function performMarkdownTask({ scope, request, args, exec, quota, sender }
             const status = reserved?.reason === 'quota' ? 'quota' : 'state';
             const notice = notices[status];
             await sendOperationalNotice(sender, scope, request, notice, 'markdown', noticeSignal);
-            return result(status, notice);
+            return markdownReceipt(status, notice, filename, bytes);
         }
-        if (generationScopeFailure(scope, 'markdown')) return result('expired');
+        if (generationScopeFailure(scope, 'markdown')) return markdownReceipt('expired', notices.expired, filename, bytes);
         const signal = getGenerationRequestSignal(scope, exec.signal, 'markdown');
         const sendRequest = makeTrustedSenderRequest(scope, request, 'markdown');
         let fileResult;
@@ -828,10 +846,16 @@ async function performMarkdownTask({ scope, request, args, exec, quota, sender }
         catch (error) {
             fileSendThrew = true;
             logToolFailure(CREATE_MARKDOWN_TOOL, 'send-markdown', error);
-            fileResult = { sent: false, reason: 'failed' };
+            fileResult = { sent: false, reason: 'unknown' };
         }
-        if (fileResult?.sent) return result('markdown', notices.markdown);
+        if (fileResult?.sent) return markdownReceipt('markdown', notices.markdown, filename, bytes, 'attachment');
         if (!fileSendThrew) logToolFailure(CREATE_MARKDOWN_TOOL, 'send-markdown', new Error(`send-${fileResult?.reason === 'limit' ? 'limit' : fileResult?.reason === 'expired' ? 'expired' : 'failed'}`));
+        if (fileResult?.reason === 'unknown') {
+            return markdownReceipt('unknown', notices.unknown, filename, bytes, 'unknown');
+        }
+        if (fileResult?.reason === 'expired' || generationScopeFailure(scope, 'markdown')) {
+            return markdownReceipt('expired', notices.expired, filename, bytes);
+        }
         let fallbackResult;
         let fallbackSendThrew = false;
         try {
@@ -840,15 +864,18 @@ async function performMarkdownTask({ scope, request, args, exec, quota, sender }
         catch (error) {
             fallbackSendThrew = true;
             logToolFailure(CREATE_MARKDOWN_TOOL, 'send-markdown', error);
-            fallbackResult = { sent: false, reason: 'failed' };
+            fallbackResult = { sent: false, reason: 'unknown' };
         }
-        if (fallbackResult?.sent) return result('fallback');
+        if (fallbackResult?.sent) return markdownReceipt('fallback', notices.text, filename, bytes, 'text', fallbackResult.truncated === true);
+        if (fallbackResult?.reason === 'unknown') {
+            return markdownReceipt('unknown', notices.unknown, filename, bytes, 'unknown');
+        }
         if (!fallbackSendThrew) logToolFailure(CREATE_MARKDOWN_TOOL, 'send-markdown', new Error(`fallback-${fallbackResult?.reason === 'limit' ? 'limit' : fallbackResult?.reason === 'expired' ? 'expired' : 'failed'}`));
         const status = fallbackResult?.reason === 'limit' || fileResult?.reason === 'limit' ? 'quota'
             : fallbackResult?.reason === 'expired' ? 'expired' : 'failed';
         const notice = notices[status];
         await sendOperationalNotice(sender, scope, request, notice, 'markdown', noticeSignal);
-        return result(status, notice);
+        return markdownReceipt(status, notice, filename, bytes);
     }
     finally {
         acquired.release?.();
@@ -860,8 +887,9 @@ function executeGeneration(args, exec, kind, context) {
     if (failure) throw new Error(failure);
     const scope = getBoundGenerationTurn(exec);
     const request = getGenerationRequest(scope, args.requestId, kind);
+    const markdownFailure = (status) => markdownReceipt(status, notices[status], validMarkdownFilename(args.filename), markdownBuffer(args.content));
     if (!scope.callRecords?.has(exec.callId) && (scope.callRecords?.size ?? 0) >= MAX_GENERATION_REQUESTS * 2) {
-        return Promise.resolve(result('busy', notices.busy));
+        return Promise.resolve(kind === 'markdown' ? markdownFailure('busy') : result('busy', notices.busy));
     }
     const argsFingerprint = fingerprint(kind, args);
     const cached = getCallRecord(scope, kind, exec.callId, argsFingerprint);
@@ -871,7 +899,8 @@ function executeGeneration(args, exec, kind, context) {
     const alreadyUsed = kind === 'image' ? request.imageCalls.size > 0 : request.markdownCalls.size > 0;
     if (alreadyUsed) {
         cached.pending = false;
-        cached.value = result('busy', notices.busy);
+        cached.value = kind === 'markdown' ? markdownFailure('busy') : result('busy', notices.busy);
+        if (kind === 'markdown') return publishCallResult(cached, Promise.resolve(cached.value), cached.value);
         const busyNotice = sendOperationalNotice(context.sender, scope, request, cached.value.notice, kind, exec.signal)
             .then(() => cached.value);
         return publishCallResult(cached, trackGenerationOperation(scope, busyNotice));
@@ -901,7 +930,7 @@ function executeGeneration(args, exec, kind, context) {
         }
     })();
     const tracked = trackGenerationOperation(scope, operation);
-    return publishCallResult(cached, tracked);
+    return publishCallResult(cached, tracked, kind === 'markdown' ? markdownFailure('failed') : result('failed'));
 }
 
 function imageToolSchema() {
@@ -935,7 +964,7 @@ function markdownToolSchema() {
     };
 }
 
-function registerStatusTool(ctx, definition) {
+function registerStatusTool(ctx, definition, markdownReceiptOutput = false) {
     const tools = ctx.get('tools');
     if (typeof tools?.register !== 'function') throw new Error('Generation tools require the pinned dsh tools.register API.');
     tools.register({
@@ -946,14 +975,24 @@ function registerStatusTool(ctx, definition) {
                 properties: {
                     status: { type: 'string' },
                     notice: { type: 'string' },
+                    ...(markdownReceiptOutput ? {
+                        filename: { type: 'string' },
+                        utf8Bytes: { type: 'integer' },
+                        delivery: { type: 'string', enum: ['attachment', 'text', 'unknown', 'none'] },
+                        truncated: { type: 'boolean' },
+                    } : {}),
                 },
-                required: ['status', 'notice'],
+                required: markdownReceiptOutput
+                    ? ['status', 'notice', 'filename', 'utf8Bytes', 'delivery', 'truncated']
+                    : ['status', 'notice'],
                 additionalProperties: false,
             },
-            // The QQ sender is the user-visible result. Returning no rendered
-            // tool text prevents the native runtime from emitting a duplicate
-            // generic reply after an attachment has already been delivered.
-            render: () => [],
+            // Image delivery keeps its existing empty model projection. Markdown
+            // needs its receipt in the model tool result so the assistant can
+            // describe the actual delivery without a second sender-side notice.
+            render: markdownReceiptOutput
+                ? (_args, value) => [{ type: 'text', text: JSON.stringify(value) }]
+                : () => [],
         },
     });
 }
@@ -999,13 +1038,13 @@ export function registerGenerationTools(ctx, options = {}) {
     if (markdownEnabled) {
         registerStatusTool(ctx, {
             name: CREATE_MARKDOWN_TOOL,
-            description: 'Create and send one UTF-8 Markdown attachment to the original QQ message that explicitly requested a Markdown file. Pass its opaque requestId, a safe filename, and the complete Markdown text. This tool does not read links, render HTML, run code, or access files.',
+            description: 'Create and send one UTF-8 Markdown attachment to the original QQ message that explicitly requested a Markdown file. Pass its opaque requestId, a safe filename, and the complete Markdown text. Use this tool receipt to determine whether the attachment or fallback text was delivered; do not inspect paths or repeat an operation reported successful or unknown. This tool does not read links, render HTML, run code, or access files.',
             parameters: markdownToolSchema(),
             async execute(args, exec) {
                 return executeGeneration(args, exec, 'markdown', context);
             },
             timeoutMs: TOOL_TIMEOUT_MS,
-        });
+        }, true);
     }
     return Object.freeze({ imageEnabled: Boolean(route), markdownEnabled, context });
 }

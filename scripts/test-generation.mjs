@@ -108,6 +108,11 @@ function nativeCall(ctx, name, args, agent, callId, signal = new AbortController
     return ctx.tools.execute({ name, arguments: args, agent, callId, signal });
 }
 
+function assertRenderedMarkdownReceipt(output) {
+    assert.deepEqual(output.content, [{ type: 'text', text: JSON.stringify(output.value) }],
+        'the structured delivery receipt is returned to the model as tool content');
+}
+
 function makeSdkHarness({
     tokenManager = { async getAccessToken() { return 'fixture-access-token'; } },
     fetchImpl,
@@ -741,6 +746,24 @@ test('QQ sender drains a blocked upload response after cancellation and skips th
     assert.equal(harness.requests.length, 1, 'an upload finishing after cancellation never triggers a messages POST');
 });
 
+test('QQ Markdown sender stops after a cancelled upload and skips the attachment POST', async () => {
+    const uploadStarted = deferred();
+    const finishUpload = deferred();
+    const harness = makeSdkHarness({ afterUpload: async () => {
+        uploadStarted.resolve();
+        await finishUpload.promise;
+    } });
+    const controller = new AbortController();
+    const pending = harness.sender.sendMarkdownFile(
+        harness.request, Buffer.from('# report', 'utf8'), 'report.md', controller.signal,
+    );
+    await uploadStarted.promise;
+    controller.abort(new Error('fixture Markdown cancellation'));
+    finishUpload.resolve();
+    assert.deepEqual(await pending, { sent: false, reason: 'expired' });
+    assert.equal(harness.requests.length, 1, 'cancelled upload cannot trigger an attachment POST');
+});
+
 test('QQ sender turns transport and malformed-ACK failures into one bounded failure without retry', async () => {
     let attempts = 0;
     const failing = makeSdkHarness({ fetchImpl: async () => {
@@ -759,15 +782,29 @@ test('QQ sender turns transport and malformed-ACK failures into one bounded fail
             : { status: 'ok' }), { status: 200 });
     } });
     assert.deepEqual(await malformedAck.sender.sendImage(malformedAck.request, png, new AbortController().signal), {
-        sent: false, reason: 'failed',
+        sent: false, reason: 'unknown',
     });
     assert.equal(malformedAck.requests.length, 2, 'HTTP 200 without a valid QQ message id is not treated as delivered');
+});
+
+test('QQ Markdown sender reports uncertain message POSTs without retrying or using text fallback', async () => {
+    const uncertain = makeSdkHarness({ fetchImpl: async (url) => {
+        if (new URL(String(url)).pathname.endsWith('/files')) {
+            return new Response(JSON.stringify({ file_info: 'fixture-file-info' }), { status: 200 });
+        }
+        throw new Error('connection lost after request write');
+    } });
+    const fileResult = await uncertain.sender.sendMarkdownFile(
+        uncertain.request, Buffer.from('# report', 'utf8'), 'report.md', new AbortController().signal,
+    );
+    assert.deepEqual(fileResult, { sent: false, reason: 'unknown' });
+    assert.equal(uncertain.requests.length, 2, 'the uploaded file has one message POST and no automatic text retry');
 });
 
 test('QQ Markdown fallback neutralizes QQ mention tags and is code-point bounded with one truncation marker', async () => {
     const harness = makeSdkHarness();
     const source = '<qqbot-at-user id="42"/> @everyone\n' + '鱼'.repeat(2600);
-    assert.deepEqual(await harness.sender.sendMarkdownFallback(harness.request, source, new AbortController().signal), { sent: true });
+    assert.deepEqual(await harness.sender.sendMarkdownFallback(harness.request, source, new AbortController().signal), { sent: true, truncated: true });
     assert.equal(harness.requests.length, 1);
     const payload = JSON.parse(harness.requests[0].body);
     assert.ok(Array.from(payload.content).length <= 2000);
@@ -1246,6 +1283,11 @@ test('native Markdown remains available in document mode, validates UTF-8, and f
         { requestId: secondId, filename: '../../ 周报 2026.md', content }, agent, 'doc-mode-markdown-call');
     assert.equal(markdownResult.isError, false, JSON.stringify(markdownResult));
     assert.equal(markdownResult.value.status, 'fallback');
+    assert.deepEqual(markdownResult.value, {
+        status: 'fallback', notice: '主人，附件没能发送；我已改为发送可复制的正文。',
+        filename: '周报 2026.md', utf8Bytes: Buffer.byteLength(content, 'utf8'), delivery: 'text', truncated: false,
+    });
+    assertRenderedMarkdownReceipt(markdownResult);
     assert.equal(files.length, 1);
     assert.equal(files[0].filename, '周报 2026.md', 'path components are discarded before SDK upload');
     assert.deepEqual(files[0].bytes, Buffer.from(content, 'utf8'));
@@ -1269,6 +1311,155 @@ test('native Markdown remains available in document mode, validates UTF-8, and f
         { requestId: firstId, filename: 'valid.md', content: 'ok', path: '/tmp/nope' }, agent, 'markdown-extra-call');
     assert.equal(extraArgument.isError, true, 'extra tool arguments are denied');
     assert.equal(files.length, 1);
+    await endGenerationTurn(agent, scope);
+    endDocumentTurn(agent, documentScope);
+});
+
+test('native Markdown receipt marks final QQ attachment ACK success and prevents duplicate execution', async (t) => {
+    const sends = [];
+    const notices = [];
+    const sender = {
+        async sendNotice(request, text) { notices.push(text); return { sent: true }; },
+        async sendImage() { return { sent: true }; },
+        async sendMarkdownFile(request, bytes, filename) {
+            sends.push({ request, bytes, filename });
+            return { sent: true };
+        },
+        async sendMarkdownFallback() { assert.fail('fallback must not run after confirmed attachment delivery'); },
+    };
+    const { ctx } = await nativeGenerationRuntime(t, {
+        route: route(), sender, quota: makeQuota(), imageService: { async generate() { return png; } }, markdownEnabled: true,
+    });
+    const agent = {};
+    beginDocumentTurn(agent, { content: '' });
+    const documentScope = getDocumentTurn(agent);
+    const request = makeGenerationRequest('owner-md-ack', 'group-md-ack', 'message-md-ack');
+    const scope = beginGenerationTurn(agent, [request], [], { documentScope });
+    const [requestId] = [...scope.requests.keys()];
+    const args = { requestId, filename: 'report.md', content: '# confirmed ✓' };
+    const first = await nativeCall(ctx, CREATE_MARKDOWN_TOOL, args, agent, 'markdown-ack-call');
+    const repeated = await nativeCall(ctx, CREATE_MARKDOWN_TOOL, args, agent, 'markdown-ack-call');
+    const secondCallId = await nativeCall(ctx, CREATE_MARKDOWN_TOOL, args, agent, 'markdown-ack-call-2');
+    assert.equal(first.isError, false);
+    assert.deepEqual(first.value, {
+        status: 'markdown', notice: '主人，Markdown 文件已经发到对应消息啦。',
+        filename: 'report.md', utf8Bytes: Buffer.byteLength(args.content, 'utf8'), delivery: 'attachment', truncated: false,
+    });
+    assert.deepEqual(repeated.value, first.value);
+    assert.deepEqual(secondCallId.value, {
+        status: 'busy', notice: '主人，本鱼这会儿正忙着处理同类任务，稍后再试吧。',
+        filename: 'report.md', utf8Bytes: Buffer.byteLength(args.content, 'utf8'), delivery: 'none', truncated: false,
+    });
+    assertRenderedMarkdownReceipt(first);
+    assertRenderedMarkdownReceipt(secondCallId);
+    assert.equal(sends.length, 1, 'same and different call ids cannot trigger a second Markdown delivery');
+    assert.deepEqual(notices, [], 'a different call id for the same Markdown request does not send a second QQ busy notice');
+    await endGenerationTurn(agent, scope);
+    endDocumentTurn(agent, documentScope);
+});
+
+test('native Markdown tool returns unknown without a text replay after uncertain final attachment POST', async (t) => {
+    const harness = makeSdkHarness({ fetchImpl: async (url) => {
+        if (new URL(String(url)).pathname.endsWith('/files')) {
+            return new Response(JSON.stringify({ file_info: 'fixture-file-info' }), { status: 200 });
+        }
+        throw new Error('fixture connection lost');
+    } });
+    const notices = [];
+    const sender = {
+        ...harness.sender,
+        async sendNotice(request, text) { notices.push(text); return { sent: true }; },
+    };
+    const { ctx } = await nativeGenerationRuntime(t, {
+        route: route(), sender, quota: makeQuota(), imageService: { async generate() { return png; } }, markdownEnabled: true,
+    });
+    const agent = {};
+    beginDocumentTurn(agent, { content: '' });
+    const documentScope = getDocumentTurn(agent);
+    const request = makeGenerationRequest('owner-md-unknown', 'group-md-unknown', 'message-md-unknown');
+    const scope = beginGenerationTurn(agent, [request], [], { documentScope, enqueueSend: harness.enqueueSend });
+    const [requestId] = [...scope.requests.keys()];
+    const output = await nativeCall(ctx, CREATE_MARKDOWN_TOOL,
+        { requestId, filename: 'uncertain.md', content: 'body' }, agent, 'markdown-unknown-call');
+    assert.equal(output.isError, false, JSON.stringify(output));
+    assert.deepEqual(output.value, {
+        status: 'unknown', notice: '主人，投递结果未知；为避免重复，本鱼没有再次发送。',
+        filename: 'uncertain.md', utf8Bytes: 4, delivery: 'unknown', truncated: false,
+    });
+    assert.equal(harness.requests.length, 2, 'only upload and one final message POST occurred');
+    assert.equal(notices.length, 0, 'no second status message follows an uncertain delivery');
+    assertRenderedMarkdownReceipt(output);
+    await endGenerationTurn(agent, scope);
+    endDocumentTurn(agent, documentScope);
+});
+
+test('native Markdown fallback follows a definite attachment rejection and reports truncation', async (t) => {
+    let messageAttempts = 0;
+    const harness = makeSdkHarness({ fetchImpl: async (url) => {
+        const path = new URL(String(url)).pathname;
+        if (path.endsWith('/files')) {
+            return new Response(JSON.stringify({ file_info: 'fixture-file-info' }), { status: 200 });
+        }
+        messageAttempts += 1;
+        if (messageAttempts === 1) return new Response(JSON.stringify({ code: 400, message: 'fixture rejected' }), { status: 200 });
+        return new Response(JSON.stringify({ id: 'fixture-fallback-ack' }), { status: 200 });
+    } });
+    const sender = {
+        ...harness.sender,
+        async sendNotice() { assert.fail('successful fallback suppresses an additional notice'); },
+    };
+    const { ctx } = await nativeGenerationRuntime(t, {
+        route: route(), sender, quota: makeQuota(), imageService: { async generate() { return png; } }, markdownEnabled: true,
+    });
+    const agent = {};
+    beginDocumentTurn(agent, { content: '' });
+    const documentScope = getDocumentTurn(agent);
+    const request = makeGenerationRequest('owner-md-fallback', 'group-md-fallback', 'message-md-fallback');
+    const scope = beginGenerationTurn(agent, [request], [], { documentScope, enqueueSend: harness.enqueueSend });
+    const [requestId] = [...scope.requests.keys()];
+    const content = '# report\n' + '鱼'.repeat(2500);
+    const output = await nativeCall(ctx, CREATE_MARKDOWN_TOOL,
+        { requestId, filename: 'report.md', content }, agent, 'markdown-fallback-truncate-call');
+    assert.equal(output.isError, false, JSON.stringify(output));
+    assert.deepEqual(output.value, {
+        status: 'fallback', notice: '主人，附件没能发送；我已改为发送可复制的正文。',
+        filename: 'report.md', utf8Bytes: Buffer.byteLength(content, 'utf8'), delivery: 'text', truncated: true,
+    });
+    assert.equal(harness.requests.length, 3, 'definite rejection permits exactly one bounded text fallback');
+    const fallback = JSON.parse(harness.requests[2].body);
+    assert.match(fallback.content, /\[正文已截断\]/u);
+    assertRenderedMarkdownReceipt(output);
+    await endGenerationTurn(agent, scope);
+    endDocumentTurn(agent, documentScope);
+});
+
+test('native image unknown acknowledgement does not trigger a contradictory failure notice', async (t) => {
+    const notices = [];
+    const sent = [];
+    const sender = {
+        async sendNotice(request, text) { notices.push(text); return { sent: true }; },
+        async sendImage(request, bytes) { sent.push(bytes); return { sent: false, reason: 'unknown' }; },
+        async sendMarkdownFile() { return { sent: false, reason: 'failed' }; },
+        async sendMarkdownFallback() { return { sent: false, reason: 'failed' }; },
+    };
+    const { ctx } = await nativeGenerationRuntime(t, {
+        route: route(), sender, quota: makeQuota(), imageService: { async generate() { return png; } }, markdownEnabled: true,
+    });
+    const agent = {};
+    beginDocumentTurn(agent, { content: '' });
+    const documentScope = getDocumentTurn(agent);
+    const request = makeGenerationRequest('owner-image-unknown', 'group-image-unknown', 'message-image-unknown');
+    const scope = beginGenerationTurn(agent, [request], [], { documentScope });
+    const [requestId] = [...scope.requests.keys()];
+    const output = await nativeCall(ctx, GENERATE_IMAGE_TOOL,
+        { requestId, prompt: 'Draw one whale.' }, agent, 'image-unknown-call');
+    assert.equal(output.isError, false, JSON.stringify(output));
+    assert.deepEqual(output.value, {
+        status: 'unknown', notice: '主人，投递结果未知；为避免重复，本鱼没有再次发送。',
+    });
+    assert.equal(sent.length, 1);
+    assert.deepEqual(notices, [], 'unknown delivery does not send a contradictory QQ failure notice');
+    assert.equal(output.content?.length ?? 0, 0, 'image tool keeps its established empty model projection');
     await endGenerationTurn(agent, scope);
     endDocumentTurn(agent, documentScope);
 });

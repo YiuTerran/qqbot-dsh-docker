@@ -193,10 +193,10 @@ function boundedFallbackContent(content) {
     const body = suppliedPrefix ? inert.slice(FALLBACK_PREFIX.length) : inert;
     const codePoints = Array.from(body);
     const available = MAX_MESSAGE_CHARS - Array.from(prefix).length;
-    if (codePoints.length <= available) return prefix + body;
+    if (codePoints.length <= available) return { text: prefix + body, truncated: false };
     const marker = FALLBACK_TRUNCATION;
     const contentBudget = Math.max(0, available - Array.from(marker).length);
-    return prefix + codePoints.slice(0, contentBudget).join('') + marker;
+    return { text: prefix + codePoints.slice(0, contentBudget).join('') + marker, truncated: true };
 }
 
 function boundedNotice(text) {
@@ -285,28 +285,48 @@ export function createGenerationSender({
                 let response;
                 let completed = false;
                 try {
-                    response = await fetchImpl(`${QQ_API_BASE}${path}`, {
-                        method: 'POST',
-                        headers: {
-                            Authorization: `QQBot ${accessToken}`,
-                            Accept: 'application/json',
-                            'Content-Type': 'application/json',
-                            'User-Agent': 'qqbot-dsh (bounded generation)',
-                        },
-                        body: serialized,
-                        signal: requestSignal,
-                        redirect: 'error',
-                    });
-                    if (!isActive(request, target, kind, signal)) throw senderError('expired');
-                    const parsed = await readResponse(response, MAX_QQ_RESPONSE_BYTES, requestSignal);
-                    if (!validApiAcknowledgement(path, parsed)) throw senderError();
+                    try {
+                        response = await fetchImpl(`${QQ_API_BASE}${path}`, {
+                            method: 'POST',
+                            headers: {
+                                Authorization: `QQBot ${accessToken}`,
+                                Accept: 'application/json',
+                                'Content-Type': 'application/json',
+                                'User-Agent': 'qqbot-dsh (bounded generation)',
+                            },
+                            body: serialized,
+                            signal: requestSignal,
+                            redirect: 'error',
+                        });
+                    }
+                    catch {
+                        // A failed message POST may have reached QQ. Never replay
+                        // it as text when the transport cannot prove the outcome.
+                        throw senderError(upload ? 'failed' : 'unknown');
+                    }
+                    if (!isActive(request, target, kind, signal)) throw senderError(upload ? 'expired' : 'unknown');
+                    if (!response || !Number.isInteger(response.status)) throw senderError(upload ? 'failed' : 'unknown');
+                    if (response.ok === false && response.status < 500) {
+                        await response.body?.cancel?.().catch(() => {});
+                        throw senderError('failed');
+                    }
+                    let parsed;
+                    try {
+                        parsed = await readResponse(response, MAX_QQ_RESPONSE_BYTES, requestSignal);
+                    }
+                    catch {
+                        throw senderError(upload ? 'failed' : 'unknown');
+                    }
+                    if (!validApiAcknowledgement(path, parsed)) {
+                        throw senderError(upload || hasApiError(parsed) ? 'failed' : 'unknown');
+                    }
                     completed = true;
                     return parsed;
                 }
-                catch {
+                catch (error) {
                     // The pinned SDK retries upload failures unless its error contains
                     // `Timeout`; use one fixed message for every failure, not just aborts.
-                    throw senderError(signal?.aborted ? 'cancelled' : 'failed');
+                    throw senderError(error?.code ?? (signal?.aborted ? 'cancelled' : 'failed'));
                 }
                 finally {
                     clearTimeout(timer);
@@ -337,6 +357,7 @@ export function createGenerationSender({
             }
             catch (error) {
                 if (error?.code === 'limit') return { sent: false, reason: 'limit' };
+                if (error?.code === 'unknown') return { sent: false, reason: 'unknown' };
                 if (error?.code === 'expired' || error?.code === 'cancelled' || signal?.aborted) {
                     return { sent: false, reason: 'expired' };
                 }
@@ -435,9 +456,12 @@ export function createGenerationSender({
         },
 
         sendMarkdownFallback(request, content, signal) {
-            const text = boundedFallbackContent(content);
-            if (text === undefined) return Promise.resolve({ sent: false, reason: 'failed' });
-            return sendRawText(request, text, 'markdown', signal);
+            const bounded = boundedFallbackContent(content);
+            if (bounded === undefined) return Promise.resolve({ sent: false, reason: 'failed' });
+            return sendRawText(request, bounded.text, 'markdown', signal).then((result) => ({
+                ...result,
+                ...(result.sent ? { truncated: bounded.truncated } : {}),
+            }));
         },
 
         sendNotice(request, text, signal) {
