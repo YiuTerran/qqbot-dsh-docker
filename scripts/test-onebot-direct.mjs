@@ -80,6 +80,28 @@ test('SeaDice direct matcher accepts only safe full-line forms and keeps compact
     ]) assert.equal(matchOnebotDirectCommand(content), undefined, content);
 });
 
+test('direct log commands get an artifact delivery deadline without extending ordinary dice commands', async () => {
+    const observed = [];
+    const service = fakeService({ execute(args, exec) {
+        observed.push([args.command, getOnebotTurn(exec.agent)?.expiryTimer?._idleTimeout]);
+        return { status: 'ok', outputs: ['done'] };
+    } });
+    const router = createOnebotDirectRouter({
+        service, appId: APP_ID,
+        sender: { async sendMarkdown() { return { id: 'sent' }; } },
+        env: { QQBOT_ONEBOT_ENABLED: 'true' },
+    });
+    try {
+        await router.middleware(context({ content: '.log list', msgId: 'log-deadline' }));
+        await router.middleware(context({ content: '.r 1d20', msgId: 'dice-deadline' }));
+        assert.deepEqual(observed, [
+            ['.log list', 145_000 + 4 * 10_000 + 1000],
+            ['.r 1d20', 35_000 + 4 * 10_000 + 1000],
+        ]);
+    }
+    finally { await router.stop(); }
+});
+
 test('backend policies resolve unique matches, explicit defaults, conflicts, and unavailable defaults without failover', async () => {
     const sent = [];
     const executed = [];

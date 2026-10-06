@@ -12,6 +12,7 @@ const MAX_EVENT_CACHE = 50_000;
 const MAX_MESSAGE_CHARS = 2000;
 const MAX_SEND_CHUNKS = 4;
 const SERVICE_DEADLINE_MS = 35_000;
+const LOG_SERVICE_DEADLINE_MS = 145_000;
 const SEND_DEADLINE_MS = 10_000;
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
 const BACKEND_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
@@ -56,6 +57,21 @@ const FAILURE_TEXT = Object.freeze({
     group_role_denied: '只有当前群的群主或管理员可以修改群规则。',
     group_role_unsupported: 'OneBot 后端尚不支持群角色校验，群规则未修改。',
     group_state_source_mismatch: '混合消息批次修改群规则，需要该群主或管理员在自己的原消息中明确发送完整的原生命令。',
+    log_disabled: '聊天记录功能当前未启用，本次命令未执行。',
+    log_capability_unsupported: '当前海豹骰后端不支持群聊记录控制，本次命令未执行。',
+    log_group_only: '聊天记录命令只能在群聊中使用。',
+    log_exact_source_required: '聊天记录命令必须由当前群成员在自己的原始消息中完整发送。',
+    log_role_denied: '只有当前群的群主或管理员可以修改聊天记录状态。',
+    log_role_unknown: '无法确认当前群的身份权限，聊天记录状态未修改。',
+    log_role_unsupported: '当前 OneBot 后端尚不支持群角色校验，聊天记录状态未修改。',
+    log_capture_order_unavailable: '当前群的记录队列尚未确认接收之前的消息，本次控制命令未执行。',
+    artifact_delivery_failed: '群聊文件发送失败，文件不会自动重试或转换为文本。',
+    artifact_delivery_unknown: '群聊文件发送结果未能确认，请勿重复执行导出。',
+    artifact_delivery_timeout: '群聊文件发送等待超时，文件不会自动重试或转换为文本。',
+    artifact_delivery_expired: '当前 QQ 消息已过期，文件未发送。',
+    artifact_capability_unsupported: '当前后端返回了未协商的文件回执，本次未领取文件。',
+    artifact_receipt_invalid: '当前后端返回的文件回执不适用于本次群聊导出。',
+    artifact_partial: '部分群聊文件未能发送；已发送的文件不会自动重试。',
     permission_denied: '管理命令需要配置的用户在私聊中明确发送原始命令，并完成后端权限协商；本次未执行。',
     send_failed: '骰子结果发送失败，请查看当前会话后再决定下一步。',
     no_output: '海豹骰没有返回可显示的结果。',
@@ -506,6 +522,8 @@ export function createOnebotDirectRouter({
         }
 
         const holder = {};
+        const serviceDeadlineMs = inspectSeaDiceCommand(match.command)?.kind === 'log'
+            ? LOG_SERVICE_DEADLINE_MS : SERVICE_DEADLINE_MS;
         const controller = new AbortController();
         const externalSignal = ctx?.signal;
         const scopeSignal = externalSignal ? AbortSignal.any([controller.signal, externalSignal]) : controller.signal;
@@ -519,7 +537,7 @@ export function createOnebotDirectRouter({
             direct: true,
             directAuthorization: { backend, command: match.command },
             signal: scopeSignal,
-            turnTtlMs: SERVICE_DEADLINE_MS + MAX_SEND_CHUNKS * SEND_DEADLINE_MS + 1000,
+            turnTtlMs: serviceDeadlineMs + MAX_SEND_CHUNKS * SEND_DEADLINE_MS + 1000,
         });
         const metadata = onebotRequestMetadata(scope)[0];
         if (!metadata) {
@@ -543,7 +561,7 @@ export function createOnebotDirectRouter({
                 result = await raceWithAbortAndDeadline(
                     () => service.execute(args, { agent: holder, signal, name: 'qqbot_onebot_command' }),
                     signal,
-                    SERVICE_DEADLINE_MS,
+                    serviceDeadlineMs,
                 );
             }
             catch (error) {
@@ -551,6 +569,24 @@ export function createOnebotDirectRouter({
                 result = { status: 'unknown', outputs: [], failureReason: error?.name === 'TimeoutError' ? 'timeout' : 'uncertain' };
             }
             if (entry.cancelled || stopped || signal.aborted) return;
+
+            if (Array.isArray(result?.artifactDelivery) && result.artifactDelivery.length > 0) {
+                const deliveryStatuses = result.artifactDelivery.map((delivery) => delivery?.status);
+                const allSent = deliveryStatuses.every((status) => status === 'sent');
+                if (allSent) {
+                    logStage(logger, 'route', 'artifact_sent', startedAt);
+                    return;
+                }
+                const someSent = deliveryStatuses.some((status) => status === 'sent');
+                const reason = someSent ? 'artifact_partial'
+                    : result?.failureReason ?? (deliveryStatuses.includes('unknown') ? 'artifact_delivery_unknown'
+                        : deliveryStatuses.includes('timeout') ? 'artifact_delivery_timeout'
+                            : deliveryStatuses.includes('expired') ? 'artifact_delivery_expired' : 'artifact_delivery_failed');
+                await sendText(source.replyTarget, FAILURE_TEXT[reason] ?? FAILURE_TEXT.artifact_delivery_failed,
+                    signal, startedAt, 1);
+                logStage(logger, 'route', reason, startedAt);
+                return;
+            }
 
             if (result?.status !== 'ok') {
                 await handoff(ctx, entry, failureReason(result), result, next, startedAt);

@@ -17,6 +17,7 @@ pending_images_test="${repo_root}/scripts/test-pending-images.mjs"
 pending_images_native_test="${repo_root}/scripts/test-pending-images-native.mjs"
 memory_images_test="${repo_root}/scripts/test-memory-images.mjs"
 onebot_native_test="${repo_root}/scripts/test-onebot-native.mjs"
+onebot_log_test="${repo_root}/scripts/test-onebot-log.mjs"
 onebot_direct_test="${repo_root}/scripts/test-onebot-direct.mjs"
 sealdice_policy_test="${repo_root}/scripts/test-sealdice-policy.mjs"
 sealdice_policy_fixture="${repo_root}/third_party/sealdice-core/dice/testdata/onebot-bridge-policy.json"
@@ -29,6 +30,7 @@ previous_stock_agents_v0_10_fixture="${repo_root}/scripts/fixtures/agents-v0.10.
 previous_stock_agents_v0_10_3_fixture="${repo_root}/scripts/fixtures/agents-v0.10.3-stock.md"
 previous_stock_agents_v0_11_fixture="${repo_root}/scripts/fixtures/agents-v0.11.0-stock.md"
 previous_stock_agents_v0_11_1_fixture="${repo_root}/scripts/fixtures/agents-v0.11.1-stock.md"
+previous_stock_agents_v0_11_2_fixture="${repo_root}/scripts/fixtures/agents-v0.11.2-stock.md"
 persistent_reset_probe="${repo_root}/scripts/test-persistent-reset.mjs"
 suffix="$(date +%s)-$$"
 data_volume="dsh-qqbot-test-data-${suffix}"
@@ -404,6 +406,18 @@ docker run --rm \
 log "Checking exact stock AGENTS.md migration and read-only preservation"
 docker run --rm --entrypoint sh \
     --volume "${stock_agents_v0_10_data_volume}:/data" \
+    --mount "type=bind,src=${previous_stock_agents_v0_11_2_fixture},dst=/tmp/agents-stock.md,readonly" \
+    "$IMAGE" -ec 'cp /tmp/agents-stock.md /data/AGENTS.md; chmod 0644 /data/AGENTS.md'
+docker run --rm \
+    --volume "${stock_agents_v0_10_data_volume}:/data" \
+    "$IMAGE" sh -ec 'cmp /data/AGENTS.md /opt/qqbot-defaults/AGENTS.md'
+docker run --rm \
+    --volume "${readonly_stock_agents_v0_10_data_volume}:/data" \
+    --mount "type=bind,src=${previous_stock_agents_v0_11_2_fixture},dst=/data/AGENTS.md,readonly" \
+    --mount "type=bind,src=${previous_stock_agents_v0_11_2_fixture},dst=/tmp/agents-stock.md,readonly" \
+    "$IMAGE" sh -ec 'cmp /data/AGENTS.md /tmp/agents-stock.md'
+docker run --rm --entrypoint sh \
+    --volume "${stock_agents_v0_10_data_volume}:/data" \
     --mount "type=bind,src=${previous_stock_agents_v0_11_1_fixture},dst=/tmp/agents-stock.md,readonly" \
     "$IMAGE" -ec 'cp /tmp/agents-stock.md /data/AGENTS.md; chmod 0644 /data/AGENTS.md'
 docker run --rm \
@@ -500,6 +514,7 @@ docker create \
     --mount "type=bind,src=${pending_images_native_test},dst=/tmp/test-pending-images-native.mjs,readonly" \
     --mount "type=bind,src=${memory_images_test},dst=/tmp/test-memory-images.mjs,readonly" \
     --mount "type=bind,src=${onebot_native_test},dst=/tmp/test-onebot-native.mjs,readonly" \
+    --mount "type=bind,src=${onebot_log_test},dst=/tmp/test-onebot-log.mjs,readonly" \
     --mount "type=bind,src=${onebot_direct_test},dst=/tmp/test-onebot-direct.mjs,readonly" \
     --mount "type=bind,src=${sealdice_policy_test},dst=/tmp/test-sealdice-policy.mjs,readonly" \
     --mount "type=bind,src=${sealdice_policy_fixture},dst=/tmp/onebot-bridge-policy.json,readonly" \
@@ -558,6 +573,7 @@ docker create \
         node --check /opt/qqbot-defaults/qqbot-generation-sender.mjs
         node --check /opt/qqbot-defaults/qqbot-generation-scope.mjs
         node --check /opt/qqbot-defaults/qqbot-generation-quotas.mjs
+        node --check /opt/qqbot-defaults/qqbot-onebot-log.mjs
         node --check /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/transport/inbound.js
         node --check /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/transport/outbound.js
         node --check /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/model/prefs-store.js
@@ -595,6 +611,7 @@ docker create \
         QQBOT_GENERATION_SCOPE_MODULE=/opt/qqbot-defaults/qqbot-generation-scope.mjs node --test /tmp/test-generation-scope.mjs
         QQBOT_GENERATION_QUOTA_MODULE=/opt/qqbot-defaults/qqbot-generation-quotas.mjs node --test /tmp/test-generation-quotas.mjs
         QQBOT_ONEBOT_MODULE_ROOT=/opt/qqbot-defaults QQBOT_ONEBOT_PATCHER_SOURCE=/usr/local/lib/enforce-chat-only.mjs QQBOT_SDK_API_CLIENT_MODULE=/data/profiles/qqbot/node_modules/@tencent-connect/qqbot-nodejs/dist/protocol/api/api-client.js node --test /tmp/test-onebot-native.mjs
+        QQBOT_ONEBOT_MODULE_ROOT=/opt/qqbot-defaults QQBOT_ONEBOT_PATCHER_SOURCE=/usr/local/lib/enforce-chat-only.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-onebot-log.mjs
         QQBOT_ONEBOT_MODULE_ROOT=/opt/qqbot-defaults node --test /tmp/test-onebot-direct.mjs
         QQBOT_ONEBOT_MODULE_ROOT=/opt/qqbot-defaults QQBOT_SEALDICE_POLICY_FIXTURE=/tmp/onebot-bridge-policy.json node --test /tmp/test-sealdice-policy.mjs
         QQBOT_ONEBOT_DIRECT_MODULE=/opt/qqbot-defaults/qqbot-onebot-direct.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-onebot-direct-native.mjs

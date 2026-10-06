@@ -11,7 +11,7 @@
 | dsh | `@deepseek-ai/dsh@0.1.7-rc.2` |
 | QQ 插件 | `@tencent-connect/dsh-qqbot@0.5.0` |
 
-当前镜像标签为 `tryao/qqbot-dsh:v0.11.2`。可选 TRPG 组件独立发布：Gensokyo-MCP `v0.2.1`、海豹骰 `v1.6.2-bridge.5`。Dockerfile 固定基础镜像摘要及软件包版本；不发布 `latest` 标签。
+当前镜像标签为 `tryao/qqbot-dsh:v0.12.0`。可选 TRPG 组件独立发布：Gensokyo-MCP `v0.3.0`、海豹骰 `v1.6.2-bridge.6`。Dockerfile 固定基础镜像摘要及软件包版本；不发布 `latest` 标签。
 
 ## 快速部署
 
@@ -41,6 +41,8 @@ Compose 使用 `dsh-qqbot-data` 和 `dsh-qqbot-workspace` 命名卷。升级或�
 
 可选 OneBot/TRPG 集成默认关闭。启用 `QQBOT_ONEBOT_ENABLED=true` 并启动 `trpg` Compose profile 后，可使用外部 Gensokyo-MCP 与海豹骰；完整配置、权限和 YAML 实例见 [OneBot 集成说明](docs/onebot-integration.md)。
 
+实时跑团日志另需启用 `QQBOT_ONEBOT_LOG_ENABLED` 并升级配套桥与海豹；可导出带 HTML 配色的 Markdown 或原始 TXT。配置及权限见 [日志说明](docs/onebot-integration.md#实时跑团日志与导出)。
+
 ## 能力与边界
 
 - 群聊需要 @机器人。模型上下文由 QQ 平台和 SDK 提供；机器人应优先处理当前 @请求及相关消息。
@@ -65,7 +67,7 @@ services:
       - dsh-workspace:/workspace
 ```
 
-不要为自定义文件开放额外权限。入口脚本仅迁移与镜像内 v0.9.0、v0.10.0、v0.10.3、v0.11.0 或 v0.11.1 默认文件逐字节相同的可写普通文件；自定义文件、符号链接和只读挂载会保留。能力和默认指引见 [`defaults/AGENTS.md`](defaults/AGENTS.md)。
+不要为自定义文件开放额外权限。入口脚本仅迁移与镜像内 v0.9.0、v0.10.0、v0.10.3、v0.11.0、v0.11.1 或 v0.11.2 默认文件逐字节相同的可写普通文件；自定义文件、符号链接和只读挂载会保留。能力和默认指引见 [`defaults/AGENTS.md`](defaults/AGENTS.md)。
 
 ## 文档与维护
 

@@ -1,8 +1,9 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { logToolFailure } from './qqbot-provider-errors.mjs';
 import { inspectSeaDiceCommand, readOnebotMasterUsers, SEALDICE_TOOL_GUIDANCE } from './qqbot-sealdice-policy.mjs';
+import { createOnebotLogCapture } from './qqbot-onebot-log.mjs';
 import {
     bindOnebotExecution,
     getBoundOnebotRequest,
@@ -32,6 +33,9 @@ const PLATFORM_PROACTIVE_C2C_SUPPORTED = false;
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
 const RECEIPT_PATTERN = /^[A-Za-z0-9_-]{1,256}$/u;
 const MAX_FRIEND_STATE = 20_000;
+const MAX_ARTIFACT_BYTES = 10 * 1024 * 1024;
+const MAX_ARTIFACT_RECEIPTS = 1;
+const MAX_ARTIFACT_RESPONSE_BYTES = 15 * 1024 * 1024;
 
 function validToken(value) {
     return typeof value === 'string' && value.length > 0 && value.length <= 8192
@@ -61,7 +65,7 @@ function cleanUrl(value) {
 export function readOnebotConfig(env = process.env) {
     const enabledRaw = env.QQBOT_ONEBOT_ENABLED;
     const enabled = enabledRaw === 'true';
-    if (!enabled) return Object.freeze({ enabled: false, hiddenEnabled: false, backendIds: Object.freeze([]) });
+    if (!enabled) return Object.freeze({ enabled: false, logEnabled: false, hiddenEnabled: false, backendIds: Object.freeze([]) });
     const url = cleanUrl(env.QQBOT_ONEBOT_MCP_URL);
     const backends = readBackendIds(env.QQBOT_ONEBOT_BACKENDS);
     let masterUsers;
@@ -73,6 +77,7 @@ export function readOnebotConfig(env = process.env) {
     }
     return Object.freeze({
         enabled: true,
+        logEnabled: env.QQBOT_ONEBOT_LOG_ENABLED === 'true',
         hiddenEnabled: env.QQBOT_ONEBOT_HIDDEN_ENABLED === 'true',
         url,
         backendIds: backends,
@@ -142,7 +147,54 @@ function parseBridgeResult(mcpResult, expected) {
         || ((data.private_count === undefined) !== (data.private_receipt === undefined))
         || (privateCount === 0 && privateReceipt !== undefined)
         || (privateCount > 0 && !privateReceipt))) return undefined;
-    return { status: data.status, outputs, privateCount, privateReceipt };
+    const artifactReceipts = parseArtifactReceipts(data.artifact_receipts, expected.audience);
+    if (artifactReceipts === undefined || (artifactReceipts.length > 0 && data.status !== 'ok')) return undefined;
+    return { status: data.status, outputs, privateCount, privateReceipt, artifactReceipts };
+}
+
+function parseArtifactReceipts(value, audience) {
+    if (value === undefined) return [];
+    if (audience !== 'group' || !Array.isArray(value) || value.length > MAX_ARTIFACT_RECEIPTS) return undefined;
+    const receipts = [];
+    const seen = new Set();
+    for (const entry of value) {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)
+            || !RECEIPT_PATTERN.test(entry.receipt ?? '')
+            || typeof entry.filename !== 'string' || Array.from(entry.filename).length > 120
+            || !/^[\p{L}\p{N}_][\p{L}\p{N}._ -]{0,115}\.(?:md|txt)$/u.test(entry.filename)
+            || entry.filename.startsWith('..')
+            || !((entry.filename.endsWith('.md') && entry.media_type === 'text/markdown')
+                || (entry.filename.endsWith('.txt') && entry.media_type === 'text/plain'))
+            || !Number.isSafeInteger(entry.size) || entry.size < 1 || entry.size > MAX_ARTIFACT_BYTES
+            || typeof entry.sha256 !== 'string' || !/^[a-f0-9]{64}$/iu.test(entry.sha256)
+            || seen.has(entry.receipt)) return undefined;
+        seen.add(entry.receipt);
+        receipts.push(Object.freeze({
+            receipt: entry.receipt,
+            filename: entry.filename,
+            mediaType: entry.media_type,
+            size: entry.size,
+            sha256: entry.sha256.toLowerCase(),
+        }));
+    }
+    return receipts;
+}
+
+function decodeClaimedArtifact(value, receipt) {
+    if (!value || typeof value !== 'object' || !RECEIPT_PATTERN.test(value.delivery_id ?? '')
+        || value.receipt !== receipt.receipt || value.filename !== receipt.filename
+        || value.media_type !== receipt.mediaType || value.size !== receipt.size || value.sha256 !== receipt.sha256
+        || typeof value.bytes_base64 !== 'string'
+        || value.bytes_base64.length > Math.ceil(MAX_ARTIFACT_BYTES * 4 / 3) + 8
+        || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value.bytes_base64)) return undefined;
+    let bytes;
+    try { bytes = Buffer.from(value.bytes_base64, 'base64'); }
+    catch { return undefined; }
+    if (bytes.length !== receipt.size || bytes.toString('base64') !== value.bytes_base64
+        || createHash('sha256').update(bytes).digest('hex') !== receipt.sha256) return undefined;
+    try { new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
+    catch { return undefined; }
+    return { deliveryId: value.delivery_id, bytes };
 }
 
 async function readBodyBounded(response, limit = MAX_RESPONSE_BYTES) {
@@ -818,6 +870,99 @@ async function deliverPrivateReceipt(config, result, expected, recipient, option
     return deliveryStatus;
 }
 
+async function acknowledgeArtifact(config, payload, fetchImpl) {
+    try {
+        const result = await internalRequest(config, '/internal/artifacts/ack', {
+            method: 'POST', body: payload, fetchImpl, timeoutMs: 3000, maxBytes: 4096,
+        });
+        return result?.ok === true;
+    }
+    catch { return false; }
+}
+
+async function deliverArtifactReceipts(normalized, expected, source, runtime, exec, scope, signal) {
+    const deliveries = [];
+    const active = () => scope?.active === true && !onebotExecutionFailure(exec) && !signal?.aborted;
+    for (const receipt of normalized.artifactReceipts) {
+        const delivery = { receipt: receipt.receipt, filename: receipt.filename, status: 'failed' };
+        deliveries.push(delivery);
+        if (!active()) {
+            delivery.status = 'expired';
+            continue;
+        }
+        let claim;
+        try {
+            claim = await internalRequest(runtime.config, '/internal/artifacts/claim', {
+                method: 'POST',
+                body: {
+                    backend_id: expected.backend,
+                    request_id: expected.requestId,
+                    receipt: receipt.receipt,
+                    group_key: source.groupKey,
+                },
+                fetchImpl: runtime.fetchImpl,
+                signal,
+                timeoutMs: 5000,
+                maxBytes: MAX_ARTIFACT_RESPONSE_BYTES,
+            });
+        }
+        catch (error) {
+            delivery.status = error?.status === 404 ? 'expired' : error?.name === 'TimeoutError' ? 'unknown' : 'failed';
+            continue;
+        }
+
+        const deliveryId = typeof claim?.delivery_id === 'string' && RECEIPT_PATTERN.test(claim.delivery_id)
+            ? claim.delivery_id : undefined;
+        const artifact = decodeClaimedArtifact(claim, receipt);
+        if (!deliveryId || !artifact) {
+            delivery.status = 'failed';
+            if (deliveryId) {
+                delivery.acknowledged = await acknowledgeArtifact(runtime.config, {
+                    backend_id: expected.backend, request_id: expected.requestId, receipt: receipt.receipt,
+                    group_key: source.groupKey, delivery_id: deliveryId, status: 'failed',
+                }, runtime.fetchImpl);
+            }
+            continue;
+        }
+        if (!active()) {
+            delivery.status = 'expired';
+            delivery.acknowledged = await acknowledgeArtifact(runtime.config, {
+                backend_id: expected.backend, request_id: expected.requestId, receipt: receipt.receipt,
+                group_key: source.groupKey, delivery_id: deliveryId, status: 'expired',
+            }, runtime.fetchImpl);
+            continue;
+        }
+
+        let sent;
+        try {
+            const request = Object.freeze({
+                replyTarget: source.replyTarget,
+                isActive(kind) { return kind === 'artifact' && active(); },
+                enqueueSend(send) { return active() ? send() : Promise.resolve({ sent: false, reason: 'expired' }); },
+            });
+            sent = await runtime.options.sendArtifactFile?.(request, artifact.bytes, receipt.filename, receipt.mediaType, signal);
+        }
+        catch { sent = { sent: false, reason: 'unknown' }; }
+        const qqStatus = sent?.sent === true ? 'sent'
+            : sent?.reason === 'unknown' ? 'unknown'
+                : sent?.reason === 'expired' ? 'expired'
+                    : sent?.reason === 'timeout' ? 'timeout' : 'failed';
+        delivery.status = qqStatus;
+        const ackStatus = qqStatus === 'timeout' ? 'failed' : qqStatus;
+        delivery.acknowledged = await acknowledgeArtifact(runtime.config, {
+            backend_id: expected.backend,
+            request_id: expected.requestId,
+            receipt: receipt.receipt,
+            group_key: source.groupKey,
+            delivery_id: deliveryId,
+            status: ackStatus,
+        }, runtime.fetchImpl);
+    }
+    const status = deliveries.some((delivery) => delivery.status === 'unknown') ? 'unknown'
+        : deliveries.every((delivery) => delivery.status === 'sent') ? 'ok' : 'failed';
+    return { status, deliveries };
+}
+
 async function sendWithDeadline(send, target, message, signal, beforeDispatch) {
     // SDK 1.0.4 bounds its fetch phase, but clears that timeout before reading
     // response text and does not accept the QQ turn's signal. The outer race
@@ -842,13 +987,14 @@ async function sendWithDeadline(send, target, message, signal, beforeDispatch) {
     finally { combined.removeEventListener('abort', onAbort); }
 }
 
-function safeToolResult(status, outputs, notice, privateDelivery, failureReason) {
+function safeToolResult(status, outputs, notice, privateDelivery, failureReason, artifactDelivery) {
     return {
         status,
         outputs,
         ...(notice ? { notice } : {}),
         ...(privateDelivery ? { privateDelivery } : {}),
         ...(failureReason ? { failureReason } : {}),
+        ...(Array.isArray(artifactDelivery) ? { artifactDelivery } : {}),
     };
 }
 
@@ -881,6 +1027,49 @@ const GROUP_STATE_FAILURE_NOTICES = Object.freeze({
     group_role_unsupported: 'OneBot 后端尚不支持群角色校验，群规则未修改。',
     group_state_source_mismatch: '混合消息批次修改群规则，需要该群主或管理员在自己的原消息中明确发送完整的原生命令。',
 });
+
+const LOG_FAILURE_NOTICES = Object.freeze({
+    log_disabled: '聊天记录功能当前未启用，本次命令未执行。',
+    log_capability_unsupported: '当前海豹骰后端不支持群聊记录控制，本次命令未执行。',
+    log_group_only: '聊天记录命令只能在群聊中使用。',
+    log_exact_source_required: '聊天记录命令必须由当前群成员在自己的原始消息中完整发送。',
+    log_role_denied: '只有当前群的群主或管理员可以修改聊天记录状态。',
+    log_role_unknown: '无法确认当前群的身份权限，聊天记录状态未修改。',
+    log_role_unsupported: '当前 OneBot 后端尚不支持群角色校验，聊天记录状态未修改。',
+    log_capture_order_unavailable: '当前群的记录队列尚未确认接收之前的消息，本次控制命令未执行。',
+});
+
+const ARTIFACT_FAILURE_NOTICES = Object.freeze({
+    artifact_capability_unsupported: '当前后端返回了未协商的文件回执，本次未领取文件。',
+    artifact_receipt_invalid: '当前后端返回的文件回执不适用于本次群聊导出。',
+    artifact_delivery_failed: '群聊文件发送失败，文件不会自动重试或转换为文本。',
+    artifact_delivery_unknown: '群聊文件发送结果未能确认，请勿重复执行导出。',
+    artifact_delivery_timeout: '群聊文件发送等待超时，文件不会自动重试或转换为文本。',
+    artifact_delivery_expired: '当前 QQ 消息已过期，文件未发送。',
+});
+
+function logCommandFailure(policy, source, backend, runtime, scope) {
+    if (policy?.kind !== 'log') return undefined;
+    if (!runtime.config.logEnabled) return 'log_disabled';
+    if (source.audience !== 'group') return 'log_group_only';
+    const originalPolicy = source.originalTextLength <= 4000 && !source.hasAttachments && !source.hasQuote
+        ? inspectSeaDiceCommand(source.text, { direct: true }) : undefined;
+    if (!originalPolicy?.allowed || originalPolicy.kind !== 'log'
+        || originalPolicy.command !== policy.command) return 'log_exact_source_required';
+    if (!runtime.logCaptureBackends.has(backend)) return 'log_capability_unsupported';
+    if (policy.logMutation) {
+        if (source.groupRole === 'member') return 'log_role_denied';
+        if (source.groupRole !== 'owner' && source.groupRole !== 'admin') return 'log_role_unknown';
+        if (!runtime.groupRoleBackends.has(backend)) return 'log_role_unsupported';
+    }
+    if (scope?.originalRequestCount !== 1 && (source.originalTextLength > 4000 || !originalPolicy
+        || originalPolicy.command !== policy.command)) return 'log_exact_source_required';
+    return undefined;
+}
+
+function logCommandFailureResult(reason) {
+    return safeToolResult('failed', [], LOG_FAILURE_NOTICES[reason], undefined, reason);
+}
 
 function groupStateFailure(policy, source, backend, roleBackends, scope) {
     if (!policy?.groupStateWrite) return undefined;
@@ -929,7 +1118,13 @@ async function executeCommand(args, exec, runtime) {
     if (source.onebotDirectFallback) {
         return safeToolResult('failed', [], 'This original QQ message is a direct-command fallback; explain its error without running another OneBot command.');
     }
-    const initialGroupStateFailure = groupStateFailure(policy, source, args.backend, runtime.groupRoleBackends, scope);
+    const initialLogFailure = logCommandFailure(policy, source, args.backend, runtime, scope);
+    if (initialLogFailure) {
+        logToolFailure(ONEBOT_COMMAND_TOOL, 'authorize', { kind: 'failed', code: initialLogFailure });
+        return logCommandFailureResult(initialLogFailure);
+    }
+    const initialGroupStateFailure = policy?.kind === 'log' ? undefined
+        : groupStateFailure(policy, source, args.backend, runtime.groupRoleBackends, scope);
     if (initialGroupStateFailure) {
         logToolFailure(ONEBOT_COMMAND_TOOL, 'authorize', { kind: 'failed', code: initialGroupStateFailure });
         return groupStateFailureResult(initialGroupStateFailure);
@@ -943,12 +1138,17 @@ async function executeCommand(args, exec, runtime) {
         return safeToolResult('failed', [], '管理命令仅允许已配置的用户在私聊中明确发送原始命令，且后端必须完成权限协商。');
     }
     const callKey = `${args.backend}\u0000${normalizedCommandKey(args.command)}`;
-    const result = await getOrCreateOnebotCall(scope, args.requestId, callKey, async () => {
+    let result;
+    try {
+        result = await getOrCreateOnebotCall(scope, args.requestId, callKey, async () => {
         if (onebotExecutionFailure(exec) || !scope.active) {
             return safeToolResult('failed', [], 'This command belongs to an expired QQ message.');
         }
+        const queuedLogFailure = logCommandFailure(policy, source, args.backend, runtime, scope);
+        if (queuedLogFailure) return logCommandFailureResult(queuedLogFailure);
         if (!runtime.readyBackends.has(args.backend)) return safeToolResult('failed', [], 'The selected OneBot backend is unavailable.');
-        const queuedGroupStateFailure = groupStateFailure(policy, source, args.backend, runtime.groupRoleBackends, scope);
+        const queuedGroupStateFailure = policy?.kind === 'log' ? undefined
+            : groupStateFailure(policy, source, args.backend, runtime.groupRoleBackends, scope);
         if (queuedGroupStateFailure) {
             logToolFailure(ONEBOT_COMMAND_TOOL, 'authorize', { kind: 'failed', code: queuedGroupStateFailure });
             return groupStateFailureResult(queuedGroupStateFailure);
@@ -960,6 +1160,12 @@ async function executeCommand(args, exec, runtime) {
         if (source.audience === 'group' && commandKind === 'rh' && runtime.options.proactiveC2CAvailable !== true) {
             return safeToolResult('failed', [], 'QQ no longer supports proactive private messages for hidden group rolls.');
         }
+        if (policy?.kind === 'log' && !await runtime.logCapture.barrier({
+            backendId: args.backend,
+            groupKey: source.groupKey,
+            sourceMessageId: source.replyTarget.msgId,
+            timeoutMs: 3000,
+        })) return logCommandFailureResult('log_capture_order_unavailable');
         const signal = getOnebotRequestSignal(scope, exec.signal);
         let hiddenRecipient;
         if (source.audience === 'group' && commandKind === 'rh') {
@@ -1001,7 +1207,13 @@ async function executeCommand(args, exec, runtime) {
                     && runtime.groupRoleBackends.has(args.backend)) callArgs.group_role = source.groupRole;
                 result = await runtime.session.callWs(callArgs, signal, async () => {
                     if (onebotExecutionFailure(exec) || signal.aborted || !runtime.readyBackends.has(args.backend)) return false;
-                    const dispatchGroupStateFailure = groupStateFailure(policy, source, args.backend, runtime.groupRoleBackends, scope);
+                    const dispatchLogFailure = logCommandFailure(policy, source, args.backend, runtime, scope);
+                    if (dispatchLogFailure) {
+                        preDispatchGroupStateFailure = dispatchLogFailure;
+                        return false;
+                    }
+                    const dispatchGroupStateFailure = policy?.kind === 'log' ? undefined
+                        : groupStateFailure(policy, source, args.backend, runtime.groupRoleBackends, scope);
                     if (dispatchGroupStateFailure) {
                         preDispatchGroupStateFailure = dispatchGroupStateFailure;
                         return false;
@@ -1042,6 +1254,33 @@ async function executeCommand(args, exec, runtime) {
                 if (dispatched) blockOnebotRequest(scope, args.requestId);
                 return safeToolResult('unknown', [], 'The command result is unknown and was not retried.');
             }
+            if (normalized.artifactReceipts.length > 0) {
+                const action = policy?.kind === 'log' ? policy.command.split(/\s+/u)[1] : undefined;
+                if (!runtime.artifactBackends.has(args.backend)) {
+                    blockOnebotRequest(scope, args.requestId);
+                    return safeToolResult('unknown', [], ARTIFACT_FAILURE_NOTICES.artifact_capability_unsupported,
+                        undefined, 'artifact_capability_unsupported');
+                }
+                if (!['get', 'export', 'end'].includes(action) || source.audience !== 'group' || normalized.privateCount > 0) {
+                    blockOnebotRequest(scope, args.requestId);
+                    return safeToolResult('unknown', [], ARTIFACT_FAILURE_NOTICES.artifact_receipt_invalid,
+                        undefined, 'artifact_receipt_invalid');
+                }
+                const artifactResult = await deliverArtifactReceipts(normalized, expected, source, runtime, exec, scope, signal);
+                if (artifactResult.status !== 'ok') blockOnebotRequest(scope, args.requestId);
+                const failureReason = artifactResult.status === 'ok' ? undefined
+                    : artifactResult.status === 'unknown' ? 'artifact_delivery_unknown'
+                        : artifactResult.deliveries.some((delivery) => delivery.status === 'timeout')
+                            ? 'artifact_delivery_timeout' : artifactResult.deliveries.some((delivery) => delivery.status === 'expired')
+                                ? 'artifact_delivery_expired' : 'artifact_delivery_failed';
+                if (failureReason) logToolFailure(ONEBOT_COMMAND_TOOL, 'artifact-delivery', { kind: 'failed', code: failureReason });
+                if (artifactResult.deliveries.some((delivery) => delivery.acknowledged === false)) {
+                    logToolFailure(ONEBOT_COMMAND_TOOL, 'artifact-ack', { kind: 'failed', code: 'artifact_ack_failed' });
+                }
+                return safeToolResult(artifactResult.status, [],
+                    failureReason ? ARTIFACT_FAILURE_NOTICES[failureReason] : undefined,
+                    undefined, failureReason, artifactResult.deliveries);
+            }
             if (normalized.status === 'failed') {
                 const publicOutputs = scope.direct
                     && !(source.audience === 'group' && normalized.privateCount > 0)
@@ -1079,7 +1318,8 @@ async function executeCommand(args, exec, runtime) {
         catch (error) {
             if (preDispatchGroupStateFailure) {
                 logToolFailure(ONEBOT_COMMAND_TOOL, 'authorize', { kind: 'failed', code: preDispatchGroupStateFailure });
-                return groupStateFailureResult(preDispatchGroupStateFailure);
+                return LOG_FAILURE_NOTICES[preDispatchGroupStateFailure]
+                    ? logCommandFailureResult(preDispatchGroupStateFailure) : groupStateFailureResult(preDispatchGroupStateFailure);
             }
             logToolFailure(ONEBOT_COMMAND_TOOL, 'call', error);
             // Once call_ws dispatch begins, the Dice side may have executed.
@@ -1091,7 +1331,13 @@ async function executeCommand(args, exec, runtime) {
             }
             return safeToolResult('failed', [], 'The OneBot command could not be completed.');
         }
-    });
+        });
+    }
+    finally {
+        if (policy?.kind === 'log' && source.groupKey && source.replyTarget.msgId) {
+            runtime.logCapture.releaseControlSource?.(source.groupKey, source.replyTarget.msgId, args.backend);
+        }
+    }
     if (result?.blocked === true) {
         return safeToolResult('failed', [], 'This original QQ message already had an uncertain command result; no further commands were run.');
     }
@@ -1108,6 +1354,8 @@ export function registerOnebotCommandTool(ctx, options = {}) {
         config,
         options: { ...options },
         readyBackends: new Set(),
+        logCaptureBackends: new Set(),
+        artifactBackends: new Set(),
         adminBackends: new Set(),
         groupRoleBackends: new Set(),
         registered: false,
@@ -1152,7 +1400,10 @@ export function registerOnebotCommandTool(ctx, options = {}) {
         return Object.freeze({
             enabled: false,
             ready: Promise.resolve(false),
-            async execute() { return safeToolResult('failed', [], 'The optional OneBot service is disabled.'); },
+            async execute(args) {
+                if (inspectSeaDiceCommand(args?.command)?.kind === 'log') return logCommandFailureResult('log_disabled');
+                return safeToolResult('failed', [], 'The optional OneBot service is disabled.');
+            },
             stop() {},
             diagnostics,
         });
@@ -1164,7 +1415,12 @@ export function registerOnebotCommandTool(ctx, options = {}) {
         return Object.freeze({
             enabled: false,
             ready: Promise.resolve(false),
-            async execute() { return safeToolResult('failed', [], 'The OneBot tool service is unavailable.'); },
+            async execute(args) {
+                if (inspectSeaDiceCommand(args?.command)?.kind === 'log') {
+                    return logCommandFailureResult(config.logEnabled ? 'log_capability_unsupported' : 'log_disabled');
+                }
+                return safeToolResult('failed', [], 'The OneBot tool service is unavailable.');
+            },
             stop() {},
             diagnostics,
         });
@@ -1172,6 +1428,11 @@ export function registerOnebotCommandTool(ctx, options = {}) {
     runtime.options.appId = options.appId ?? '';
     runtime.options.hiddenEnabled = config.hiddenEnabled;
     runtime.options.fetchImpl = runtime.fetchImpl;
+    runtime.logCapture = options.logCapture ?? createOnebotLogCapture({
+        config: { ...config, logEnabled: config.logEnabled === true },
+        appId: runtime.options.appId,
+        options: { logger: options.logger, ...options.logCaptureOptions },
+    });
     if (config.hiddenEnabled) {
         const injectedTestSender = options.testOnlyProactiveC2C === true
             && typeof options.resolveHiddenRecipient === 'function'
@@ -1197,11 +1458,17 @@ export function registerOnebotCommandTool(ctx, options = {}) {
     catch (error) {
         logToolFailure(ONEBOT_COMMAND_TOOL, 'registration', error);
         updateAvailability(false, 'session-init-failed', 0);
+        void runtime.logCapture.stop();
         runtime.detachFriendEvents?.();
         return Object.freeze({
             enabled: true,
             ready: Promise.resolve(false),
-            async execute() { return safeToolResult('failed', [], 'The OneBot service could not be initialized.'); },
+            async execute(args) {
+                if (inspectSeaDiceCommand(args?.command)?.kind === 'log') {
+                    return logCommandFailureResult(config.logEnabled ? 'log_capability_unsupported' : 'log_disabled');
+                }
+                return safeToolResult('failed', [], 'The OneBot service could not be initialized.');
+            },
             stop() {},
             diagnostics,
         });
@@ -1222,7 +1489,20 @@ export function registerOnebotCommandTool(ctx, options = {}) {
                                 outputs: { type: 'array', items: { type: 'string' } },
                                 notice: { type: 'string' },
                                 privateDelivery: { type: 'string', enum: ['sent', 'failed', 'unknown'] },
-                                failureReason: { type: 'string', enum: ['queue_full', 'backend_not_ready', 'expired', 'uncertain', 'timeout', 'privacy_withheld', 'hidden_disabled', 'private_unavailable', 'backend_rejected', 'permission_denied', 'group_state_private', 'group_role_unknown', 'group_role_denied', 'group_role_unsupported', 'group_state_source_mismatch'] },
+                                failureReason: { type: 'string', enum: ['queue_full', 'backend_not_ready', 'expired', 'uncertain', 'timeout', 'privacy_withheld', 'hidden_disabled', 'private_unavailable', 'backend_rejected', 'permission_denied', 'group_state_private', 'group_role_unknown', 'group_role_denied', 'group_role_unsupported', 'group_state_source_mismatch', 'log_disabled', 'log_capability_unsupported', 'log_group_only', 'log_exact_source_required', 'log_role_denied', 'log_role_unknown', 'log_role_unsupported', 'log_capture_order_unavailable', 'artifact_capability_unsupported', 'artifact_receipt_invalid', 'artifact_delivery_failed', 'artifact_delivery_unknown', 'artifact_delivery_timeout', 'artifact_delivery_expired'] },
+                                artifactDelivery: {
+                                    type: 'array',
+                                    items: {
+                                        type: 'object',
+                                        properties: {
+                                            receipt: { type: 'string' }, filename: { type: 'string' },
+                                            status: { type: 'string', enum: ['sent', 'failed', 'unknown', 'expired', 'timeout'] },
+                                            acknowledged: { type: 'boolean' },
+                                        },
+                                        required: ['receipt', 'filename', 'status'],
+                                        additionalProperties: false,
+                                    },
+                                },
                             },
                             required: ['status', 'outputs'],
                             additionalProperties: false,
@@ -1230,7 +1510,7 @@ export function registerOnebotCommandTool(ctx, options = {}) {
                         render: (_args, result) => [{ type: 'text', text: JSON.stringify(result) }],
                     },
                     async execute(args, exec) { return runtime.execute(args, exec); },
-                    timeoutMs: 60_000,
+                    timeoutMs: 150_000,
                 });
                 runtime.registered = true;
             }
@@ -1257,6 +1537,16 @@ export function registerOnebotCommandTool(ctx, options = {}) {
                 ]);
                 if (runtime.stopped) return false;
                 runtime.lastProbeErrorKey = undefined;
+                const listedBackends = Array.isArray(result?.backends) ? result.backends : [];
+                runtime.logCaptureBackends = new Set(listedBackends
+                    .filter((backend) => backend && backend.version === 1 && config.backendIds.includes(backend.id)
+                        && Array.isArray(backend.capabilities) && backend.capabilities.includes('log-capture-v1'))
+                    .map((backend) => backend.id));
+                runtime.artifactBackends = new Set(listedBackends
+                    .filter((backend) => backend && backend.version === 1 && config.backendIds.includes(backend.id)
+                        && Array.isArray(backend.capabilities) && backend.capabilities.includes('artifact-v1'))
+                    .map((backend) => backend.id));
+                runtime.logCapture.setBackends(listedBackends);
                 const readyIds = new Set((Array.isArray(result?.backends) ? result.backends : [])
                     .filter((backend) => backend && backend.version === 1 && config.backendIds.includes(backend.id) && backend.ready === true)
                     .map((backend) => backend.id));
@@ -1277,6 +1567,7 @@ export function registerOnebotCommandTool(ctx, options = {}) {
             }
             catch (error) {
                 if (runtime.stopped) return false;
+                runtime.logCapture.setUnavailable();
                 runtime.readyBackends = new Set();
                 runtime.adminBackends.clear();
                 runtime.groupRoleBackends.clear();
@@ -1299,12 +1590,25 @@ export function registerOnebotCommandTool(ctx, options = {}) {
         clearInterval(runtime.timer);
         runtime.refreshController.abort(new Error('OneBot service is stopping.'));
         runtime.readyBackends.clear();
+        runtime.logCapture.setUnavailable();
         runtime.adminBackends.clear();
         runtime.groupRoleBackends.clear();
         availability(false, 'stopped');
         runtime.detachFriendEvents?.();
         await runtime.refreshTask?.catch(() => {});
+        await runtime.logCapture.stop();
         return await runtime.options.friendRegistry?.flush?.();
     };
-    return Object.freeze({ enabled: true, ready, refresh, stop, diagnostics, execute: runtime.execute, runtime });
+    return Object.freeze({
+        enabled: true,
+        ready,
+        refresh,
+        stop,
+        diagnostics,
+        execute: runtime.execute,
+        runtime,
+        captureRaw(ctx) { return runtime.logCapture.captureRaw(ctx); },
+        observeBotDelivery(event) { return runtime.logCapture.recordBotDelivery(event); },
+        observeGenerationDelivery(event) { return runtime.logCapture.recordBotDelivery(event); },
+    });
 }

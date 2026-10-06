@@ -12,7 +12,23 @@ import {
 let descriptor;
 const appId = '123456789';
 const context = { get: (name) => name === 'tools' ? { register(tool) { descriptor = tool; } } : undefined };
-const controller = registerOnebotCommandTool(context, { appId });
+const deliveredLogFiles = [];
+const controller = registerOnebotCommandTool(context, {
+    appId,
+    logCaptureOptions: { filePath: '/tmp/qqbot-wrapper-log-pending.json' },
+    async sendArtifactFile(request, bytes, filename, mediaType, signal) {
+        assert.equal(request.replyTarget.scope, 'group');
+        assert.equal(request.replyTarget.targetId, 'fixtureWrapperLog');
+        assert.equal(request.isActive('artifact'), true);
+        assert.equal(signal.aborted, false);
+        assert.equal(mediaType, 'text/markdown');
+        assert.ok(filename.endsWith('.md'));
+        const body = bytes.toString('utf8');
+        assert.ok(body.includes('原生桥接完整导出测试'));
+        deliveredLogFiles.push({ filename, size: bytes.length });
+        return { sent: true };
+    },
+});
 const summary = [];
 const groupOriginal = (ownerId, group, text, role = 'member') => {
     const message = { kind: 'group', senderId: ownerId, groupOpenid: group,
@@ -113,6 +129,35 @@ try {
                 backend: 'sealdice', command }, { agent });
         } finally { await endOnebotTurn(agent, scope); }
     };
+    if (process.env.QQBOT_ONEBOT_LOG_ENABLED === 'true') {
+        const logGroup = 'fixtureWrapperLog';
+        assert.equal((await freshCommand('fixtureLogOwner', '.log new wrapper', { group: logGroup, role: 'owner' })).status, 'ok');
+        const timestamp = new Date().toISOString();
+        const captured = await controller.captureRaw({ message: {
+            kind: 'group', groupOpenid: logGroup, senderId: 'fixtureLogMember',
+            messageId: 'wrapper-raw-log-id', timestamp,
+            content: 'SDK history must not enter exported data',
+            raw: { id: 'wrapper-raw-log-id', timestamp, group_openid: logGroup,
+                author: { member_openid: 'fixtureLogMember', username: '测试玩家' },
+                content: '原生桥接完整导出测试' },
+        } });
+        assert.equal(captured, true);
+        const logAgent = {};
+        const logScope = beginOnebotTurn(logAgent,
+            [groupOriginal('fixtureLogMember', logGroup, '.log export wrapper')], { appId });
+        try {
+            const args = { requestId: onebotRequestMetadata(logScope)[0].requestId,
+                backend: 'sealdice', command: '.log export wrapper' };
+            const first = await descriptor.execute(args, { agent: logAgent });
+            assert.equal(first.status, 'ok');
+            assert.equal(first.artifactDelivery[0].status, 'sent');
+            assert.equal(JSON.stringify(first).includes('原生桥接完整导出测试'), false);
+            assert.deepEqual(await descriptor.execute(args, { agent: logAgent }), first);
+            assert.equal(deliveredLogFiles.length, 1, 'same original export resent a claimed file');
+        } finally { await endOnebotTurn(logAgent, logScope); }
+        assert.equal((await freshCommand('fixtureLogOwner', '.log halt', { group: logGroup, role: 'owner' })).status, 'ok');
+        summary.push({ check: 'production-log-capture-real-mcp-artifact-claim-qq-ack-and-dedup' });
+    }
     assert.ok(controller.runtime.adminBackends.has('sealdice'), 'real Master ACL was not negotiated');
     for (const command of ['.master list', '.master backup']) {
         const result = await freshCommand('fixtureMaster', command);

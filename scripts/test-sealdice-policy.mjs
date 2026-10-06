@@ -16,7 +16,11 @@ test('shared tool and direct policy agrees on permitted commands, aliases and pe
         assert.equal(validateOnebotCommand(command), true, command);
         assert.deepEqual(matchOnebotDirectCommand(command), { command: inspectSeaDiceCommand(command).command }, command);
     }
-    for (const command of denied) assert.equal(validateOnebotCommand(command), false, command);
+    for (const command of denied) {
+        // `.log` became a first-class native command in the accepted logging contract.
+        if (command.startsWith('.log ')) continue;
+        assert.equal(validateOnebotCommand(command), false, command);
+    }
     for (const command of ['.random', '.rdata', '.pcshow', '.scskill', '解释 .r 1d1']) assert.equal(matchOnebotDirectCommand(command), undefined);
     for (const command of ['.rhD100', '.rxh 1d1', '.rah 侦查', '.drlh']) assert.deepEqual(matchOnebotDirectCommand(command), { issue: 'hidden_disabled' });
 });
@@ -27,6 +31,25 @@ test('only exact supported .set rule choices are classified as group state write
     }
     for (const command of ['.set info', '.set 100', '.set scripts', '.setcoc', '.setcoc details', '.pc create Alice']) {
         assert.notEqual(inspectSeaDiceCommand(command)?.groupStateWrite, true, command);
+    }
+});
+
+test('shared SeaDice policy accepts only exact group log commands and protects log mutations', () => {
+    for (const command of ['.log new', '.log new 第一幕', '.log on', '.log on 第一幕', '.log off', '.log halt', '.log end', '.log list',
+        '.log stat', '.log stat 第一幕', '.log get', '.log get 第一幕', '.log get --format=txt', '.log get 第一幕 --format=txt',
+        '.log export', '.log export 第一幕', '.log export --format=txt', '.log export 第一幕 --format=txt', '.log del 第一幕']) {
+        const policy = inspectSeaDiceCommand(command);
+        assert.equal(policy?.allowed, true, command);
+        assert.equal(policy?.kind, 'log');
+        assert.equal(policy?.groupOnly, true);
+        assert.equal(policy?.requiresExactOriginal, true);
+        assert.equal(policy?.groupStateWrite, ['new', 'on', 'off', 'halt', 'end', 'del'].includes(policy?.command.split(' ')[1]));
+        assert.deepEqual(matchOnebotDirectCommand(command), { command: policy.command }, command);
+    }
+    for (const command of ['.log', '.log new two words', '.log on --format=txt', '.log get --format=md', '.log export --format=html',
+        '.log list --format=txt', '.log get other-group --group=abc', '.log export --format=txt 第一幕', '.log del', '.log del a@b',
+        '解释 .log export']) {
+        assert.equal(validateOnebotCommand(command), false, command);
     }
 });
 

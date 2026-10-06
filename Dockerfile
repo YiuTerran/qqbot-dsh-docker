@@ -13,7 +13,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # The profile build needs TLS roots but none of the process-supervision or
 # sandbox packages. Keeping package-manager caches in this disposable stage
 # prevents their downloaded tarballs from becoming part of the runtime image.
-RUN apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
+RUN sed -i 's|http://deb.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g; s|http://deb.debian.org/debian|http://mirrors.aliyun.com/debian|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
     && apt-get install --yes --no-install-recommends \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -55,7 +56,8 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # Runtime-only OS packages. git is kept for agent workspace inspection, tini
 # remains PID 1, and util-linux provides setpriv for dropping to node.
-RUN apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
+RUN sed -i 's|http://deb.debian.org/debian-security|http://mirrors.aliyun.com/debian-security|g; s|http://deb.debian.org/debian|http://mirrors.aliyun.com/debian|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update \
     && apt-get install --yes --no-install-recommends \
         ca-certificates \
         bubblewrap \
@@ -94,6 +96,7 @@ COPY defaults/AGENTS.md /opt/qqbot-defaults/AGENTS.md
 COPY defaults/cordis.safety.patch.yml /opt/qqbot-defaults/cordis.safety.patch.yml
 COPY defaults/qqbot-chat-policy.mjs /opt/qqbot-defaults/qqbot-chat-policy.mjs
 COPY defaults/qqbot-onebot.mjs /opt/qqbot-defaults/qqbot-onebot.mjs
+COPY defaults/qqbot-onebot-log.mjs /opt/qqbot-defaults/qqbot-onebot-log.mjs
 COPY defaults/qqbot-onebot-scope.mjs /opt/qqbot-defaults/qqbot-onebot-scope.mjs
 COPY defaults/qqbot-onebot-direct.mjs /opt/qqbot-defaults/qqbot-onebot-direct.mjs
 COPY defaults/qqbot-sealdice-policy.mjs /opt/qqbot-defaults/qqbot-sealdice-policy.mjs

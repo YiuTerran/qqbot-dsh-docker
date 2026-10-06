@@ -1,5 +1,6 @@
 const QQ_API_BASE = 'https://api.sgroup.qq.com';
 const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_ARTIFACT_BYTES = 10 * 1024 * 1024;
 const MAX_MARKDOWN_BYTES = 128 * 1024;
 const MAX_QQ_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_QQ_REQUEST_BYTES = 15 * 1024 * 1024;
@@ -36,6 +37,16 @@ function targetPath(target, resource) {
 function validMarkdownFilename(value) {
     return typeof value === 'string' && Array.from(value).length <= 120 &&
         /^[\p{L}\p{N}._ -][\p{L}\p{N}._ -]{0,116}\.md$/u.test(value);
+}
+
+function validArtifactFilename(value) {
+    return typeof value === 'string' && Array.from(value).length <= 120 &&
+        /^[\p{L}\p{N}._ -][\p{L}\p{N}._ -]{0,115}\.(?:md|txt)$/u.test(value);
+}
+
+function artifactMimeMatches(filename, mediaType) {
+    return (filename.endsWith('.md') && mediaType === 'text/markdown')
+        || (filename.endsWith('.txt') && mediaType === 'text/plain');
 }
 
 function isActive(request, target, kind, signal) {
@@ -78,7 +89,7 @@ function validateUploadBody(body, fileType) {
         return false;
     }
     if (fileType === 1 && Object.hasOwn(body, 'file_name')) return false;
-    if (fileType === 4 && !validMarkdownFilename(body.file_name)) {
+    if (fileType === 4 && !validArtifactFilename(body.file_name)) {
         return false;
     }
     return /^[A-Za-z0-9+/]*={0,2}$/u.test(body.file_data);
@@ -218,6 +229,7 @@ export function createGenerationSender({
     fetchImpl = globalThis.fetch,
     readResponse = readBoundedResponse,
     logger,
+    onDelivery,
 } = {}) {
     const MediaApi = sdk?.MediaApi;
     const MessageApi = sdk?.MessageApi;
@@ -232,6 +244,22 @@ export function createGenerationSender({
             logger?.warn?.('[generation:sender] QQ delivery failed; retry disabled.');
         }
         catch { /* diagnostics must not affect delivery cleanup */ }
+    }
+
+    function emitDelivery(target, kind, status, messageId, expectedRawContent) {
+        if (typeof onDelivery !== 'function') return;
+        const mediaType = expectedRawContent !== undefined ? 'text'
+            : kind === 'image' ? 'image' : kind === 'markdown' || kind === 'artifact' ? 'file' : undefined;
+        try {
+            Promise.resolve(onDelivery({
+                target: { scope: target.scope, targetId: target.targetId },
+                status,
+                ...(typeof messageId === 'string' ? { messageId } : {}),
+                ...(mediaType === 'text' ? { text: expectedRawContent } : {}),
+                ...(mediaType === 'image' ? { mediaType: 'image' } : mediaType === 'file' ? { mediaType: 'file' } : {}),
+            })).catch(() => {});
+        }
+        catch { /* delivery diagnostics do not change the QQ result */ }
     }
 
     function makeShim(request, target, kind, signal, expectedRawContent) {
@@ -284,8 +312,11 @@ export function createGenerationSender({
                 const requestSignal = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
                 let response;
                 let completed = false;
+                let finalMessageRequestStarted = false;
+                let finalMessageAcknowledged = false;
                 try {
                     try {
+                        if (!upload) finalMessageRequestStarted = true;
                         response = await fetchImpl(`${QQ_API_BASE}${path}`, {
                             method: 'POST',
                             headers: {
@@ -302,7 +333,9 @@ export function createGenerationSender({
                     catch {
                         // A failed message POST may have reached QQ. Never replay
                         // it as text when the transport cannot prove the outcome.
-                        throw senderError(upload ? 'failed' : 'unknown');
+                        throw senderError(upload
+                            ? (kind === 'artifact' && controller.signal.aborted && !signal?.aborted ? 'timeout' : 'failed')
+                            : 'unknown');
                     }
                     if (!isActive(request, target, kind, signal)) throw senderError(upload ? 'expired' : 'unknown');
                     if (!response || !Number.isInteger(response.status)) throw senderError(upload ? 'failed' : 'unknown');
@@ -315,15 +348,24 @@ export function createGenerationSender({
                         parsed = await readResponse(response, MAX_QQ_RESPONSE_BYTES, requestSignal);
                     }
                     catch {
-                        throw senderError(upload ? 'failed' : 'unknown');
+                        throw senderError(upload
+                            ? (kind === 'artifact' && controller.signal.aborted && !signal?.aborted ? 'timeout' : 'failed')
+                            : 'unknown');
                     }
                     if (!validApiAcknowledgement(path, parsed)) {
                         throw senderError(upload || hasApiError(parsed) ? 'failed' : 'unknown');
+                    }
+                    if (!upload) {
+                        finalMessageAcknowledged = true;
+                        emitDelivery(target, kind, 'sent', parsed.id, expectedRawContent);
                     }
                     completed = true;
                     return parsed;
                 }
                 catch (error) {
+                    if (finalMessageRequestStarted && !finalMessageAcknowledged && error?.code === 'unknown') {
+                        emitDelivery(target, kind, 'unknown', undefined, expectedRawContent);
+                    }
                     // The pinned SDK retries upload failures unless its error contains
                     // `Timeout`; use one fixed message for every failure, not just aborts.
                     throw senderError(error?.code ?? (signal?.aborted ? 'cancelled' : 'failed'));
@@ -344,9 +386,13 @@ export function createGenerationSender({
         }
 
         let operationTimer;
+        let operationTimedOut = false;
         const send = async () => {
             const operationController = new AbortController();
-            operationTimer = setTimeout(() => operationController.abort(), OPERATION_TIMEOUT_MS);
+            operationTimer = setTimeout(() => {
+                operationTimedOut = true;
+                operationController.abort();
+            }, OPERATION_TIMEOUT_MS);
             operationTimer.unref?.();
             const operationSignal = signal
                 ? AbortSignal.any([signal, operationController.signal])
@@ -361,6 +407,9 @@ export function createGenerationSender({
                 if (error?.code === 'expired' || error?.code === 'cancelled' || signal?.aborted) {
                     return { sent: false, reason: 'expired' };
                 }
+                if (kind === 'artifact' && (error?.code === 'timeout' || operationTimedOut)) {
+                    return { sent: false, reason: 'timeout' };
+                }
                 logDeliveryFailure();
                 return { sent: false, reason: 'failed' };
             }
@@ -374,7 +423,7 @@ export function createGenerationSender({
         }
         catch {
             logDeliveryFailure();
-            return { sent: false, reason: signal?.aborted ? 'expired' : 'failed' };
+            return { sent: false, reason: signal?.aborted ? 'expired' : kind === 'artifact' && operationTimedOut ? 'timeout' : 'failed' };
         }
     }
 
@@ -453,6 +502,16 @@ export function createGenerationSender({
                 return Promise.resolve({ sent: false, reason: 'failed' });
             }
             return sendUpload(request, buffer, filename, 4, 'markdown', signal);
+        },
+
+        sendArtifactFile(request, buffer, filename, mediaType, signal) {
+            if (!Buffer.isBuffer(buffer) || buffer.length < 1 || buffer.length > MAX_ARTIFACT_BYTES
+                || !validArtifactFilename(filename) || !artifactMimeMatches(filename, mediaType)) {
+                return Promise.resolve({ sent: false, reason: 'failed' });
+            }
+            try { new TextDecoder('utf-8', { fatal: true }).decode(buffer); }
+            catch { return Promise.resolve({ sent: false, reason: 'failed' }); }
+            return sendUpload(request, buffer, filename, 4, 'artifact', signal);
         },
 
         sendMarkdownFallback(request, content, signal) {

@@ -32,6 +32,66 @@ await edit('middleware/question-answer.js', (source) => {
 
 if (!thinkingOnly) {
     await edit('gateway/bootstrap.js', (source) => {
+        source = replaceOnce(source,
+            "import { attachOnebotDeliveryObserver } from '/opt/qqbot-defaults/qqbot-onebot-log.mjs';\n",
+            '', 'log delivery observer import');
+        source = replaceOnce(source,
+            '    let onebotService;\n    let generationSender;\n    let detachOnebotDeliveryObserver;\n    const replyLimiter = new ReplyLimiter({ limit: 4 });',
+            '    const replyLimiter = new ReplyLimiter({ limit: 4 });', 'log delivery declarations');
+        source = replaceOnce(source, '    // Chat-only QQ delivery logging v1.\n', '', 'log delivery marker');
+        source = replaceOnce(source, [
+            '    generationSender = createGenerationSender({',
+            '        bot,',
+            '        replyLimiter,',
+            '        sdk: { MediaApi, MessageApi },',
+            '        credentials: { appId: config.appId, clientSecret: config.appSecret },',
+            '        sendResolvedMarkdown,',
+            '        logger,',
+            '        onDelivery: (event) => onebotService?.observeGenerationDelivery(event),',
+            '    });',
+            '    registerGenerationTools(ctx, {',
+            '        sender: generationSender,',
+        ].join('\n'), [
+            '    registerGenerationTools(ctx, {',
+            '        sender: createGenerationSender({',
+            '            bot,',
+            '            replyLimiter,',
+            '            sdk: { MediaApi, MessageApi },',
+            '            credentials: { appId: config.appId, clientSecret: config.appSecret },',
+            '            sendResolvedMarkdown,',
+            '            logger,',
+            '        }),',
+        ].join('\n'), 'generation sender binding');
+        source = replaceOnce(source,
+            '    onebotService = registerOnebotCommandTool(ctx, {',
+            '    const onebotService = registerOnebotCommandTool(ctx, {', 'OneBot service declaration');
+        source = replaceOnce(source,
+            '        sendArtifactFile: (...args) => generationSender?.sendArtifactFile?.(...args),\n',
+            '', 'artifact sender binding');
+        source = replaceOnce(source,
+            '    detachOnebotDeliveryObserver = attachOnebotDeliveryObserver(bot, onebotService);\n',
+            '', 'log delivery attachment');
+        source = replaceOnce(source,
+            '    setupMiddlewares(bot, config, manager, logger, sender, directRouter, onebotService);',
+            '    setupMiddlewares(bot, config, manager, logger, sender, directRouter);', 'log capture service binding');
+        return replaceOnce(source,
+            '            detachOnebotDeliveryObserver();\n', '', 'log observer shutdown');
+    });
+    await edit('gateway/middleware-setup.js', (source) => {
+        source = replaceOnce(source,
+            "import { createOnebotLogCaptureMiddleware } from '/opt/qqbot-defaults/qqbot-onebot-log.mjs';\n",
+            '', 'log capture import');
+        source = replaceOnce(source,
+            'export function setupMiddlewares(bot, config, manager, logger, sender, directRouter, onebotService) {',
+            'export function setupMiddlewares(bot, config, manager, logger, sender, directRouter) {', 'log capture signature');
+        return replaceOnce(source,
+            '    // Chat-only OneBot log capture after access policy v1.\n    bot.use(createOnebotLogCaptureMiddleware(onebotService));\n',
+            '', 'log capture middleware');
+    });
+}
+
+if (!thinkingOnly) {
+    await edit('gateway/bootstrap.js', (source) => {
         const directImport = "import { createOnebotDirectRouter } from '/opt/qqbot-defaults/qqbot-onebot-direct.mjs';\n";
         const directBlock = [
             '    // Chat-only native OneBot command v1.',

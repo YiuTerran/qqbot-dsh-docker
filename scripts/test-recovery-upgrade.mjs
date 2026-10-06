@@ -49,7 +49,10 @@ async function assertCurrentPatch(root) {
     const expected = {
         'gateway/bootstrap.js': [
             '// Chat-only merge batch reply adapter v1.',
-            'setupMiddlewares(bot, config, manager, logger, sender, directRouter);',
+            'setupMiddlewares(bot, config, manager, logger, sender, directRouter, onebotService);',
+            "import { attachOnebotDeliveryObserver } from '/opt/qqbot-defaults/qqbot-onebot-log.mjs';",
+            'detachOnebotDeliveryObserver = attachOnebotDeliveryObserver(bot, onebotService);',
+            'detachOnebotDeliveryObserver();',
             "import { createOnebotDirectRouter } from '/opt/qqbot-defaults/qqbot-onebot-direct.mjs';",
             '// Chat-only native OneBot command v1.',
             '// Chat-only native OneBot direct router v1.',
@@ -59,7 +62,9 @@ async function assertCurrentPatch(root) {
             'await onebotService.stop();',
         ],
         'gateway/middleware-setup.js': [
-            'export function setupMiddlewares(bot, config, manager, logger, sender, directRouter) {',
+            'export function setupMiddlewares(bot, config, manager, logger, sender, directRouter, onebotService) {',
+            '// Chat-only OneBot log capture after access policy v1.',
+            'bot.use(createOnebotLogCaptureMiddleware(onebotService));',
             '// Chat-only OneBot /new cancellation v1.',
             "if (ctx.message.content?.trim() === '/new') await directRouter?.cancelConversation(ctx);",
             '// Chat-only OneBot direct router middleware v1.',
@@ -158,10 +163,10 @@ async function assertCurrentPatch(root) {
         'obsolete request body without OneBot provenance is absent');
     assert.equal(inbound.split("const requestBody = [documentBody, deferredImagePromptMetadata, generationMetadata, onebotMetadata, onebotFallbackMetadata].filter(Boolean).join('\\n\\n');").length - 1, 1,
         'the availability-gated request body includes OneBot provenance exactly once');
-    const servicePosition = bootstrap.indexOf('const onebotService = registerOnebotCommandTool(ctx, {');
+    const servicePosition = bootstrap.indexOf('onebotService = registerOnebotCommandTool(ctx, {');
     const senderPosition = bootstrap.indexOf('const sender = {');
     const routerPosition = bootstrap.indexOf('const directRouter = createOnebotDirectRouter({');
-    const setupPosition = bootstrap.indexOf('setupMiddlewares(bot, config, manager, logger, sender, directRouter);');
+    const setupPosition = bootstrap.indexOf('setupMiddlewares(bot, config, manager, logger, sender, directRouter, onebotService);');
     assert.ok(senderPosition < servicePosition && servicePosition < routerPosition && routerPosition < setupPosition,
         'the service and sender exist before the direct router is passed to middleware setup');
     assert.ok(bootstrap.indexOf('await directRouter.stop();') < bootstrap.indexOf('await onebotService.stop();'),

@@ -297,6 +297,11 @@
       Use the image tool receipt for confirmed sending, failure, timeout or
       unknown delivery; do not invent outcomes, inspect paths or retry the
       operation. QQ sending confirmation does not prove user receipt or reading.
+      Optional OneBot log commands must exactly match the current original
+      group message. Recording state changes require its owner/admin role;
+      ordinary members may query/export only that group. Log artifacts are
+      delivered internally, never read by model tools or exposed as paths.
+      Respect delivery receipts and never retry unknown file delivery.
       Use the structured Markdown receipt to distinguish confirmed attachment
       delivery, text fallback, truncation and unknown delivery. Do not retry an
       unknown delivery or inspect paths to verify an acknowledged operation.

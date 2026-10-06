@@ -126,6 +126,7 @@ function makeSdkHarness({
     limit = true,
     afterUpload,
     ordinaryQueue,
+    onDelivery,
 } = {}) {
     const requests = [];
     const limiterEvents = [];
@@ -202,6 +203,7 @@ function makeSdkHarness({
             requests.push({ url: String(url), ...options });
             return transport(url, options);
         },
+        onDelivery,
     });
     const request = {
         replyTarget: { scope: 'group', targetId: 'group-original', msgId: 'msg-original' },
@@ -697,6 +699,54 @@ test('QQ sender accepts safe Unicode Markdown filenames and sends file type 4 wi
     assert.equal(upload.file_name, ' 周报 2026.md');
     assert.equal(upload.srv_send_msg, false);
     assert.equal(harness.requests[0].url, 'https://api.sgroup.qq.com/v2/groups/group-original/files');
+});
+
+test('QQ artifact sender validates UTF-8 and type, then reports only the final message ACK', async () => {
+    const deliveries = [];
+    const harness = makeSdkHarness({ onDelivery: (event) => deliveries.push(event) });
+    const bytes = Buffer.from('会话记录\n', 'utf8');
+    assert.deepEqual(await harness.sender.sendArtifactFile(
+        harness.request, bytes, '会话记录.txt', 'text/plain', new AbortController().signal,
+    ), { sent: true });
+    assert.equal(harness.requests.length, 2);
+    assert.deepEqual(JSON.parse(harness.requests[0].body).file_name, '会话记录.txt');
+    assert.deepEqual(deliveries, [{
+        target: { scope: 'group', targetId: 'group-original' },
+        status: 'sent', messageId: 'fixture-ack-id', mediaType: 'file',
+    }]);
+
+    for (const [content, filename, mime] of [
+        [bytes, '../escape.txt', 'text/plain'],
+        [bytes, 'record.md', 'text/plain'],
+        [Buffer.from([0xff]), 'record.txt', 'text/plain'],
+        [Buffer.alloc(10 * 1024 * 1024 + 1), 'record.txt', 'text/plain'],
+    ]) {
+        assert.deepEqual(await harness.sender.sendArtifactFile(
+            harness.request, content, filename, mime, new AbortController().signal,
+        ), { sent: false, reason: 'failed' });
+    }
+    assert.equal(harness.requests.length, 2, 'invalid artifacts cannot reach QQ');
+});
+
+test('QQ artifact final message uncertainty reports a gap signal without retry or fallback', async () => {
+    const deliveries = [];
+    const harness = makeSdkHarness({
+        onDelivery: (event) => deliveries.push(event),
+        fetchImpl: async (url) => {
+            if (new URL(String(url)).pathname.endsWith('/files')) {
+                return new Response(JSON.stringify({ file_info: 'fixture-file-info' }), { status: 200 });
+            }
+            throw new Error('message POST outcome unknown');
+        },
+    });
+    const result = await harness.sender.sendArtifactFile(
+        harness.request, Buffer.from('record'), 'record.txt', 'text/plain', new AbortController().signal,
+    );
+    assert.deepEqual(result, { sent: false, reason: 'unknown' });
+    assert.equal(harness.requests.length, 2);
+    assert.deepEqual(deliveries, [{
+        target: { scope: 'group', targetId: 'group-original' }, status: 'unknown', mediaType: 'file',
+    }]);
 });
 
 test('QQ sender refuses fallback when the original reply slot is unavailable and never targets another id', async () => {

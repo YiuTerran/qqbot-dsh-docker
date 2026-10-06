@@ -12,6 +12,8 @@ const DIRECT_FALLBACK_REASONS = new Set([
     'privacy_withheld', 'hidden_disabled', 'private_unavailable', 'permission_denied',
     'group_state_private', 'group_role_unknown', 'group_role_denied', 'group_role_unsupported',
     'group_state_source_mismatch',
+    'log_disabled', 'log_capability_unsupported', 'log_group_only', 'log_exact_source_required',
+    'log_role_denied', 'log_role_unknown', 'log_role_unsupported', 'log_capture_order_unavailable',
 ]);
 
 function validWeakKey(value) {

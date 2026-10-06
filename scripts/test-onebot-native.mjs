@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -43,8 +44,9 @@ const {
 } = scopeModule;
 
 const appId = '123456789';
-const config = (hiddenEnabled = false, masterUsers = []) => ({
+const config = (hiddenEnabled = false, masterUsers = [], logEnabled = false) => ({
     enabled: true,
+    logEnabled,
     hiddenEnabled,
     url: new URL('http://onebot.test/mcp'),
     backendIds: Object.freeze(['sealdice']),
@@ -73,7 +75,7 @@ function deferred() {
 
 function setup({ hidden = false, resultForCall, friendRegistry, testSender = false, sendPrivateText, backendCapabilities = [], masterUsers = [],
     resolveHiddenRecipient, verifyProactiveEligibility, session, fetchImpl, bot, registerError,
-    onAvailability, logger } = {}) {
+    onAvailability, logger, logEnabled = false, logCapture, sendArtifactFile } = {}) {
     let descriptor;
     const registrations = [];
     const ctx = { get: (name) => name === 'tools' ? { register(tool) {
@@ -101,13 +103,15 @@ function setup({ hidden = false, resultForCall, friendRegistry, testSender = fal
     };
     const service = registerOnebotCommandTool(ctx, {
         appId,
-        config: config(hidden, masterUsers),
+        config: config(hidden, masterUsers, logEnabled),
         session: mockSession,
         fetchImpl: fetchImpl ?? fallbackFetch,
         friendRegistry,
         resolveHiddenRecipient,
         verifyProactiveEligibility,
         sendPrivateText,
+        logCapture,
+        sendArtifactFile,
         testOnlyProactiveC2C: testSender,
         bot,
         logger,
@@ -150,6 +154,100 @@ function boundExec(originals = [groupOriginal()]) {
     bindOnebotExecution(exec);
     return { agent, scope, exec, metadata: onebotRequestMetadata(scope) };
 }
+
+test('native log export claims and sends one validated artifact, then reuses the cached result', async () => {
+    const bytes = Buffer.from('# Current group session\n', 'utf8');
+    const receipt = {
+        receipt: 'receipt-1', filename: 'session.md', media_type: 'text/markdown',
+        size: bytes.length, sha256: createHash('sha256').update(bytes).digest('hex'),
+    };
+    const network = [];
+    const sent = [];
+    const logCapture = {
+        enabled: true, setBackends() {}, setUnavailable() {}, stop() {},
+        async barrier() { return true; },
+    };
+    const service = setup({
+        logEnabled: true, logCapture,
+        backendCapabilities: ['log-capture-v1', 'artifact-v1', 'group-role-v1'],
+        resultForCall(args) {
+            return { content: [{ type: 'text', text: JSON.stringify({
+                request_id: args.request_id, backend_id: args.backend_id,
+                audience: 'group', status: 'ok', outputs: [], artifact_receipts: [receipt],
+            }) }] };
+        },
+        async fetchImpl(url, init) {
+            const path = new URL(String(url)).pathname;
+            network.push([path, init?.body ? JSON.parse(init.body) : undefined]);
+            if (path === '/internal/backends') return json({ backends: [{
+                id: 'sealdice', ready: true, version: 1,
+                capabilities: ['log-capture-v1', 'artifact-v1', 'group-role-v1'],
+            }] });
+            if (path === '/internal/artifacts/claim') return json({
+                ...receipt, delivery_id: 'delivery-1', bytes_base64: bytes.toString('base64'),
+            });
+            if (path === '/internal/artifacts/ack') return json({ ok: true });
+            throw new Error(`unexpected artifact URL ${path}`);
+        },
+        async sendArtifactFile(request, content, filename, mediaType, signal) {
+            assert.equal(request.isActive('artifact'), true);
+            assert.equal(signal.aborted, false);
+            sent.push({ content: content.toString('utf8'), filename, mediaType, target: request.replyTarget });
+            return { sent: true };
+        },
+    });
+    const { agent, scope, exec, metadata } = boundExec([{
+        ...groupOriginal('member-a', 'group-a', 'owner'), text: '.log export',
+    }]);
+    try {
+        await service.service.ready;
+        const args = { requestId: metadata[0].requestId, backend: 'sealdice', command: '.log export' };
+        const first = await service.descriptor.execute(args, exec);
+        const cached = await service.descriptor.execute(args, exec);
+        assert.equal(first.status, 'ok');
+        assert.deepEqual(first.artifactDelivery, [{
+            receipt: 'receipt-1', filename: 'session.md', status: 'sent', acknowledged: true,
+        }]);
+        assert.deepEqual(cached, first);
+        assert.equal(service.calls, 1);
+        assert.equal(sent.length, 1);
+        assert.equal(sent[0].content, '# Current group session\n');
+        assert.equal(sent[0].target.targetId, 'group-a');
+        assert.equal(network.filter(([path]) => path === '/internal/artifacts/claim').length, 1);
+        const ack = network.find(([path]) => path === '/internal/artifacts/ack')?.[1];
+        assert.equal(ack.status, 'sent');
+        assert.equal(ack.group_key, `${appId}:group-a`);
+    }
+    finally { await endOnebotTurn(agent, scope); await service.service.stop(); }
+});
+
+test('native log commands require the same case-sensitive original command, not prose', async () => {
+    const service = setup({
+        logEnabled: true,
+        backendCapabilities: ['log-capture-v1'],
+        logCapture: { enabled: true, setBackends() {}, setUnavailable() {}, stop() {}, async barrier() { return true; } },
+    });
+    try {
+        await service.service.ready;
+        for (const [original, command] of [
+            ['.log get Alpha', '.log get alpha'],
+            ['请解释.log get Alpha', '.log get Alpha'],
+        ]) {
+            const { agent, scope, exec, metadata } = boundExec([{
+                ...groupOriginal('member-a', 'group-a', 'member'), text: original,
+            }]);
+            try {
+                const result = await service.descriptor.execute({
+                    requestId: metadata[0].requestId, backend: 'sealdice', command,
+                }, exec);
+                assert.equal(result.failureReason, 'log_exact_source_required', original);
+                assert.equal(service.calls, 0, 'no backend call for a changed or invented command');
+            }
+            finally { await endOnebotTurn(agent, scope); }
+        }
+    }
+    finally { await service.service.stop(); }
+});
 
 test('disabled registration makes no requests and produces no request metadata', async () => {
     let requests = 0;

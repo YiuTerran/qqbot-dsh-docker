@@ -130,6 +130,35 @@ test('merge guard waits for each survivor and preserves FIFO batches without ove
     assert.equal(peak, 1);
 });
 
+test('merged log holds move to the surviving context before non-survivors finish', async () => {
+    const guard = createMergeConcurrencyGuard({ maxQueue: 4, maxProcessingMs: 0 });
+    const firstGate = deferred();
+    const mergedGate = deferred();
+    const released = [];
+    let firstStarted = false;
+    let mergedStarted = false;
+    const downstream = async (ctx) => {
+        if (ctx.message.messageId === 'first') { firstStarted = true; return await firstGate.promise; }
+        mergedStarted = true;
+        assert.deepEqual(ctx.state.qqbotLogHolds.map((hold) => hold.id), ['b', 'c']);
+        await mergedGate.promise;
+        for (const hold of ctx.state.qqbotLogHolds) hold.release();
+    };
+    const first = submit(guard, context(message('first', 'FIRST')), downstream);
+    await waitFor(() => firstStarted, 'first log batch');
+    const b = context(message('b', 'B'), { qqbotLogHolds: [{ id: 'b', release() { released.push('b'); } }] });
+    const c = context(message('c', 'C'), { qqbotLogHolds: [{ id: 'c', release() { released.push('c'); } }] });
+    const runB = submit(guard, b, downstream);
+    const runC = submit(guard, c, downstream);
+    firstGate.resolve();
+    await waitFor(() => mergedStarted, 'merged log batch');
+    assert.deepEqual(c.state.qqbotLogHolds, []);
+    assert.deepEqual(released, []);
+    mergedGate.resolve();
+    await Promise.all([first, runB, runC]);
+    assert.deepEqual(released, ['b', 'c']);
+});
+
 test('queued role snapshots are frozen before merge and cannot inherit a later raw-event edit', async () => {
     const guard = createMergeConcurrencyGuard({ maxQueue: 4, maxProcessingMs: 0 });
     const firstGate = deferred();

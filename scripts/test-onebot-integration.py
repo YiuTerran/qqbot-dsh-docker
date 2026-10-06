@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Real container MCP -> native SeaDice regression. Synthetic identities only."""
 import argparse
+import base64
 import concurrent.futures
+import hashlib
 import json
 import os
 import re
@@ -283,7 +285,7 @@ def main():
         wrapper_probe = str(Path(__file__).resolve().with_name("test-onebot-wrapper.mjs"))
         wrapper_output = docker("run", "--rm", "--network", network, "--entrypoint", "node",
             "--mount", "type=bind,src=" + wrapper_probe + ",dst=/tmp/test-onebot-wrapper.mjs,readonly",
-            "-e", "QQBOT_ONEBOT_ENABLED=true", "-e", "QQBOT_ONEBOT_HIDDEN_ENABLED=false",
+            "-e", "QQBOT_ONEBOT_ENABLED=true", "-e", "QQBOT_ONEBOT_LOG_ENABLED=true", "-e", "QQBOT_ONEBOT_HIDDEN_ENABLED=false",
             "-e", "QQBOT_ONEBOT_BACKENDS=sealdice",
             "-e", 'QQBOT_ONEBOT_MASTER_USERS=["123456789:fixtureMaster"]', "-e", "QQBOT_ONEBOT_MCP_URL=http://gensokyo-mcp:8090/mcp",
             "-e", "QQBOT_ONEBOT_MCP_TOKEN=" + token, "-e", "QQBOT_ONEBOT_INTERNAL_TOKEN=" + private_token,
@@ -330,6 +332,103 @@ def main():
             time.sleep(0.25)
         assert private_command("fixtureRestartBanTarget", ".r 1d1")["status"] == "ok"
         evidence["checks"].append("ban persists and Master can query/remove a target after restart")
+        assert "123456789:fixtureMaster" in text(private_command("fixtureMaster", ".master list")), \
+            "Master list did not expose its configured display identity"
+        assert "虚拟" in text(private_command("fixtureRestartBanTarget", ".userid")), \
+            "userid still misrepresented the internal virtual ID"
+        evidence["checks"].append("virtual identities are explicitly labeled and Master display uses configured identities")
+
+        log_group_key = "123456789:fixtureLogGroup"
+        def log_command(command, role="member", group_key=log_group_key, invocation=None):
+            request_id = invocation or str(uuid.uuid4())
+            reply = client.rpc("tools/call", {"name": "call_ws", "arguments": {
+                "backend_id": "sealdice", "request_id": request_id, "audience": "group",
+                "user_key": "123456789:fixtureLogOwner", "group_key": group_key,
+                "group_role": role, "payload": command}})
+            assert not reply.get("isError"), "log MCP protocol failure"
+            return json.loads(reply["content"][0]["text"])
+
+        def log_event(event_id, message, *, group_key=log_group_key, kind="message", is_bot=False):
+            accepted = client.http("/internal/log/events", {
+                "backend_id": "sealdice", "event_id": event_id, "group_key": group_key,
+                "user_key": "123456789:__qqbot__" if is_bot else "123456789:fixtureLogOwner",
+                "time": int(time.time()), "nickname": "机器人" if is_bot else "测试玩家",
+                "text": message, "kind": kind, "is_bot": is_bot}, token=private_token)
+            assert accepted.get("accepted") is True, "capture was not durably accepted"
+
+        def claim_artifact(result, group_key=log_group_key, expected_format="md"):
+            receipts = result.get("artifact_receipts", [])
+            assert result["status"] == "ok" and len(receipts) == 1, "missing successful artifact metadata"
+            assert "bytes_base64" not in json.dumps(result), "artifact body leaked into MCP response"
+            receipt = receipts[0]
+            body = {"backend_id": "sealdice", "request_id": result["request_id"],
+                    "receipt": receipt["receipt"], "group_key": group_key}
+            wrong = dict(body, group_key="123456789:anotherLogGroup")
+            try:
+                client.http("/internal/artifacts/claim", wrong, token=private_token)
+                raise AssertionError("cross-group artifact claim succeeded")
+            except urllib.error.HTTPError as error:
+                assert error.code in (400, 403, 404), error.code
+            claimed = client.http("/internal/artifacts/claim", body, token=private_token)
+            content = base64.b64decode(claimed["bytes_base64"], validate=True)
+            assert claimed["filename"].endswith("." + expected_format)
+            assert len(content) == claimed["size"] == receipt["size"]
+            assert hashlib.sha256(content).hexdigest() == claimed["sha256"] == receipt["sha256"]
+            assert client.http("/internal/artifacts/ack", {
+                **body, "delivery_id": claimed["delivery_id"], "status": "sent"}, token=private_token)["ok"]
+            try:
+                client.http("/internal/artifacts/claim", body, token=private_token)
+                raise AssertionError("final artifact was claimable twice")
+            except urllib.error.HTTPError as error:
+                assert error.code in (404, 409), error.code
+            return content.decode("utf-8")
+
+        for role in ("member", "unknown"):
+            if role == "unknown":
+                rejected = client.rpc("tools/call", {"name": "call_ws", "arguments": {
+                    "backend_id": "sealdice", "request_id": str(uuid.uuid4()), "audience": "group",
+                    "user_key": "123456789:fixtureLogOwner", "group_key": log_group_key,
+                    "payload": ".log new story"}})
+                denied = json.loads(rejected["content"][0]["text"])
+            else:
+                denied = log_command(".log new story", role=role)
+            assert denied["status"] == "failed" and not denied["outputs"], "unauthorized recording started"
+        assert log_command(".log new story", role="owner")["status"] == "ok"
+        payload = "唯一正文 <script>alert('x')</script>\n第二行 .r 1d1"
+        event_id = str(uuid.uuid4())
+        # The event timestamp is part of the fingerprint, so preserve it on duplicate.
+        captured = {"backend_id": "sealdice", "event_id": event_id, "group_key": log_group_key,
+                    "user_key": "123456789:fixtureLogOwner", "time": int(time.time()),
+                    "nickname": "测试玩家", "text": payload, "kind": "message", "is_bot": False}
+        assert client.http("/internal/log/events", captured, token=private_token)["accepted"]
+        assert client.http("/internal/log/events", captured, token=private_token)["accepted"]
+        log_event(str(uuid.uuid4()), "公开机器人回复", is_bot=True)
+        log_event(str(uuid.uuid4()), "另一个群的内容", group_key="123456789:fixtureOtherGroup")
+        log_event(str(uuid.uuid4()), "采集中断，部分记录未确认。", kind="gap")
+        exported = log_command(".log export story")
+        md = claim_artifact(exported)
+        assert "&lt;script&gt;" in md and "<script>" not in md, "Markdown did not escape message HTML"
+        assert "style=" in md and md.count("唯一正文") == 1 and "公开机器人回复" in md
+        assert "另一个群的内容" not in md and "缺口" in md
+        assert log_command(".log off", role="admin")["status"] == "ok"
+        log_event(str(uuid.uuid4()), "暂停后不应记录")
+        txt = claim_artifact(log_command(".log export story --format=txt"), expected_format="txt")
+        assert payload in txt and "暂停后不应记录" not in txt
+        assert log_command(".log on story", role="admin")["status"] == "ok"
+        docker("restart", "-t", "30", sea)
+        deadline = time.monotonic() + 90
+        while not any(item["ready"] for item in client.http("/internal/backends", token=private_token)["backends"]):
+            assert time.monotonic() < deadline, "recording restart failed to reconnect"
+            time.sleep(0.25)
+        log_event(str(uuid.uuid4()), "重启后的记录")
+        md = claim_artifact(log_command(".log get story"))
+        assert "重启后的记录" in md and md.count("唯一正文") == 1, "recording state/dedup was not persistent"
+        ended = claim_artifact(log_command(".log end", role="owner"))
+        assert "重启后的记录" in ended
+        assert log_command(".log del story", role="owner")["status"] == "ok"
+        assert "story" not in text(log_command(".log list"))
+        evidence["checks"].append("native group logs enforce roles, dedup, pause/restart boundaries and current-group isolation")
+        evidence["checks"].append("escaped colored Markdown and raw TXT artifacts are body-free in MCP and one-shot claim/ACK scoped")
         profile_probe = str(Path(__file__).resolve().with_name("test-profile-boot.mjs"))
         profile_output = docker("run", "--rm", "--network", network,
             "--mount", "type=bind,src=" + profile_probe + ",dst=/tmp/test-profile-boot.mjs,readonly",

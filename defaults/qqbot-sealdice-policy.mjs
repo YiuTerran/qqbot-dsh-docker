@@ -4,9 +4,9 @@ const ALIASES = Object.freeze({ roll: 'r', rd: 'r', 查询: 'find', 咕咕: 'gug
 const HIDDEN = new Set(['rh', 'rhd', 'rdh', 'rxh', 'rhx', 'rah', 'rch', 'drlh', 'dxh', 'wh', 'wwh']);
 const COMMANDS = new Set(['r', 'ra', 'rc', 'st', 'pc', 'sc', 'en', 'set', 'ww', 'dx', 'ek', 'rsr',
     'coc', 'dnd', 'dndx', 'ti', 'li', 'userid', 'find', 'setcoc', 'ss', 'buff', 'ds', 'init',
-    'jrrp', 'gugu', 'ping', 'master', 'ban', ...HIDDEN, ...Object.keys(ALIASES)]);
+    'jrrp', 'gugu', 'ping', 'master', 'ban', 'log', ...HIDDEN, ...Object.keys(ALIASES)]);
 const ORDERED = [...COMMANDS].sort((a, b) => b.length - a.length);
-export const SEALDICE_TOOL_GUIDANCE = 'Native SeaDice commands: r/roll, ra, rc, st, pc, sc, en, set rule selection or info; ww (not set), dx, ek, rsr, coc, dnd, dndx, ti, li; userid, find/查询 (query only), setcoc (no args/details), ss and buff (no args), ds stat, init (no args/list); jrrp, gugu/咕咕 and ping. Group-wide rule changes require the current owner/admin role and negotiated group-role-v1. Natural-language requests are allowed only in a single-original batch; in a mixed batch, the exact native .set command must appear in that owner/admin original. Follow the read-only groupStateWriteRequiresExactCommand metadata; never borrow another batch member requestId. Queries and own-card operations remain ordinary-member commands. At most 10 generated candidates or execution rounds per call; saved cards have no new total limit. Never use hidden rolls, cross-user delegates, scripts or unlisted subcommands. Master list/backup and ban list/query/add/rm/trust require an authorized private sender and the exact command in that original QQ message; never synthesize an administrative command.';
+export const SEALDICE_TOOL_GUIDANCE = 'Native SeaDice commands: r/roll, ra, rc, st, pc, sc, en, set rule selection or info; ww (not set), dx, ek, rsr, coc, dnd, dndx, ti, li; userid, find/查询 (query only), setcoc (no args/details), ss and buff (no args), ds stat, init (no args/list); jrrp, gugu/咕咕 and ping. The group-only .log command supports new/on/off/halt/end/list/stat/get/export/del, with optional `--format=txt` only for get/export. Every .log command must exactly match a direct command in its own original QQ message; never invent a command from natural language or another batch member. Mutating .log actions require the current group owner/admin role and negotiated group-role-v1; queries and export are available to group members. Group-wide rule changes require the current owner/admin role and negotiated group-role-v1. Natural-language requests are allowed only in a single-original batch; in a mixed batch, the exact native .set command must appear in that owner/admin original. Follow the read-only groupStateWriteRequiresExactCommand metadata; never borrow another batch member requestId. Queries and own-card operations remain ordinary-member commands. At most 10 generated candidates or execution rounds per call; saved cards have no new total limit. Never use hidden rolls, cross-user delegates, scripts or unlisted subcommands. Master list/backup and ban list/query/add/rm/trust require an authorized private sender and the exact command in that original QQ message; never synthesize an administrative command.';
 
 export function readOnebotMasterUsers(value = '[]') {
     let entries;
@@ -61,7 +61,7 @@ export function inspectSeaDiceCommand(input, { direct = false } = {}) {
         let allowed = !HIDDEN.has(kind);
         // No target identity may be smuggled as a CQ segment or delegated QQ ID.
         if (/\[CQ:|<@|@\S/u.test(tail)) allowed = false;
-        if (kind !== 'find' && args.some(arg => arg.startsWith('--'))) allowed = false;
+        if (!['find', 'log'].includes(kind) && args.some(arg => arg.startsWith('--'))) allowed = false;
         if (kind === 'set') allowed &&= /^(?:info|dnd|dnd5e|coc|coc7)$/iu.test(tail);
         if (kind === 'ww') allowed &&= !/^set(?:\s|$)/iu.test(tail);
         if (kind === 'rsr') allowed &&= args.length === 1;
@@ -82,10 +82,32 @@ export function inspectSeaDiceCommand(input, { direct = false } = {}) {
         if (kind === 'ban') {
             allowed &&= /^(?:list(?:\s+(?:ban|warn|trust))?|(?:query|rm|trust)\s+(?:QQ|QQ-Group):[1-9][0-9]{15}|add\s+(?:QQ|QQ-Group):[1-9][0-9]{15}(?:\s+\S+)?)$/u.test(tail);
         }
+        let logMutation = false;
+        if (kind === 'log') {
+            const tokens = tail.split(/\s+/u).filter(Boolean);
+            const action = tokens[0];
+            const validName = (value) => typeof value === 'string' && Array.from(value).length <= 80
+                && /^[\p{L}\p{N}_-]+$/u.test(value) && !value.startsWith('--');
+            if (!['new', 'on', 'off', 'halt', 'end', 'list', 'stat', 'get', 'export', 'del'].includes(action)) allowed = false;
+            else if (['new', 'on', 'stat'].includes(action)) {
+                allowed &&= tokens.length === 1 || (tokens.length === 2 && validName(tokens[1]));
+            }
+            else if (action === 'del') allowed &&= tokens.length === 2 && validName(tokens[1]);
+            else if (['get', 'export'].includes(action)) {
+                const names = tokens.slice(1).filter((value) => value !== '--format=txt');
+                const formats = tokens.slice(1).filter((value) => value.startsWith('--'));
+                allowed &&= tokens.length <= 3 && names.length <= 1 && names.every(validName)
+                    && formats.length <= 1 && formats.every((value) => value === '--format=txt')
+                    && (tokens.indexOf('--format=txt') < 0 || tokens.indexOf('--format=txt') === tokens.length - 1);
+            }
+            else allowed &&= tokens.length === 1;
+            logMutation = allowed && ['new', 'on', 'off', 'halt', 'end', 'del'].includes(action);
+        }
         const rounds = tail.match(/(?:^|\s)(\d+)\s*#/u);
         if (rounds && (Number(rounds[1]) < 1 || Number(rounds[1]) > 10)) allowed = false;
-        return { kind, command, allowed, groupStateWrite: kind === 'set' && allowed
-                && /^(?:dnd|dnd5e|coc|coc7)$/iu.test(tail),
+        return { kind, command, allowed, groupOnly: kind === 'log', requiresExactOriginal: kind === 'log',
+            logMutation, groupStateWrite: (kind === 'set' && allowed
+                && /^(?:dnd|dnd5e|coc|coc7)$/iu.test(tail)) || logMutation,
             admin: kind === 'master' || kind === 'ban',
             reason: HIDDEN.has(kind) ? 'hidden_disabled' : allowed ? undefined : 'invalid_command' };
     }

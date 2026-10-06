@@ -6,7 +6,7 @@ qq-bot 使用专用工具调用 Gensokyo-MCP；桥将请求变成虚拟 OneBot v
 
 两个 fork 固定为子模块：`third_party/gensokyo-mcp`、`third_party/sealdice-core`。初始化使用 `git submodule update --init --recursive`。海豹嵌套资源按其自己的 gitlink 检出，不改变 UI。
 
-镜像分别为 `tryao/qqbot-dsh:v0.11.2`、`tryao/gensokyo-mcp:v0.2.1`、`tryao/sealdice-core:v1.6.2-bridge.5`，只使用版本标签，没有 latest。主镜像不包含两个 Go 项目源码或运行程序。
+镜像分别为 `tryao/qqbot-dsh:v0.12.0`、`tryao/gensokyo-mcp:v0.3.0`、`tryao/sealdice-core:v1.6.2-bridge.6`，只使用版本标签，没有 latest。主镜像不包含两个 Go 项目源码或运行程序。
 
 v0.11.0 新增 Markdown 投递回执、扩展命令和连接级 Master ACL；三项镜像版本须一同升级，旧后端未协商 ACL 时仍可处理普通命令。
 
@@ -17,7 +17,7 @@ v0.11.1 增加群主／管理员的整群规则修改权限，以及单条自然
 可以直接使用仓库的 `docker-compose.qnap.yml`，或将下方完整 YAML 保存为 `docker-compose.yml`。在同一目录创建 `.env`；QQ 和聊天凭据按实际账号填写，三份 OneBot 服务密钥使用不同的随机值，不复用 QQ/LLM 密钥。已有配置可保留聊天、视觉和生图路由，只更新三个镜像版本及 OneBot 配置。
 
 ```dotenv
-IMAGE_TAG=v0.11.2
+IMAGE_TAG=v0.12.0
 QQBOT_APPID=
 QQBOT_SECRET=
 # 官方聊天模式填此项；不要同时配置 LLM_API_KEY。
@@ -38,6 +38,7 @@ IMAGE_MODEL=
 # 未启用生图时也留空；启用后默认 openai-images，可选 xai-images。
 IMAGE_API_PROTOCOL=
 QQBOT_ONEBOT_ENABLED=true
+QQBOT_ONEBOT_LOG_ENABLED=false
 QQBOT_ONEBOT_DIRECT_ENABLED=true
 QQBOT_ONEBOT_DEFAULT_BACKEND=
 QQBOT_ONEBOT_MCP_URL=http://gensokyo-mcp:8090/mcp
@@ -47,8 +48,8 @@ QQBOT_ONEBOT_MCP_TOKEN=replace-with-random-mcp-secret
 QQBOT_ONEBOT_INTERNAL_TOKEN=replace-with-different-random-internal-secret
 ONEBOT_WS_TOKEN=replace-with-different-random-onebot-secret
 QQBOT_ONEBOT_HIDDEN_ENABLED=false
-GENSOKYO_IMAGE_TAG=v0.2.1
-SEALDICE_IMAGE_TAG=v1.6.2-bridge.5
+GENSOKYO_IMAGE_TAG=v0.3.0
+SEALDICE_IMAGE_TAG=v1.6.2-bridge.6
 ```
 
 聊天模式的详细配置见 [运行指南](runtime-guide.md)。生图字段全部留空时不提供生图工具，Markdown 默认启用。Master 清单默认 `[]`；需授权时使用私聊 `.userid` 返回的完整身份，而非 QQ 号或 Compose 服务名称。
@@ -99,6 +100,7 @@ services:
       QQBOT_IMAGE_MAX_CONCURRENT: ${QQBOT_IMAGE_MAX_CONCURRENT:-2}
       QQBOT_MARKDOWN_MAX_CONCURRENT: ${QQBOT_MARKDOWN_MAX_CONCURRENT:-4}
       QQBOT_ONEBOT_ENABLED: ${QQBOT_ONEBOT_ENABLED:-false}
+      QQBOT_ONEBOT_LOG_ENABLED: ${QQBOT_ONEBOT_LOG_ENABLED:-false}
       # Directly route supported commands only when OneBot is enabled.
       QQBOT_ONEBOT_DIRECT_ENABLED: ${QQBOT_ONEBOT_DIRECT_ENABLED:-true}
       # Empty auto-selects a command's unique matching backend; set an ID for ambiguous matches.
@@ -123,7 +125,7 @@ services:
 
   gensokyo-mcp:
     profiles: [trpg]
-    image: "tryao/gensokyo-mcp:${GENSOKYO_IMAGE_TAG:-v0.2.1}"
+    image: "tryao/gensokyo-mcp:${GENSOKYO_IMAGE_TAG:-v0.3.0}"
     restart: unless-stopped
     environment:
       TZ: Asia/Shanghai
@@ -145,7 +147,7 @@ services:
 
   sealdice:
     profiles: [trpg]
-    image: "tryao/sealdice-core:${SEALDICE_IMAGE_TAG:-v1.6.2-bridge.5}"
+    image: "tryao/sealdice-core:${SEALDICE_IMAGE_TAG:-v1.6.2-bridge.6}"
     restart: unless-stopped
     environment:
       TZ: Asia/Shanghai
@@ -216,6 +218,47 @@ qq-bot 容器日志中的 `[qqbot-onebot] ready backends=1 available=true` 表�
 
 同一条原始 QQ 消息内，重复调用相同命令会返回已有结果，不同命令排队至完整终态。已派发命令出现不确定结果，或暗骰投递失败后，该消息的后续调用会被拒绝，避免模型重试导致重新掷骰。需要新的操作时发送一条新消息；明确要求多次掷骰时使用海豹原生的多次掷骰表达式。
 
+## 实时跑团日志与导出
+
+此项自 qq-bot v0.12.0、桥 v0.3.0、海豹 v1.6.2-bridge.6 提供。须一同升级，并确认后端协商 `log-capture-v1`、`artifact-v1`。旧后端仍可处理已有骰子命令，日志请求会提示需要升级。设置 `QQBOT_ONEBOT_LOG_ENABLED=true` 并重建 qq-bot 后，群主或管理员可在群内 @机器人发送：
+
+```text
+.log new 第一幕
+.log off
+.log on 第一幕
+.log list
+.log stat 第一幕
+.log get 第一幕
+.log export 第一幕
+.log export 第一幕 --format=txt
+.log end
+.log del 第一幕
+```
+
+`new/on/off/halt/end/del` 要求本条原始群事件能确认 owner/admin；Master 身份不绕过此检查。普通群成员可以查询、导出当前群的日志。命令必须在当前原始消息中完整出现，不通过自然语言、引用或模型补写授权；跨群查询、私聊日志、邮件和外部上传不开放。
+
+记录从 `new/on` 成功生效后开始，活跃状态保存在海豹数据卷中。系统只记录 QQ 实际推送的当前消息，以及 QQ 确认发送的机器人公开回复。完整跑团记录需平台开启全量消息推送；未 @消息可以采集但不会触发 LLM。引用块、合并上下文和模型历史不展开为独立消息。附件只显示类型占位，不下载媒体或保留下载凭据。私密结果不写入群日志。断线、重启或队列满引起的缺口会在状态与导出中标明，不能把文件存在当作记录完整。
+
+默认导出染色 Markdown，使用内嵌 HTML 标签显示人物颜色；阅读器需要允许内联样式。屏蔽样式时仍可读取姓名、时间和正文。颜色按稳定内部身份确定，昵称或角色名只用于展示。用户正文进行 HTML 转义，文件无脚本、远程图片、外部样式或统计代码；默认不自动过滤命令和场外发言。`--format=txt` 可导出原始文本。
+
+单份导出上限 10 MiB，超限明确拒绝而非截断。文件直接走内部领取及 QQ 附件投递链路，日志全文不进入 LLM。只有最终 QQ 发送确认才表示发送成功；失败、超时及确认未知会准确反馈，确认未知不自动重复发送或把全文改成群内正文。临时产物确认投递后清理，十分钟过期；源日志保留到显式删除。请随海豹数据卷一起备份。
+
+海豹命令执行仍限时 30 秒。日志请求另外为领取和 QQ 文件发送预留时间，直通总等待最多 145 秒，模型工具总限时 150 秒；普通骰子直通限时不变。每次日志命令只交付一份 MD 或 TXT 文件。
+
+首版只支持实时采集。合并转发记录整理将作为未来 qq-bot 侧独立工具，不依赖 NapCat/LLOneBot，也不把转发文字作为新的原始身份授权。开发契约见 [日志与产物契约](onebot-log-contract.md)。
+
+维护者也可使用本地镜像验证，不替换已发布标签：
+
+```sh
+git submodule update --init --recursive
+docker build -t tryao/qqbot-dsh:local-log-test .
+docker build -t tryao/gensokyo-mcp:local-log-test third_party/gensokyo-mcp
+docker build -t tryao/sealdice-core:local-log-test third_party/sealdice-core
+IMAGE_TAG=local-log-test GENSOKYO_IMAGE_TAG=local-log-test SEALDICE_IMAGE_TAG=local-log-test QQBOT_ONEBOT_LOG_ENABLED=true docker compose -f docker-compose.qnap.yml --profile trpg up -d --pull never
+```
+
+此命令仍使用 `.env` 的 QQ、聊天和三份独立服务鉴权配置，以及原有命名卷。备份持久卷后再进行测试；不要将生产容器与测试容器同时挂载同一数据库卷。源码构建使用独立的本地标签。
+
 ## 群角色与规则修改
 
 当前开放的 `.set dnd/dnd5e/coc/coc7` 修改整群规则，仅允许当前群 `owner/admin`，单条原始请求可通过自然语言要求修改；混合批次要求该人员原消息完整匹配所执行的 `.set` 命令，不能把其他成员的需求绑定到管理员的无关请求 ID。批次数量在入队快照后按全部原始请求计数，不因空文本或无效授权被过滤而变成单条。`.set info`、`.setcoc` 无参或 `details` 为查询，普通成员可用；掷骰、检定与本人角色卡写入也不受该限制。私聊不能修改群规则，Master 或信任用户不会因此获得群管理权限。
@@ -229,6 +272,8 @@ qq-bot 从本条 SDK 原始事件的 `author.member_role` 获取角色，核对 
 ## Master 授权与备份
 
 默认 `QQBOT_ONEBOT_MASTER_USERS=[]`。测试用户在机器人私聊发送 `.userid`，将回复中的配置用身份（`应用ID:原始用户openid`）放入该 JSON 数组，例如 `["123456789:fixtureOwnerA"]`，然后重建 qq-bot 与桥容器。不要使用昵称、QQ 号码或 SeaDice 虚拟 ID。群聊与私聊身份只按实际 SDK 字段判断，不自动认为相同。
+
+`.userid` 中的海豹内部虚拟用户／群 ID 用于关联原生角色卡和群状态，并非真实 QQ 号码／群号。新版 `.master list` 显示桥接授权的配置身份，并将虚拟数字单独标注；旧桥未提供映射时只显示明确标注的内部虚拟 ID。此显示修正不改变权限清单、角色卡或持久身份映射，也不增加备注名配置。
 
 Compose 将清单同步给桥的 `LLM_BRIDGE_MASTER_USER_KEYS`；每个后端按持久身份映射分配虚拟 ID，并通过可选 `master-acl-v1` 协商返回连接级 ACL。无效配置、空清单或未协商能力不能授予管理权限。旧服务仍可处理普通命令。
 

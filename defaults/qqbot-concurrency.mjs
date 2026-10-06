@@ -1,6 +1,7 @@
 import { isRecentImageSnapshot } from './qqbot-pending-images.mjs';
 import { getOnebotDirectFallback } from './qqbot-onebot-scope.mjs';
 import { captureOnebotGroupRole } from './qqbot-sealdice-policy.mjs';
+import { transferOnebotLogHolds } from './qqbot-onebot-log.mjs';
 
 const DEFAULT_MAX_QUEUE = 20;
 const BUSY_NOTICE = '主人，本鱼太忙啦，请等一会儿再来找本鱼吧。';
@@ -127,6 +128,7 @@ export function createMergeConcurrencyGuard(options = {}) {
     function defaultMerge(entries) {
         const first = entries[0].ctx;
         if (entries.length === 1) return first;
+        for (const { ctx } of entries) transferOnebotLogHolds(ctx, first);
         const contentBearing = entries.map(({ ctx }) => ctx).filter((ctx) => (ctx.message.content ?? '') !== '');
         const contents = contentBearing.map((ctx) => ctx.message.content);
         if (contents.length > 0) first.message.content = contents.join('\n');
