@@ -879,17 +879,17 @@ const GROUP_STATE_FAILURE_NOTICES = Object.freeze({
     group_role_denied: '只有当前群的群主或管理员可以修改群规则。',
     group_role_unknown: '无法确认当前群的身份权限，群规则未修改。',
     group_role_unsupported: 'OneBot 后端尚不支持群角色校验，群规则未修改。',
-    group_state_source_mismatch: '修改群规则需要该群主或管理员在当前消息中明确发送完整的原生命令。',
+    group_state_source_mismatch: '混合消息批次修改群规则，需要该群主或管理员在自己的原消息中明确发送完整的原生命令。',
 });
 
-function groupStateFailure(policy, source, backend, roleBackends) {
+function groupStateFailure(policy, source, backend, roleBackends, scope) {
     if (!policy?.groupStateWrite) return undefined;
     if (source.audience !== 'group') return 'group_state_private';
     if (source.groupRole === 'member') return 'group_role_denied';
     if (source.groupRole !== 'owner' && source.groupRole !== 'admin') return 'group_role_unknown';
     const originalPolicy = inspectSeaDiceCommand(source.text, { direct: true });
-    if (source.originalTextLength > 4000 || !originalPolicy?.groupStateWrite
-        || originalPolicy.command.toLowerCase() !== policy.command.toLowerCase()) return 'group_state_source_mismatch';
+    if (scope?.originalRequestCount !== 1 && (source.originalTextLength > 4000 || !originalPolicy?.groupStateWrite
+        || originalPolicy.command.toLowerCase() !== policy.command.toLowerCase())) return 'group_state_source_mismatch';
     if (!roleBackends.has(backend)) return 'group_role_unsupported';
     return undefined;
 }
@@ -929,7 +929,7 @@ async function executeCommand(args, exec, runtime) {
     if (source.onebotDirectFallback) {
         return safeToolResult('failed', [], 'This original QQ message is a direct-command fallback; explain its error without running another OneBot command.');
     }
-    const initialGroupStateFailure = groupStateFailure(policy, source, args.backend, runtime.groupRoleBackends);
+    const initialGroupStateFailure = groupStateFailure(policy, source, args.backend, runtime.groupRoleBackends, scope);
     if (initialGroupStateFailure) {
         logToolFailure(ONEBOT_COMMAND_TOOL, 'authorize', { kind: 'failed', code: initialGroupStateFailure });
         return groupStateFailureResult(initialGroupStateFailure);
@@ -948,7 +948,7 @@ async function executeCommand(args, exec, runtime) {
             return safeToolResult('failed', [], 'This command belongs to an expired QQ message.');
         }
         if (!runtime.readyBackends.has(args.backend)) return safeToolResult('failed', [], 'The selected OneBot backend is unavailable.');
-        const queuedGroupStateFailure = groupStateFailure(policy, source, args.backend, runtime.groupRoleBackends);
+        const queuedGroupStateFailure = groupStateFailure(policy, source, args.backend, runtime.groupRoleBackends, scope);
         if (queuedGroupStateFailure) {
             logToolFailure(ONEBOT_COMMAND_TOOL, 'authorize', { kind: 'failed', code: queuedGroupStateFailure });
             return groupStateFailureResult(queuedGroupStateFailure);
@@ -1001,7 +1001,7 @@ async function executeCommand(args, exec, runtime) {
                     && runtime.groupRoleBackends.has(args.backend)) callArgs.group_role = source.groupRole;
                 result = await runtime.session.callWs(callArgs, signal, async () => {
                     if (onebotExecutionFailure(exec) || signal.aborted || !runtime.readyBackends.has(args.backend)) return false;
-                    const dispatchGroupStateFailure = groupStateFailure(policy, source, args.backend, runtime.groupRoleBackends);
+                    const dispatchGroupStateFailure = groupStateFailure(policy, source, args.backend, runtime.groupRoleBackends, scope);
                     if (dispatchGroupStateFailure) {
                         preDispatchGroupStateFailure = dispatchGroupStateFailure;
                         return false;

@@ -174,6 +174,10 @@ export function beginOnebotTurn(agent, originalRequests, options = {}) {
         expiryTimer: undefined,
         abortFromExternal: undefined,
     };
+    Object.defineProperty(scope, 'originalRequestCount', {
+        value: Array.isArray(originalRequests) ? originalRequests.length : 0,
+        enumerable: true,
+    });
     scope.abortFromExternal = () => abortTurn(scope, options.signal?.reason ?? new Error('QQ message expired.'));
     if (options.signal) {
         options.signal.addEventListener('abort', scope.abortFromExternal, { once: true });
@@ -257,6 +261,7 @@ export function onebotRequestMetadata(scope) {
         requestId,
         audience,
         groupRole: groupRole ?? 'unknown',
+        groupStateWriteRequiresExactCommand: scope.originalRequestCount !== 1,
         userRequest: text,
         ...(onebotDirectFallback ? {
             directFallback: Object.freeze({

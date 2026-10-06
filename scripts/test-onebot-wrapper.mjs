@@ -152,6 +152,15 @@ try {
         assert.equal((await freshCommand(ownerId, '.set info', { group: 'fixtureGroupA', role: role ?? '' })).status, 'ok');
     }
     summary.push({ check: 'real-wrapper-per-original-group-role-member-unknown-master-no-bypass' });
+    assert.equal((await freshCommand('fixtureNaturalOwner', '.set dnd', { group: 'fixtureNaturalGroup',
+        role: 'owner', text: '请把当前群规则改为 DND' })).status, 'ok');
+    const naturalRule = await freshCommand('fixtureNaturalMember', '.set info', { group: 'fixtureNaturalGroup' });
+    assert.ok(naturalRule.outputs.join('\n').includes('20'));
+    assert.equal((await freshCommand('fixtureNaturalMember', '.set coc7', { group: 'fixtureNaturalGroup',
+        text: '请改为 COC 规则' })).failureReason, 'group_role_denied');
+    assert.deepEqual((await freshCommand('fixtureNaturalMember', '.set info', { group: 'fixtureNaturalGroup' })).outputs,
+        naturalRule.outputs);
+    summary.push({ check: 'real-single-original-natural-language-owner-only-group-rule-write' });
 
     for (const command of ['.set coc7', '.coc 2', '.ti', '.li', '.ww 3a10', '.dx 3c10', '.ek 潜行', '.rsr 3',
         '.jrrp', '.gugu', '.ping', '.set info', '.setcoc', '.setcoc details']) {

@@ -55,7 +55,7 @@ const FAILURE_TEXT = Object.freeze({
     group_role_unknown: '无法确认当前群的身份权限，群规则未修改。',
     group_role_denied: '只有当前群的群主或管理员可以修改群规则。',
     group_role_unsupported: 'OneBot 后端尚不支持群角色校验，群规则未修改。',
-    group_state_source_mismatch: '修改群规则需要该群主或管理员在当前消息中明确发送完整的原生命令。',
+    group_state_source_mismatch: '混合消息批次修改群规则，需要该群主或管理员在自己的原消息中明确发送完整的原生命令。',
     permission_denied: '管理命令需要配置的用户在私聊中明确发送原始命令，并完成后端权限协商；本次未执行。',
     send_failed: '骰子结果发送失败，请查看当前会话后再决定下一步。',
     no_output: '海豹骰没有返回可显示的结果。',

@@ -423,6 +423,37 @@ test('a merged member request cannot borrow an unrelated owner request ID for a 
     } finally { await endOnebotTurn(agent, scope); await service.service.stop(); }
 });
 
+test('natural-language group rule changes require one raw original and the trusted owner or admin role', async () => {
+    const service = setup({ backendCapabilities: ['group-role-v1'] });
+    await service.service.ready;
+    try {
+        for (const role of ['owner', 'admin', 'member', 'unknown']) {
+            const original = { ...groupOriginal('speaker', 'group-a', role), text: '请把这个群切换为 DND 规则' };
+            const { agent, scope, exec, metadata } = boundExec([original]);
+            try {
+                assert.equal(metadata[0].groupStateWriteRequiresExactCommand, false);
+                const result = await service.descriptor.execute({ requestId: metadata[0].requestId,
+                    backend: 'sealdice', command: '.set dnd' }, exec);
+                assert.equal(result.status, ['owner', 'admin'].includes(role) ? 'ok' : 'failed');
+            } finally { await endOnebotTurn(agent, scope); }
+        }
+        const { agent, scope, exec, metadata } = boundExec([
+            { ...groupOriginal('owner-a', 'group-a', 'owner'), text: '请把这个群切换为 DND 规则' },
+            { ...groupOriginal('member-b', 'group-a', 'member'), text: '' },
+        ]);
+        try {
+            assert.equal(metadata.length, 1, 'empty text has no tool authorization');
+            assert.equal(scope.originalRequestCount, 2, 'batch count includes filtered raw originals');
+            assert.equal(metadata[0].groupStateWriteRequiresExactCommand, true);
+            assert.throws(() => { scope.originalRequestCount = 1; }, TypeError);
+            const rejected = await service.descriptor.execute({ requestId: metadata[0].requestId,
+                backend: 'sealdice', command: '.set dnd' }, exec);
+            assert.equal(rejected.failureReason, 'group_state_source_mismatch');
+        } finally { await endOnebotTurn(agent, scope); }
+        assert.equal(service.calls, 2, 'only single-original owners/admins dispatch natural requests');
+    } finally { await service.service.stop(); }
+});
+
 test('group capability is rechecked after per-original queue wait and immediately before dispatch', async () => {
     for (const stage of ['queue', 'dispatch']) {
         const gate = deferred();
