@@ -77,7 +77,7 @@ export function readOnebotConfig(env = process.env) {
     }
     return Object.freeze({
         enabled: true,
-        logEnabled: env.QQBOT_ONEBOT_LOG_ENABLED === 'true',
+        logEnabled: (env.QQBOT_ONEBOT_LOG_ENABLED ?? 'true') === 'true',
         hiddenEnabled: env.QQBOT_ONEBOT_HIDDEN_ENABLED === 'true',
         url,
         backendIds: backends,

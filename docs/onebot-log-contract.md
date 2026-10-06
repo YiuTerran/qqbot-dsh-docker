@@ -75,7 +75,8 @@ on disconnect. Missing mappings display an explicitly labeled virtual ID.
 
 ## Commands and defaults
 
-Capture is opt-in via `QQBOT_ONEBOT_LOG_ENABLED=false` (qq-bot). Native `.log`
+Capture defaults on when OneBot is enabled; `QQBOT_ONEBOT_LOG_ENABLED=false`
+disables it (qq-bot). Persistent recording still requires `.log new/on`. Native `.log`
 supports `new/on/off/halt/end/list/stat/get/export/del` in the current group only.
 State mutations require the current owner/admin role, never Master privilege;
 every log command must match its original request. `get/export/end` default to

@@ -155,6 +155,20 @@ function boundExec(originals = [groupOriginal()]) {
     return { agent, scope, exec, metadata: onebotRequestMetadata(scope) };
 }
 
+test('log capture defaults on only with valid enabled OneBot config and can be disabled explicitly', () => {
+    const env = {
+        QQBOT_ONEBOT_ENABLED: 'true',
+        QQBOT_ONEBOT_MCP_URL: 'http://onebot.test/mcp',
+        QQBOT_ONEBOT_BACKENDS: 'sealdice',
+        QQBOT_ONEBOT_MCP_TOKEN: 'test-mcp-token',
+        QQBOT_ONEBOT_INTERNAL_TOKEN: 'test-internal-token',
+    };
+    assert.equal(readOnebotConfig(env).logEnabled, true);
+    assert.equal(readOnebotConfig({ ...env, QQBOT_ONEBOT_LOG_ENABLED: 'true' }).logEnabled, true);
+    assert.equal(readOnebotConfig({ ...env, QQBOT_ONEBOT_LOG_ENABLED: 'false' }).logEnabled, false);
+    assert.equal(readOnebotConfig({ ...env, QQBOT_ONEBOT_ENABLED: 'false' }).logEnabled, false);
+});
+
 test('native log export claims and sends one validated artifact, then reuses the cached result', async () => {
     const bytes = Buffer.from('# Current group session\n', 'utf8');
     const receipt = {

@@ -6,7 +6,7 @@ qq-bot 使用专用工具调用 Gensokyo-MCP；桥将请求变成虚拟 OneBot v
 
 两个 fork 固定为子模块：`third_party/gensokyo-mcp`、`third_party/sealdice-core`。初始化使用 `git submodule update --init --recursive`。海豹嵌套资源按其自己的 gitlink 检出，不改变 UI。
 
-镜像分别为 `tryao/qqbot-dsh:v0.12.0`、`tryao/gensokyo-mcp:v0.3.0`、`tryao/sealdice-core:v1.6.2-bridge.6`，只使用版本标签，没有 latest。主镜像不包含两个 Go 项目源码或运行程序。
+镜像分别为 `tryao/qqbot-dsh:v0.12.1`、`tryao/gensokyo-mcp:v0.3.0`、`tryao/sealdice-core:v1.6.2-bridge.6`，只使用版本标签，没有 latest。主镜像不包含两个 Go 项目源码或运行程序。
 
 v0.11.0 新增 Markdown 投递回执、扩展命令和连接级 Master ACL；三项镜像版本须一同升级，旧后端未协商 ACL 时仍可处理普通命令。
 
@@ -17,7 +17,7 @@ v0.11.1 增加群主／管理员的整群规则修改权限，以及单条自然
 可以直接使用仓库的 `docker-compose.qnap.yml`，或将下方完整 YAML 保存为 `docker-compose.yml`。在同一目录创建 `.env`；QQ 和聊天凭据按实际账号填写，三份 OneBot 服务密钥使用不同的随机值，不复用 QQ/LLM 密钥。已有配置可保留聊天、视觉和生图路由，只更新三个镜像版本及 OneBot 配置。
 
 ```dotenv
-IMAGE_TAG=v0.12.0
+IMAGE_TAG=v0.12.1
 QQBOT_APPID=
 QQBOT_SECRET=
 # 官方聊天模式填此项；不要同时配置 LLM_API_KEY。
@@ -38,7 +38,7 @@ IMAGE_MODEL=
 # 未启用生图时也留空；启用后默认 openai-images，可选 xai-images。
 IMAGE_API_PROTOCOL=
 QQBOT_ONEBOT_ENABLED=true
-QQBOT_ONEBOT_LOG_ENABLED=false
+QQBOT_ONEBOT_LOG_ENABLED=true
 QQBOT_ONEBOT_DIRECT_ENABLED=true
 QQBOT_ONEBOT_DEFAULT_BACKEND=
 QQBOT_ONEBOT_MCP_URL=http://gensokyo-mcp:8090/mcp
@@ -100,7 +100,7 @@ services:
       QQBOT_IMAGE_MAX_CONCURRENT: ${QQBOT_IMAGE_MAX_CONCURRENT:-2}
       QQBOT_MARKDOWN_MAX_CONCURRENT: ${QQBOT_MARKDOWN_MAX_CONCURRENT:-4}
       QQBOT_ONEBOT_ENABLED: ${QQBOT_ONEBOT_ENABLED:-false}
-      QQBOT_ONEBOT_LOG_ENABLED: ${QQBOT_ONEBOT_LOG_ENABLED:-false}
+      QQBOT_ONEBOT_LOG_ENABLED: ${QQBOT_ONEBOT_LOG_ENABLED:-true}
       # Directly route supported commands only when OneBot is enabled.
       QQBOT_ONEBOT_DIRECT_ENABLED: ${QQBOT_ONEBOT_DIRECT_ENABLED:-true}
       # Empty auto-selects a command's unique matching backend; set an ID for ambiguous matches.
@@ -220,7 +220,7 @@ qq-bot 容器日志中的 `[qqbot-onebot] ready backends=1 available=true` 表�
 
 ## 实时跑团日志与导出
 
-此项自 qq-bot v0.12.0、桥 v0.3.0、海豹 v1.6.2-bridge.6 提供。须一同升级，并确认后端协商 `log-capture-v1`、`artifact-v1`。旧后端仍可处理已有骰子命令，日志请求会提示需要升级。设置 `QQBOT_ONEBOT_LOG_ENABLED=true` 并重建 qq-bot 后，群主或管理员可在群内 @机器人发送：
+此项自 qq-bot v0.12.0、桥 v0.3.0、海豹 v1.6.2-bridge.6 提供。须一同升级，并确认后端协商 `log-capture-v1`、`artifact-v1`。旧后端仍可处理已有骰子命令，日志请求会提示需要升级。自 qq-bot v0.12.1 起，OneBot 启用后日志功能默认可用；设置 `QQBOT_ONEBOT_LOG_ENABLED=false` 可关闭。群主或管理员仍须在群内 @机器人发送以下命令才开始记录：
 
 ```text
 .log new 第一幕

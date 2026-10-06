@@ -39,7 +39,7 @@ services:
       QQBOT_IMAGE_MAX_CONCURRENT: ${QQBOT_IMAGE_MAX_CONCURRENT:-2}
       QQBOT_MARKDOWN_MAX_CONCURRENT: ${QQBOT_MARKDOWN_MAX_CONCURRENT:-4}
       QQBOT_ONEBOT_ENABLED: ${QQBOT_ONEBOT_ENABLED:-false}
-      QQBOT_ONEBOT_LOG_ENABLED: ${QQBOT_ONEBOT_LOG_ENABLED:-false}
+      QQBOT_ONEBOT_LOG_ENABLED: ${QQBOT_ONEBOT_LOG_ENABLED:-true}
       # Directly route supported commands only when OneBot is enabled.
       QQBOT_ONEBOT_DIRECT_ENABLED: ${QQBOT_ONEBOT_DIRECT_ENABLED:-true}
       # Empty auto-selects a command's unique matching backend; set an ID for ambiguous matches.
