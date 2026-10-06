@@ -10,7 +10,7 @@ import { test } from 'node:test';
 const appId = '123456789';
 const logger = { info() {}, warn() {}, debug() {}, error() {} };
 const dshRoot = '/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/';
-const profilePeers = '/data/profiles/qqbot/node_modules/@deepseek-ai';
+const profilePeers = process.env.QQBOT_PROFILE_PEERS ?? '/data/profiles/qqbot/node_modules/@deepseek-ai';
 await mkdir(join(profilePeers, '..'), { recursive: true });
 try {
     await symlink(dshRoot, profilePeers, 'dir');
@@ -23,8 +23,10 @@ const adapterRoot = resolve(process.env.QQBOT_ADAPTER_DIST
     ?? '/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist');
 const directModulePath = process.env.QQBOT_ONEBOT_DIRECT_MODULE
     ?? '/opt/qqbot-defaults/qqbot-onebot-direct.mjs';
+const defaultsRoot = process.env.QQBOT_NATIVE_DEFAULTS_ROOT ?? '/opt/qqbot-defaults';
 const { setupMiddlewares } = await import(pathToFileURL(join(adapterRoot, 'gateway/middleware-setup.js')).href);
 const { createOnebotDirectRouter } = await import(pathToFileURL(directModulePath).href);
+const { attachOnebotDeliveryObserver } = await import(new URL('./qqbot-onebot-log.mjs', pathToFileURL(directModulePath)).href);
 const { getMergedGenerationRequests } = await import(new URL('./qqbot-concurrency.mjs', pathToFileURL(directModulePath)).href);
 const { getBoundOnebotExecution, getBoundOnebotRequest, getOnebotDirectFallback, renderOnebotDirectFallbackMetadata } = await import(new URL('./qqbot-onebot-scope.mjs', pathToFileURL(directModulePath)).href);
 
@@ -419,8 +421,15 @@ test('bootstrap executes with stubs and passes the registered service and sender
     let bootServiceOptions;
     let routerOptions;
     let bootBot;
+    const observedDeliveries = [];
 
-    const service = { async stop() { order.push('service-stop'); } };
+    const service = {
+        observeBotDelivery(event) { observedDeliveries.push(event); },
+        async stop() {
+            assert.equal(bootBot.send, FakeBot.prototype.send, 'the QQ send observer detaches before service stop');
+            order.push('service-stop');
+        },
+    };
     const fakeRouter = {
         middleware: async (_ctx, next) => next(),
         async cancelConversation() {},
@@ -439,6 +448,7 @@ test('bootstrap executes with stubs and passes the registered service and sender
         }
         on(event, listener) { this.listeners.set(event, listener); return this; }
         openStream() { return {}; }
+        async send() { return { id: 'observed-send-id' }; }
         async start() { order.push('bot-start'); }
         stop() { order.push('bot-stop'); }
     }
@@ -453,24 +463,25 @@ test('bootstrap executes with stubs and passes the registered service and sender
     class FakeApprovalChannel { install() {} }
     class FakeReplyLimiter { constructor() {} }
 
-    imports.set('/opt/qqbot-defaults/qqbot-chat-policy.mjs', {
+    imports.set(`${defaultsRoot}/qqbot-chat-policy.mjs`, {
         installChatPolicy() {}, setOnebotToolAvailable() {},
     });
-    imports.set('/opt/qqbot-defaults/qqbot-onebot.mjs', {
+    imports.set(`${defaultsRoot}/qqbot-onebot.mjs`, {
         registerOnebotCommandTool(_ctx, options) {
             order.push('service-register');
             bootServiceOptions = options;
             return service;
         },
     });
-    imports.set('/opt/qqbot-defaults/qqbot-onebot-direct.mjs', {
+    imports.set(`${defaultsRoot}/qqbot-onebot-log.mjs`, { attachOnebotDeliveryObserver });
+    imports.set(`${defaultsRoot}/qqbot-onebot-direct.mjs`, {
         createOnebotDirectRouter(options) {
             order.push('router-create');
             routerOptions = options;
             return fakeRouter;
         },
     });
-    imports.set('/opt/qqbot-defaults/qqbot-generation.mjs', {
+    imports.set(`${defaultsRoot}/qqbot-generation.mjs`, {
         createGenerationSender() { return {}; },
         registerGenerationTools() {},
     });
@@ -488,7 +499,12 @@ test('bootstrap executes with stubs and passes the registered service and sender
     imports.set('../features/approval-channel.js', { ApprovalChannel: FakeApprovalChannel });
     imports.set('../features/button-utils.js', { decodeButtonData() { return undefined; } });
     imports.set('../shared/index.js', { buildUserAgent() { return 'native-direct-test'; } });
-    imports.set('./middleware-setup.js', { setupMiddlewares });
+    imports.set('./middleware-setup.js', {
+        setupMiddlewares(bot, ...args) {
+            assert.equal(args[5], service, 'bootstrap gives the registered service to capture middleware setup');
+            return setupMiddlewares(bot, ...args);
+        },
+    });
     imports.set('../media/media-cleaner.js', { startMediaCleanup() {} });
     imports.set('../media/vision-tool.js', { ensureVisionInputModal() {}, registerDescribeImageTool() {} });
     imports.set('../media/send-file-tool.js', { registerSendFileTool() {} });
@@ -529,6 +545,12 @@ test('bootstrap executes with stubs and passes the registered service and sender
     await vmContext.__bootstrapGateway(ctx, {}, config, logger);
 
     assert.ok(bootServiceOptions?.bot === bootBot, 'bootstrap registers OneBot after constructing the QQ SDK bot');
+    assert.notEqual(bootBot.send, FakeBot.prototype.send, 'bootstrap installs the QQ send observer');
+    await bootBot.send({ target: { scope: 'group', targetId: 'observer-group' }, markdown: { content: 'confirmed output' } });
+    assert.deepEqual(observedDeliveries, [{
+        target: { scope: 'group', targetId: 'observer-group' }, status: 'sent',
+        messageId: 'observed-send-id', text: 'confirmed output',
+    }]);
     assert.ok(routerOptions?.service === service, 'bootstrap gives the registered OneBot service to the router');
     assert.ok(routerOptions?.sender && typeof routerOptions.sender.sendMarkdown === 'function',
         'bootstrap gives the reply sender to the router');
@@ -538,6 +560,7 @@ test('bootstrap executes with stubs and passes the registered service and sender
     'service registration and router construction happen before middleware setup');
 
     await lifecycleCleanup();
+    assert.equal(bootBot.send, FakeBot.prototype.send, 'shutdown restores the original QQ send method');
     assert.ok(order.indexOf('router-stop') < order.indexOf('service-stop'),
         'shutdown awaits direct conversation cancellation before stopping the OneBot service');
 });
