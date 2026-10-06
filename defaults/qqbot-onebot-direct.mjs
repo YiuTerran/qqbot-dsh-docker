@@ -5,7 +5,7 @@ import {
     beginOnebotTurn,
     onebotRequestMetadata,
 } from './qqbot-onebot-scope.mjs';
-import { inspectSeaDiceCommand } from './qqbot-sealdice-policy.mjs';
+import { captureOnebotGroupRole, inspectSeaDiceCommand } from './qqbot-sealdice-policy.mjs';
 
 const EVENT_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_EVENT_CACHE = 50_000;
@@ -51,6 +51,11 @@ const FAILURE_TEXT = Object.freeze({
     hidden_disabled: '当前平台不支持暗骰私聊投递，本次命令未执行。',
     private_unavailable: '当前无法安全投递私密结果，本次操作已停止。',
     backend_rejected: '海豹骰未能完成这条命令。',
+    group_state_private: '群规则只能在群聊中修改。',
+    group_role_unknown: '无法确认当前群的身份权限，群规则未修改。',
+    group_role_denied: '只有当前群的群主或管理员可以修改群规则。',
+    group_role_unsupported: 'OneBot 后端尚不支持群角色校验，群规则未修改。',
+    group_state_source_mismatch: '修改群规则需要该群主或管理员在当前消息中明确发送完整的原生命令。',
     permission_denied: '管理命令需要配置的用户在私聊中明确发送原始命令，并完成后端权限协商；本次未执行。',
     send_failed: '骰子结果发送失败，请查看当前会话后再决定下一步。',
     no_output: '海豹骰没有返回可显示的结果。',
@@ -93,6 +98,7 @@ function snapshotMessage(ctx) {
         text: message.content,
         originalTextLength: message.content.length,
         hasQuote: Boolean(ctx?.state?.quote || message.refMsgIdx || message.raw?.message_reference || message.raw?.quote),
+        groupRole: captureOnebotGroupRole(message, message.replyTarget ?? ctx?.replyTarget) ?? 'unknown',
         ownerId: message.senderId,
         replyTarget,
         currentAttachments: Array.isArray(message.attachments) ? message.attachments : [],
@@ -505,6 +511,7 @@ export function createOnebotDirectRouter({
         const scopeSignal = externalSignal ? AbortSignal.any([controller.signal, externalSignal]) : controller.signal;
         const scope = beginOnebotTurn(holder, [{
             ownerId: source.ownerId,
+            groupRole: source.groupRole,
             replyTarget: source.replyTarget,
             text: source.text,
         }], {

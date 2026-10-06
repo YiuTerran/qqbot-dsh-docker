@@ -44,6 +44,7 @@ async function waitFor(predicate, description) {
 function message(id, content, { scope = 'group', targetId = 'group-a', senderId = `member-${id}`, attachments = [] } = {}) {
     return {
         kind: scope === 'c2c' ? 'c2c' : 'group',
+        ...(scope === 'group' ? { groupOpenid: targetId } : {}),
         messageId: id,
         replyTarget: { scope, targetId, msgId: id },
         senderId,
@@ -127,6 +128,31 @@ test('merge guard waits for each survivor and preserves FIFO batches without ove
     assert.deepEqual(starts.map((entry) => entry.content), ['A', 'B\nC', 'D'],
         'every accepted message is handled exactly once in arrival order');
     assert.equal(peak, 1);
+});
+
+test('queued role snapshots are frozen before merge and cannot inherit a later raw-event edit', async () => {
+    const guard = createMergeConcurrencyGuard({ maxQueue: 4, maxProcessingMs: 0 });
+    const firstGate = deferred();
+    const firstMessage = message('role-first', 'FIRST');
+    firstMessage.raw = { group_openid: 'group-a', author: { member_openid: firstMessage.senderId, member_role: 'owner' } };
+    const queuedMessage = message('role-queued', 'QUEUED');
+    queuedMessage.raw = { group_openid: 'group-a', author: { member_openid: queuedMessage.senderId, member_role: 'member' } };
+    const first = context(firstMessage);
+    const queued = context(queuedMessage);
+    let captured;
+    let firstStarted = false;
+    const downstream = async (ctx) => {
+        if (ctx === first) { firstStarted = true; await firstGate.promise; }
+        else captured = getMergedGenerationRequests(ctx);
+    };
+    const firstRun = submit(guard, first, downstream);
+    await waitFor(() => firstStarted, 'first role entry to start');
+    const queuedRun = submit(guard, queued, downstream);
+    queuedMessage.raw.author.member_role = 'owner';
+    firstGate.resolve();
+    await Promise.all([firstRun, queuedRun]);
+    assert.equal(captured?.length, 1);
+    assert.equal(captured[0].groupRole, 'member', 'a queued member cannot gain the owner role before its turn is merged');
 });
 
 test('different group keys continue processing independently', async () => {

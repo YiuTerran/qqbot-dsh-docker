@@ -6,7 +6,7 @@ const COMMANDS = new Set(['r', 'ra', 'rc', 'st', 'pc', 'sc', 'en', 'set', 'ww', 
     'coc', 'dnd', 'dndx', 'ti', 'li', 'userid', 'find', 'setcoc', 'ss', 'buff', 'ds', 'init',
     'jrrp', 'gugu', 'ping', 'master', 'ban', ...HIDDEN, ...Object.keys(ALIASES)]);
 const ORDERED = [...COMMANDS].sort((a, b) => b.length - a.length);
-export const SEALDICE_TOOL_GUIDANCE = 'Native SeaDice commands: r/roll, ra, rc, st, pc, sc, en, set rule selection or info; ww (not set), dx, ek, rsr, coc, dnd, dndx, ti, li; userid, find/查询 (query only), setcoc (no args/details), ss and buff (no args), ds stat, init (no args/list); jrrp, gugu/咕咕 and ping. At most 10 generated candidates or execution rounds per call; saved cards have no new total limit. Never use hidden rolls, cross-user delegates, scripts or unlisted subcommands. Master list/backup and ban list/query/add/rm/trust require an authorized private sender and the exact command in that original QQ message; never synthesize an administrative command.';
+export const SEALDICE_TOOL_GUIDANCE = 'Native SeaDice commands: r/roll, ra, rc, st, pc, sc, en, set rule selection or info; ww (not set), dx, ek, rsr, coc, dnd, dndx, ti, li; userid, find/查询 (query only), setcoc (no args/details), ss and buff (no args), ds stat, init (no args/list); jrrp, gugu/咕咕 and ping. Group-wide rule changes require the current owner/admin original to contain that exact native .set command and negotiated group-role-v1; never borrow another batch member requestId. Queries and own-card operations remain ordinary-member commands. At most 10 generated candidates or execution rounds per call; saved cards have no new total limit. Never use hidden rolls, cross-user delegates, scripts or unlisted subcommands. Master list/backup and ban list/query/add/rm/trust require an authorized private sender and the exact command in that original QQ message; never synthesize an administrative command.';
 
 export function readOnebotMasterUsers(value = '[]') {
     let entries;
@@ -14,6 +14,29 @@ export function readOnebotMasterUsers(value = '[]') {
     if (!Array.isArray(entries) || entries.length > 100 || entries.some(entry => typeof entry !== 'string'
         || !/^[0-9]{1,20}:[A-Za-z0-9_-]{1,128}$/u.test(entry))) throw new Error('Invalid QQBOT_ONEBOT_MASTER_USERS.');
     return Object.freeze([...new Set(entries)]);
+}
+
+/**
+ * Capture the QQ group role only from the SDK's original raw event. Callers
+ * persist the returned primitive before queueing or merging message contexts.
+ */
+export function captureOnebotGroupRole(message, replyTarget = message?.replyTarget) {
+    if (!message || typeof message !== 'object' || message.kind !== 'group'
+        || typeof message.senderId !== 'string' || !message.senderId
+        || (message.groupOpenid !== undefined && (typeof message.groupOpenid !== 'string' || !message.groupOpenid))) return undefined;
+    const raw = message.raw;
+    const author = raw?.author;
+    const targets = [];
+    if (replyTarget !== undefined) {
+        if (replyTarget?.scope !== 'group' || typeof replyTarget.targetId !== 'string' || !replyTarget.targetId) return undefined;
+        targets.push(replyTarget.targetId);
+    }
+    if (message.groupOpenid !== undefined) targets.push(message.groupOpenid);
+    if (!raw || typeof raw !== 'object' || !author || typeof author !== 'object'
+        || targets.length === 0 || targets.some((targetId) => raw.group_openid !== targetId)
+        || author.member_openid !== message.senderId
+        || !['owner', 'admin', 'member'].includes(author.member_role)) return undefined;
+    return author.member_role;
 }
 
 export function inspectSeaDiceCommand(input, { direct = false } = {}) {
@@ -61,7 +84,9 @@ export function inspectSeaDiceCommand(input, { direct = false } = {}) {
         }
         const rounds = tail.match(/(?:^|\s)(\d+)\s*#/u);
         if (rounds && (Number(rounds[1]) < 1 || Number(rounds[1]) > 10)) allowed = false;
-        return { kind, command, allowed, admin: kind === 'master' || kind === 'ban',
+        return { kind, command, allowed, groupStateWrite: kind === 'set' && allowed
+                && /^(?:dnd|dnd5e|coc|coc7)$/iu.test(tail),
+            admin: kind === 'master' || kind === 'ban',
             reason: HIDDEN.has(kind) ? 'hidden_disabled' : allowed ? undefined : 'invalid_command' };
     }
     return undefined;

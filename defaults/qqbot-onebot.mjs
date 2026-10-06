@@ -842,12 +842,13 @@ async function sendWithDeadline(send, target, message, signal, beforeDispatch) {
     finally { combined.removeEventListener('abort', onAbort); }
 }
 
-function safeToolResult(status, outputs, notice, privateDelivery) {
+function safeToolResult(status, outputs, notice, privateDelivery, failureReason) {
     return {
         status,
         outputs,
         ...(notice ? { notice } : {}),
         ...(privateDelivery ? { privateDelivery } : {}),
+        ...(failureReason ? { failureReason } : {}),
     };
 }
 
@@ -862,12 +863,40 @@ const DIRECT_FAILURE_REASONS = Object.freeze({
     'The OneBot command could not be completed.': 'backend_rejected',
     'The OneBot command was rejected.': 'backend_rejected',
     '管理命令仅允许已配置的用户在私聊中明确发送原始命令，且后端必须完成权限协商。': 'permission_denied',
+    '群规则只能在群聊中修改。': 'group_state_private',
+    '只有当前群的群主或管理员可以修改群规则。': 'group_role_denied',
+    '无法确认当前群的身份权限，群规则未修改。': 'group_role_unknown',
+    'OneBot 后端尚不支持群角色校验，群规则未修改。': 'group_role_unsupported',
     'Hidden group rolls are disabled.': 'hidden_disabled',
     'QQ no longer supports proactive private messages for hidden group rolls.': 'hidden_disabled',
     'Private delivery eligibility could not be verified.': 'private_unavailable',
     'Private delivery was not confirmed.': 'private_unavailable',
     'Private delivery status is unknown and was not retried.': 'private_unavailable',
 });
+
+const GROUP_STATE_FAILURE_NOTICES = Object.freeze({
+    group_state_private: '群规则只能在群聊中修改。',
+    group_role_denied: '只有当前群的群主或管理员可以修改群规则。',
+    group_role_unknown: '无法确认当前群的身份权限，群规则未修改。',
+    group_role_unsupported: 'OneBot 后端尚不支持群角色校验，群规则未修改。',
+    group_state_source_mismatch: '修改群规则需要该群主或管理员在当前消息中明确发送完整的原生命令。',
+});
+
+function groupStateFailure(policy, source, backend, roleBackends) {
+    if (!policy?.groupStateWrite) return undefined;
+    if (source.audience !== 'group') return 'group_state_private';
+    if (source.groupRole === 'member') return 'group_role_denied';
+    if (source.groupRole !== 'owner' && source.groupRole !== 'admin') return 'group_role_unknown';
+    const originalPolicy = inspectSeaDiceCommand(source.text, { direct: true });
+    if (source.originalTextLength > 4000 || !originalPolicy?.groupStateWrite
+        || originalPolicy.command.toLowerCase() !== policy.command.toLowerCase()) return 'group_state_source_mismatch';
+    if (!roleBackends.has(backend)) return 'group_role_unsupported';
+    return undefined;
+}
+
+function groupStateFailureResult(reason) {
+    return safeToolResult('failed', [], GROUP_STATE_FAILURE_NOTICES[reason], undefined, reason);
+}
 
 function directExecutionResult(result, exec) {
     if (!getBoundOnebotExecution(exec)?.direct || result?.status === 'ok') return result;
@@ -900,6 +929,11 @@ async function executeCommand(args, exec, runtime) {
     if (source.onebotDirectFallback) {
         return safeToolResult('failed', [], 'This original QQ message is a direct-command fallback; explain its error without running another OneBot command.');
     }
+    const initialGroupStateFailure = groupStateFailure(policy, source, args.backend, runtime.groupRoleBackends);
+    if (initialGroupStateFailure) {
+        logToolFailure(ONEBOT_COMMAND_TOOL, 'authorize', { kind: 'failed', code: initialGroupStateFailure });
+        return groupStateFailureResult(initialGroupStateFailure);
+    }
     if (policy?.admin && (source.audience !== 'private'
         || source.originalTextLength > 4000
         || source.hasAttachments || source.hasQuote
@@ -914,6 +948,11 @@ async function executeCommand(args, exec, runtime) {
             return safeToolResult('failed', [], 'This command belongs to an expired QQ message.');
         }
         if (!runtime.readyBackends.has(args.backend)) return safeToolResult('failed', [], 'The selected OneBot backend is unavailable.');
+        const queuedGroupStateFailure = groupStateFailure(policy, source, args.backend, runtime.groupRoleBackends);
+        if (queuedGroupStateFailure) {
+            logToolFailure(ONEBOT_COMMAND_TOOL, 'authorize', { kind: 'failed', code: queuedGroupStateFailure });
+            return groupStateFailureResult(queuedGroupStateFailure);
+        }
         const commandKind = onebotCommandKind(args.command);
         if (source.audience === 'group' && commandKind === 'rh' && !runtime.config.hiddenEnabled) {
             return safeToolResult('failed', [], 'Hidden group rolls are disabled.');
@@ -940,6 +979,7 @@ async function executeCommand(args, exec, runtime) {
             audience: source.audience,
         };
         let dispatched = false;
+        let preDispatchGroupStateFailure;
         const inFlight = runtime.inFlightByBackend.get(args.backend) ?? 0;
         if (inFlight >= MAX_BACKEND_IN_FLIGHT) {
             return safeToolResult('failed', [], 'The OneBot backend queue is full.');
@@ -948,7 +988,7 @@ async function executeCommand(args, exec, runtime) {
         try {
             let result;
             try {
-                result = await runtime.session.callWs({
+                const callArgs = {
                     backend_id: args.backend,
                     request_id: expected.requestId,
                     payload: normalizeOnebotCommand(args.command),
@@ -956,8 +996,19 @@ async function executeCommand(args, exec, runtime) {
                     user_key: source.userKey,
                     ...(source.groupKey ? { group_key: source.groupKey } : {}),
                     timeout: Math.ceil(REQUEST_TIMEOUT_MS / 1000),
-                }, signal, async () => {
+                };
+                if (source.audience === 'group' && source.groupRole !== 'unknown'
+                    && runtime.groupRoleBackends.has(args.backend)) callArgs.group_role = source.groupRole;
+                result = await runtime.session.callWs(callArgs, signal, async () => {
                     if (onebotExecutionFailure(exec) || signal.aborted || !runtime.readyBackends.has(args.backend)) return false;
+                    const dispatchGroupStateFailure = groupStateFailure(policy, source, args.backend, runtime.groupRoleBackends);
+                    if (dispatchGroupStateFailure) {
+                        preDispatchGroupStateFailure = dispatchGroupStateFailure;
+                        return false;
+                    }
+                    if (Object.hasOwn(callArgs, 'group_role') && !runtime.groupRoleBackends.has(args.backend)) {
+                        delete callArgs.group_role;
+                    }
                     if (source.audience === 'group' && commandKind === 'rh') {
                         if (!runtime.config.hiddenEnabled || runtime.options.proactiveC2CAvailable !== true || !hiddenRecipient
                             || !runtime.options.friendRegistry?.isFriend(hiddenRecipient.userOpenId)) return false;
@@ -1026,6 +1077,10 @@ async function executeCommand(args, exec, runtime) {
             return safeToolResult('unknown', [], 'The command result is unknown and was not retried.');
         }
         catch (error) {
+            if (preDispatchGroupStateFailure) {
+                logToolFailure(ONEBOT_COMMAND_TOOL, 'authorize', { kind: 'failed', code: preDispatchGroupStateFailure });
+                return groupStateFailureResult(preDispatchGroupStateFailure);
+            }
             logToolFailure(ONEBOT_COMMAND_TOOL, 'call', error);
             // Once call_ws dispatch begins, the Dice side may have executed.
             if (dispatched) blockOnebotRequest(scope, args.requestId);
@@ -1054,6 +1109,7 @@ export function registerOnebotCommandTool(ctx, options = {}) {
         options: { ...options },
         readyBackends: new Set(),
         adminBackends: new Set(),
+        groupRoleBackends: new Set(),
         registered: false,
         session: undefined,
         timer: undefined,
@@ -1166,7 +1222,7 @@ export function registerOnebotCommandTool(ctx, options = {}) {
                                 outputs: { type: 'array', items: { type: 'string' } },
                                 notice: { type: 'string' },
                                 privateDelivery: { type: 'string', enum: ['sent', 'failed', 'unknown'] },
-                                failureReason: { type: 'string', enum: ['queue_full', 'backend_not_ready', 'expired', 'uncertain', 'timeout', 'privacy_withheld', 'hidden_disabled', 'private_unavailable', 'backend_rejected', 'permission_denied'] },
+                                failureReason: { type: 'string', enum: ['queue_full', 'backend_not_ready', 'expired', 'uncertain', 'timeout', 'privacy_withheld', 'hidden_disabled', 'private_unavailable', 'backend_rejected', 'permission_denied', 'group_state_private', 'group_role_unknown', 'group_role_denied', 'group_role_unsupported', 'group_state_source_mismatch'] },
                             },
                             required: ['status', 'outputs'],
                             additionalProperties: false,
@@ -1207,18 +1263,23 @@ export function registerOnebotCommandTool(ctx, options = {}) {
                 if (!tools.some((tool) => tool?.name === 'call_ws')) {
                     runtime.readyBackends = new Set();
                     runtime.adminBackends.clear();
+                    runtime.groupRoleBackends.clear();
                     return availability(false, 'call-ws-missing', readyIds.size);
                 }
                 runtime.readyBackends = readyIds;
                 runtime.adminBackends = new Set((Array.isArray(result?.backends) ? result.backends : [])
                     .filter(backend => readyIds.has(backend?.id) && Array.isArray(backend.capabilities)
                         && backend.capabilities.includes('master-acl-v1')).map(backend => backend.id));
+                runtime.groupRoleBackends = new Set((Array.isArray(result?.backends) ? result.backends : [])
+                    .filter(backend => readyIds.has(backend?.id) && Array.isArray(backend.capabilities)
+                        && backend.capabilities.includes('group-role-v1')).map(backend => backend.id));
                 return availability(readyIds.size > 0, readyIds.size > 0 ? 'ready' : 'backend-not-ready');
             }
             catch (error) {
                 if (runtime.stopped) return false;
                 runtime.readyBackends = new Set();
                 runtime.adminBackends.clear();
+                runtime.groupRoleBackends.clear();
                 const key = typeof error?.code === 'string' ? error.code
                     : typeof error?.name === 'string' ? error.name : 'probe-failed';
                 if (key !== runtime.lastProbeErrorKey) {
@@ -1239,6 +1300,7 @@ export function registerOnebotCommandTool(ctx, options = {}) {
         runtime.refreshController.abort(new Error('OneBot service is stopping.'));
         runtime.readyBackends.clear();
         runtime.adminBackends.clear();
+        runtime.groupRoleBackends.clear();
         availability(false, 'stopped');
         runtime.detachFriendEvents?.();
         await runtime.refreshTask?.catch(() => {});

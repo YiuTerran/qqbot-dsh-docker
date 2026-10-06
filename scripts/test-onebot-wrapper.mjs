@@ -2,6 +2,7 @@
 import assert from 'node:assert/strict';
 import { registerOnebotCommandTool } from '/opt/qqbot-defaults/qqbot-onebot.mjs';
 import { createOnebotDirectRouter } from '/opt/qqbot-defaults/qqbot-onebot-direct.mjs';
+import { captureOnebotGroupRole } from '/opt/qqbot-defaults/qqbot-sealdice-policy.mjs';
 import {
     beginOnebotTurn, endOnebotTurn, bindOnebotExecution, onebotRequestMetadata,
     getOnebotDirectFallback, getOnebotDirectFallbackForSnapshot,
@@ -13,14 +14,27 @@ const appId = '123456789';
 const context = { get: (name) => name === 'tools' ? { register(tool) { descriptor = tool; } } : undefined };
 const controller = registerOnebotCommandTool(context, { appId });
 const summary = [];
+const groupOriginal = (ownerId, group, text, role = 'member') => {
+    const message = { kind: 'group', senderId: ownerId, groupOpenid: group,
+        replyTarget: { scope: 'group', targetId: group },
+        raw: { author: { member_openid: ownerId, ...(role ? { member_role: role } : {}) }, group_openid: group } };
+    return { ownerId, text, replyTarget: message.replyTarget, groupRole: captureOnebotGroupRole(message) ?? 'unknown' };
+};
 try {
     assert.equal(await controller.ready, true, 'real backend is not ready for qq-bot wrapper');
     assert.equal(descriptor?.name, 'qqbot_onebot_command');
     assert.deepEqual(Object.keys(descriptor.parameters.properties).sort(), ['backend', 'command', 'requestId']);
+    const setupAgent = {};
+    const setupScope = beginOnebotTurn(setupAgent,
+        [groupOriginal('fixtureOwnerA', 'fixtureGroupA', '.set coc7', 'owner')], { appId });
+    try {
+        assert.equal((await descriptor.execute({ requestId: onebotRequestMetadata(setupScope)[0].requestId,
+            backend: 'sealdice', command: '.set coc7' }, { agent: setupAgent })).status, 'ok');
+    } finally { await endOnebotTurn(setupAgent, setupScope); }
     const groupAgent = {};
     const originals = [
-        { ownerId: 'fixtureOwnerA', replyTarget: { scope: 'group', targetId: 'fixtureGroupA' }, text: '设置力量31并查询' },
-        { ownerId: 'fixtureOwnerB', replyTarget: { scope: 'group', targetId: 'fixtureGroupA' }, text: '设置力量47并查询' },
+        groupOriginal('fixtureOwnerA', 'fixtureGroupA', '设置力量31并查询', 'owner'),
+        groupOriginal('fixtureOwnerB', 'fixtureGroupA', '设置力量47并查询'),
     ];
     const groupScope = beginOnebotTurn(groupAgent, originals, { appId });
     const metadata = onebotRequestMetadata(groupScope);
@@ -28,9 +42,23 @@ try {
     const execution = { agent: groupAgent };
     bindOnebotExecution(execution);
     const run = (requestId, command) => descriptor.execute({ requestId, backend: 'sealdice', command }, execution);
+    assert.equal(metadata[0].groupRole, 'owner');
+    assert.equal(metadata[1].groupRole, 'member');
+    assert.equal((await run(metadata[0].requestId, '.set dnd')).failureReason, 'group_state_source_mismatch',
+        'a member cannot borrow an unrelated owner original to change group rules');
+    const beforeDenied = await run(metadata[1].requestId, '.set info');
+    assert.equal((await run(metadata[1].requestId, '.set dnd')).failureReason, 'group_role_denied');
+    // A fresh request avoids any cached query hiding a rule mutation.
+    const auditAgent = {};
+    const auditScope = beginOnebotTurn(auditAgent, [groupOriginal('fixtureOwnerB', 'fixtureGroupA', '.set info')], { appId });
+    try {
+        const audited = await descriptor.execute({ requestId: onebotRequestMetadata(auditScope)[0].requestId,
+            backend: 'sealdice', command: '.set info' }, { agent: auditAgent });
+        assert.deepEqual(audited.outputs, beforeDenied.outputs);
+    } finally { await endOnebotTurn(auditAgent, auditScope); }
     for (const [index, value] of [[0, 31], [1, 47]]) {
         const requestId = metadata[index].requestId;
-        for (const command of ['.set coc7', `.st 力量${value}`]) {
+        for (const command of [`.st 力量${value}`]) {
             assert.equal((await run(requestId, command)).status, 'ok', command);
         }
         const card = await run(requestId, '.st show 力量');
@@ -75,9 +103,9 @@ try {
     await endOnebotTurn(privateAgent, privateScope);
     summary.push({ check: 'private-user-scope' });
 
-    const freshCommand = async (ownerId, command, { group, text = command } = {}) => {
+    const freshCommand = async (ownerId, command, { group, text = command, role = 'member' } = {}) => {
         const agent = {};
-        const scope = beginOnebotTurn(agent, [{ ownerId, text, replyTarget: {
+        const scope = beginOnebotTurn(agent, [group ? groupOriginal(ownerId, group, text, role) : { ownerId, text, replyTarget: {
             scope: group ? 'group' : 'c2c', targetId: group || ownerId,
         } }], { appId });
         try {
@@ -113,14 +141,26 @@ try {
         assert.equal((await freshCommand('fixtureMaster', `.ban add ${target}`)).status, 'failed', target);
     }
     summary.push({ check: 'real-master-private-exact-source-backup-ban-trust-and-known-target-boundary' });
+    for (const [ownerId, role, reason] of [
+        ['fixtureRoleMember', 'member', 'group_role_denied'],
+        ['fixtureRoleUnknown', undefined, 'group_role_unknown'],
+        ['fixtureMaster', 'member', 'group_role_denied'],
+    ]) {
+        const result = await freshCommand(ownerId, '.set dnd', { group: 'fixtureGroupA', role: role ?? '' });
+        assert.equal(result.status, 'failed');
+        assert.equal(result.failureReason, reason);
+        assert.equal((await freshCommand(ownerId, '.set info', { group: 'fixtureGroupA', role: role ?? '' })).status, 'ok');
+    }
+    summary.push({ check: 'real-wrapper-per-original-group-role-member-unknown-master-no-bypass' });
 
     for (const command of ['.set coc7', '.coc 2', '.ti', '.li', '.ww 3a10', '.dx 3c10', '.ek 潜行', '.rsr 3',
         '.jrrp', '.gugu', '.ping', '.set info', '.setcoc', '.setcoc details']) {
-        const result = await freshCommand('fixtureQueryOwner', command, { group: 'fixtureQueryGroup' });
+        const result = await freshCommand('fixtureQueryOwner', command, { group: 'fixtureQueryGroup',
+            role: command === '.set coc7' ? 'owner' : 'member' });
         assert.equal(result.status, 'ok', command);
         assert.ok(result.outputs.length > 0, command);
     }
-    await freshCommand('fixtureQueryOwner', '.set dnd', { group: 'fixtureQueryGroup' });
+    assert.equal((await freshCommand('fixtureQueryOwner', '.set dnd', { group: 'fixtureQueryGroup', role: 'admin' })).status, 'ok');
     for (const command of ['.dnd 2', '.dndx 2', '.ss', '.buff', '.ds stat', '.init', '.init list']) {
         assert.equal((await freshCommand('fixtureQueryOwner', command, { group: 'fixtureQueryGroup' })).status, 'ok', command);
     }
@@ -142,10 +182,12 @@ try {
         env: { QQBOT_ONEBOT_DIRECT_ENABLED: 'true' },
         sender: { async sendMarkdown(target, content) { sent.push({ target, content }); } },
     };
-    const message = (id, content, owner = 'fixtureDirectA', group = 'fixtureDirectG') => ({
+    const message = (id, content, owner = 'fixtureDirectA', group = 'fixtureDirectG', role = 'member') => ({
         message: {
             kind: group ? 'group' : 'c2c', senderId: owner, content, attachments: [],
             replyTarget: { scope: group ? 'group' : 'c2c', targetId: group || owner, msgId: id },
+            ...(group ? { groupOpenid: group, raw: { author: { member_openid: owner,
+                ...(role ? { member_role: role } : {}) }, group_openid: group } } : {}),
         }, state: {},
     });
     const direct = createOnebotDirectRouter(routerOptions);
@@ -154,7 +196,8 @@ try {
         for (const [id, command] of [
             ['direct-set', '.set coc7'], ['direct-card', '.st 力量63'],
             ['direct-query', '.st show 力量'], ['direct-roll', '.r2d7'],
-        ]) await direct.middleware(message(id, command), next);
+        ]) await direct.middleware(message(id, command, 'fixtureDirectA', 'fixtureDirectG',
+            command === '.set coc7' ? 'owner' : 'member'), next);
         assert.equal(modelCalls, 0, 'native command invoked downstream model path');
         assert.ok(sent.some(({ content }) => content.includes('63')), 'direct card result missing');
         const rolled = sent.at(-1);
@@ -163,7 +206,7 @@ try {
             ['fixtureDirectB', 'fixtureDirectG', 47],
             ['fixtureDirectA', 'fixtureDirectG2', 89],
         ]) {
-            await direct.middleware(message(`direct-set-${owner}-${group}`, '.set coc7', owner, group), next);
+            await direct.middleware(message(`direct-set-${owner}-${group}`, '.set coc7', owner, group, 'admin'), next);
             await direct.middleware(message(`direct-card-${owner}-${group}`, `.st 力量${value}`, owner, group), next);
         }
         for (const [owner, group, value] of [
@@ -184,8 +227,25 @@ try {
         assert.equal(sent.at(-1).target.scope, 'c2c');
         assert.equal(sent.at(-1).target.targetId, 'fixtureDirectA');
 
-        // A private `.set` is a recognized native command, but SeaDice rejects
-        // rule selection in C2C. The real MCP result must hand off once to the
+        for (const [id, role, reason] of [
+            ['direct-member-denied', 'member', 'group_role_denied'],
+            ['direct-role-missing', '', 'group_role_unknown'],
+        ]) {
+            const beforeState = await freshCommand('fixtureDirectA', '.set info', { group: 'fixtureDirectG' });
+            const deniedContext = message(id, '.set dnd', 'fixtureDirectA', 'fixtureDirectG', role);
+            const beforeSent = sent.length;
+            const beforeCalls = modelCalls;
+            await direct.middleware(deniedContext, next);
+            assert.equal(modelCalls, beforeCalls + 1);
+            assert.equal(sent.length, beforeSent);
+            assert.equal(getOnebotDirectFallback(deniedContext)?.reason, reason);
+            const afterState = await freshCommand('fixtureDirectA', '.set info', { group: 'fixtureDirectG' });
+            assert.deepEqual(afterState.outputs, beforeState.outputs, 'denied direct call changed group rules');
+        }
+        summary.push({ check: 'real-direct-member-and-unknown-refused-before-write-no-early-notice' });
+
+        // A private `.set` is recognized but rejected before dispatch.
+        // The permission result must hand off once to the
         // normal generation path without sending a premature failure reply.
         const fallbackContext = message('direct-fallback-set', '.set coc7', 'fixtureDirectA', null);
         const beforeFallbackSends = sent.length;
@@ -196,7 +256,7 @@ try {
         assert.equal(fallbackContext.message.content, '.set coc7', 'fallback changed the original message content');
         const fallbackMetadata = getOnebotDirectFallback(fallbackContext);
         assert.ok(fallbackMetadata, 'trusted backend failure metadata was not attached to the original context');
-        assert.equal(fallbackMetadata.reason, 'backend_rejected');
+        assert.equal(fallbackMetadata.reason, 'group_state_private');
 
         const fallbackSnapshot = {
             ownerId: fallbackContext.message.senderId,
@@ -224,7 +284,7 @@ try {
         bindOnebotExecution(retryExecution);
         const retryMetadata = onebotRequestMetadata(retryScope);
         assert.equal(retryMetadata.length, 2);
-        assert.equal(retryMetadata[0].directFallback?.reason, 'backend_rejected',
+        assert.equal(retryMetadata[0].directFallback?.reason, 'group_state_private',
             'rerun request metadata lost the trusted fallback marker');
         const blockedRetry = await descriptor.execute({ requestId: retryMetadata[0].requestId,
             backend: 'sealdice', command: '.r 1d1' }, retryExecution);

@@ -43,16 +43,18 @@ const {
 } = scopeModule;
 
 const appId = '123456789';
-const config = (hiddenEnabled = false) => ({
+const config = (hiddenEnabled = false, masterUsers = []) => ({
     enabled: true,
     hiddenEnabled,
     url: new URL('http://onebot.test/mcp'),
     backendIds: Object.freeze(['sealdice']),
+    masterUsers,
     mcpToken: 'test-mcp-token',
     internalToken: 'test-internal-token',
 });
-const groupOriginal = (ownerId = 'member-a', groupId = 'group-a') => ({
+const groupOriginal = (ownerId = 'member-a', groupId = 'group-a', groupRole = 'unknown') => ({
     ownerId,
+    groupRole,
     replyTarget: { scope: 'group', targetId: groupId, msgId: 'group-message-id' },
     text: '请掷一个骰子',
 });
@@ -69,7 +71,7 @@ function deferred() {
     return { promise, resolve, reject };
 }
 
-function setup({ hidden = false, resultForCall, friendRegistry, testSender = false, sendPrivateText,
+function setup({ hidden = false, resultForCall, friendRegistry, testSender = false, sendPrivateText, backendCapabilities = [], masterUsers = [],
     resolveHiddenRecipient, verifyProactiveEligibility, session, fetchImpl, bot, registerError,
     onAvailability, logger } = {}) {
     let descriptor;
@@ -80,24 +82,26 @@ function setup({ hidden = false, resultForCall, friendRegistry, testSender = fal
         descriptor = tool;
     } } : undefined };
     let calls = 0;
+    const callArguments = [];
     const mockSession = session ?? {
         async listTools() { return [{ name: 'call_ws' }]; },
         async callWs(args, signal, onDispatch) {
             if (signal?.aborted || await onDispatch() !== true) throw new Error('dispatch denied');
             calls++;
+            callArguments.push(args);
             return resultForCall ? resultForCall(args, calls) : bridgeResult(args, { outputs: ['1d1 = 1'] });
         },
     };
     const fallbackFetch = async (url, init = {}) => {
         const path = new URL(url).pathname;
-        if (path === '/internal/backends') return json({ backends: [{ id: 'sealdice', ready: true, version: 1 }] });
+        if (path === '/internal/backends') return json({ backends: [{ id: 'sealdice', ready: true, version: 1, capabilities: backendCapabilities }] });
         if (path === '/internal/private/claim') return json({ delivery_id: 'delivery-1', outputs: [{ target_id: 17, message: 'PRIVATE_SENTINEL' }] });
         if (path === '/internal/private/ack') return json({ ok: true });
         throw new Error(`unexpected URL ${path}`);
     };
     const service = registerOnebotCommandTool(ctx, {
         appId,
-        config: config(hidden),
+        config: config(hidden, masterUsers),
         session: mockSession,
         fetchImpl: fetchImpl ?? fallbackFetch,
         friendRegistry,
@@ -115,6 +119,7 @@ function setup({ hidden = false, resultForCall, friendRegistry, testSender = fal
         get descriptor() { return descriptor; },
         registrations,
         get calls() { return calls; },
+        callArguments,
     };
 }
 
@@ -323,6 +328,133 @@ test('same original command shares a call and unsupported production rh never di
     assert.equal(service.calls, 1, 'production hidden roll must be rejected before backend dispatch');
     await endOnebotTurn(agent, scope);
     await service.service.stop();
+});
+
+test('group .set writes require the original bound owner or admin and a capable backend', async () => {
+    const rolesSent = [];
+    const service = setup({
+        backendCapabilities: ['group-role-v1'],
+        masterUsers: [`${appId}:member-a`],
+        resultForCall(args) {
+            rolesSent.push(args.group_role);
+            return bridgeResult(args, { outputs: ['rule changed'] });
+        },
+    });
+    await service.service.ready;
+    const invoke = async ({ audience = 'group', role = 'unknown', text = '.set coc7', command = '.set coc7' } = {}) => {
+        const agent = {};
+        const original = audience === 'private'
+            ? { ...privateOriginal('member-a'), groupRole: role, text }
+            : { ...groupOriginal('member-a', 'group-a', role), text };
+        const scope = beginOnebotTurn(agent, [original], { appId });
+        try {
+            const requestId = onebotRequestMetadata(scope)[0].requestId;
+            return await service.descriptor.execute({ requestId, backend: 'sealdice', command }, { agent });
+        }
+        finally { await endOnebotTurn(agent, scope); }
+    };
+    try {
+        for (const role of ['owner', 'admin']) assert.equal((await invoke({ role })).status, 'ok', role);
+        assert.deepEqual(rolesSent, ['owner', 'admin'], 'only SDK-bound roles reach a role-capable bridge');
+
+        const originalWarn = console.warn;
+        const logs = [];
+        console.warn = (...values) => logs.push(values.map(String).join(' '));
+        try {
+            for (const role of ['member', 'Owner', 'invented', undefined]) {
+                const denied = await invoke({ role });
+                assert.equal(denied.status, 'failed');
+                assert.equal(denied.failureReason, role === 'member' ? 'group_role_denied' : 'group_role_unknown');
+            }
+            const privateDenied = await invoke({ audience: 'private', role: 'owner' });
+            assert.equal(privateDenied.failureReason, 'group_state_private');
+        }
+        finally { console.warn = originalWarn; }
+        assert.ok(logs.some((line) => line.includes('"stage":"authorize"') && line.includes('"code":"group_role_denied"')));
+        assert.ok(logs.every((line) => !/member-a|group-a|\.set|owner|admin/u.test(line)), 'authorization diagnostics must omit sender, group, command, and role');
+
+        const memberInfo = await invoke({ role: 'member', command: '.set info', text: '.set info' });
+        assert.equal(memberInfo.status, 'ok', '.set info remains a query for regular members');
+        const forgedAgent = {};
+        const forgedScope = beginOnebotTurn(forgedAgent, [groupOriginal('member-a', 'group-a', 'member')], { appId });
+        try {
+            const requestId = onebotRequestMetadata(forgedScope)[0].requestId;
+            const forged = await service.descriptor.execute({ requestId, backend: 'sealdice', command: '.set coc7', group_role: 'owner' }, { agent: forgedAgent });
+            assert.equal(forged.status, 'failed', 'tool arguments cannot provide identity or group role');
+        }
+        finally { await endOnebotTurn(forgedAgent, forgedScope); }
+        assert.equal(service.calls, 3, 'only owner/admin writes and the ordinary info query dispatch');
+    }
+    finally { await service.service.stop(); }
+
+    const legacy = setup({ backendCapabilities: [] });
+    await legacy.service.ready;
+    try {
+        const agent = {};
+        const scope = beginOnebotTurn(agent, [{ ...groupOriginal('member-a', 'group-a', 'owner'), text: '.set dnd' }], { appId });
+        try {
+            const result = await legacy.service.execute({ requestId: onebotRequestMetadata(scope)[0].requestId,
+                backend: 'sealdice', command: '.set dnd' }, { agent });
+            assert.equal(result.failureReason, 'group_role_unsupported');
+            assert.equal(legacy.calls, 0, 'legacy backend rejects only group state writes before dispatch');
+        }
+        finally { await endOnebotTurn(agent, scope); }
+    }
+    finally { await legacy.service.stop(); }
+});
+
+test('a merged member request cannot borrow an unrelated owner request ID for a group write', async () => {
+    const service = setup({ backendCapabilities: ['group-role-v1'] });
+    await service.service.ready;
+    const { agent, scope, exec, metadata } = boundExec([
+        { ...groupOriginal('owner-a', 'group-a', 'owner'), text: '今天怎么样' },
+        { ...groupOriginal('member-b', 'group-a', 'member'), text: '.set coc7' },
+        { ...groupOriginal('admin-c', 'group-a', 'admin'), text: '.set dnd' },
+    ]);
+    try {
+        const call = (index, command) => service.descriptor.execute({ requestId: metadata[index].requestId,
+            backend: 'sealdice', command }, exec);
+        assert.equal((await call(0, '.set coc7')).failureReason, 'group_state_source_mismatch');
+        assert.equal((await call(1, '.set coc7')).failureReason, 'group_role_denied');
+        assert.equal((await call(2, '.set coc7')).failureReason, 'group_state_source_mismatch');
+        assert.equal(service.calls, 0, 'mismatched originals never dispatch');
+        assert.equal((await call(2, '.set dnd')).status, 'ok');
+        assert.equal(service.calls, 1, 'only the admin own explicit command dispatches');
+    } finally { await endOnebotTurn(agent, scope); await service.service.stop(); }
+});
+
+test('group capability is rechecked after per-original queue wait and immediately before dispatch', async () => {
+    for (const stage of ['queue', 'dispatch']) {
+        const gate = deferred();
+        const started = deferred();
+        let dispatched = 0;
+        const session = {
+            async listTools() { return [{ name: 'call_ws' }]; },
+            async callWs(args, signal, onDispatch) {
+                if (stage === 'dispatch') { started.resolve(); await gate.promise; }
+                if (await onDispatch() !== true) throw new Error('dispatch denied');
+                dispatched++;
+                if (stage === 'queue' && args.payload === '.r 1d1') { started.resolve(); await gate.promise; }
+                return bridgeResult(args, { outputs: ['completed'] });
+            },
+        };
+        const service = setup({ backendCapabilities: ['group-role-v1'], session });
+        await service.service.ready;
+        const { agent, scope, exec, metadata } = boundExec([{ ...groupOriginal('owner-a', 'group-a', 'owner'), text: '.set coc7' }]);
+        const args = { requestId: metadata[0].requestId, backend: 'sealdice', command: '.set coc7' };
+        try {
+            const initial = stage === 'queue' ? service.descriptor.execute({ ...args, command: '.r 1d1' }, exec)
+                : service.descriptor.execute(args, exec);
+            await started.promise;
+            const queued = stage === 'queue' ? service.descriptor.execute(args, exec) : initial;
+            service.service.runtime.groupRoleBackends.clear();
+            gate.resolve();
+            const result = await queued;
+            assert.equal(result.failureReason, 'group_role_unsupported', stage);
+            if (stage === 'queue') await initial;
+            assert.equal(dispatched, stage === 'queue' ? 1 : 0, 'revoked-capability write was dispatched');
+        } finally { gate.resolve(); await endOnebotTurn(agent, scope); await service.service.stop(); }
+    }
 });
 
 test('same original dedupes prefix and command-name case but preserves argument whitespace', async () => {

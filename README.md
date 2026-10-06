@@ -71,7 +71,9 @@ v0.10.0 移除本地群聊上下文过滤，恢复 SDK 与模型会话的原生�
 
 Master 默认关闭。`QQBOT_ONEBOT_MASTER_USERS=[]` 为 JSON 身份数组，使用私聊 `.userid` 返回的 `应用ID:原始用户openid`，不要填昵称或海豹虚拟数字 ID。配置后仅允许该人员在私聊明确发送 `.master list/backup`、`.ban list/query/add/rm/trust`；后台必须完成 `master-acl-v1` 协商。封禁目标只接受本后端已知的虚拟用户/群 ID。`trust` 不授予 Master，空清单不会触发原生的人人管理行为。备份写入独立命名卷，不外发。所有暗骰与别名均拒绝，保留私密 outbox 的协议隔离。
 
-v0.11.0 提供以上新增命令、Markdown 回执与 Master 权限。完整部署请同时使用 `tryao/gensokyo-mcp:v0.2.0` 和 `tryao/sealdice-core:v1.6.2-bridge.4`，配置见 [OneBot 集成说明](docs/onebot-integration.md)。
+群规则修改（当前开放的 `.set dnd/dnd5e/coc/coc7`）仅允许 QQ 当前群的群主或管理员，且须匹配该人员本条原消息中的完整原生命令，不能借用同批另一人的请求 ID。权限取自本条 SDK 原始事件的 `author.member_role`，并与发送者和群核对；未提供或无法核实时拒绝修改，不能由昵称、聊天声明或 Master 清单补授。`.set info`、现有 `.setcoc` 查询及本人角色卡操作仍对普通成员开放。后端需协商 `group-role-v1`；旧后端保留普通功能，但不能修改整群规则。
+
+v0.11.0 提供新增命令、Markdown 回执与 Master 权限，镜像组合为 `tryao/gensokyo-mcp:v0.2.0` 和 `tryao/sealdice-core:v1.6.2-bridge.4`。上述群角色保护属于后续源码变更，尚未发布镜像；验证时需从主仓库及固定子模块源码构建三端，不能仅替换一个已发布镜像。配置见 [OneBot 集成说明](docs/onebot-integration.md)。
 
 ### 图片生成路由与 Markdown 限额
 

@@ -64,9 +64,11 @@ class Client:
         self.rpc("notifications/initialized", notification=True)
         assert any(tool["name"] == "call_ws" for tool in self.rpc("tools/list")["tools"])
 
-    def command(self, command, user="11001", group="22001", invocation=None):
+    def command(self, command, user="11001", group="22001", invocation=None, role=None):
         args = {"backend_id": "sealdice", "request_id": invocation or str(uuid.uuid4()),
                 "audience": "group", "payload": command, "user_id": int(user), "group_id": int(group)}
+        if role is not None:
+            args["group_role"] = role
         result = self.rpc("tools/call", {"name": "call_ws", "arguments": args})
         assert not result.get("isError"), result
         texts = [item["text"] for item in result.get("content", []) if item.get("type") == "text"]
@@ -178,12 +180,38 @@ def main():
         evidence["checks"].append("native whitelist rejects management, hidden aliases and non-rule set without blocking next request")
         for user, group, value in [("11001", "22001", 31), ("11002", "22001", 47),
                                    ("11001", "22002", 73), ("11002", "22002", 89)]:
-            client.command(".set coc7", user, group)
+            client.command(".set coc7", user, group, role="owner")
             client.command(".st 力量" + str(value), user, group)
             queried = client.command(".st show 力量", user, group)
             assert str(value) in text(queried), queried
             evidence["results"].append(queried)
         evidence["checks"].append("two users by two groups isolated native state")
+        assert "group-role-v1" in next(item for item in backends if item["id"] == "sealdice")["capabilities"]
+        role_group = "22003"
+        client.command(".set coc7", group=role_group, role="owner")
+        for role in ("member", None):
+            before = text(client.command(".set info", group=role_group, role=role))
+            arguments = {"backend_id": "sealdice", "request_id": str(uuid.uuid4()),
+                         "audience": "group", "payload": ".set dnd", "user_id": 11001, "group_id": int(role_group)}
+            if role is not None:
+                arguments["group_role"] = role
+            rejected = client.rpc("tools/call", {"name": "call_ws", "arguments": arguments})
+            assert not rejected.get("isError"), rejected
+            terminal = json.loads(rejected["content"][0]["text"])
+            assert terminal["status"] == "failed" and not terminal["outputs"], terminal
+            assert text(client.command(".set info", group=role_group, role=role)) == before
+            assert client.command(".r 1d1", group=role_group, role=role)["status"] == "ok"
+        client.command(".set dnd", group=role_group, role="admin")
+        assert "20" in text(client.command(".set info", group=role_group, role="member"))
+        client.command(".set coc7", group=role_group, role="owner")
+        assert "100" in text(client.command(".set info", group=role_group))
+        role_invocation = str(uuid.uuid4())
+        client.command(".r 1d1", group=role_group, invocation=role_invocation, role="member")
+        conflict = client.rpc("tools/call", {"name": "call_ws", "arguments": {
+            "backend_id": "sealdice", "request_id": role_invocation, "audience": "group",
+            "payload": ".r 1d1", "user_id": 11001, "group_id": int(role_group), "group_role": "owner"}})
+        assert conflict.get("isError"), "role change reused a persisted request ID"
+        evidence["checks"].append("group owner/admin only rule writes, ordinary queries, unknown rejection and role dedup")
         def parallel_query(pair):
             user, group, value = pair
             parallel = Client(client.origin, token)
@@ -248,7 +276,7 @@ def main():
         # so growth and sanity changes cannot alter the isolation fixtures.
         for command in [".set coc7", ".st 力量50 理智50", ".ra 力量", ".rc 力量",
                         ".sc 0/0", ".en 力量", ".pc list"]:
-            native = client.command(command, "11003", "22003")
+            native = client.command(command, "11003", "22003", role="owner" if command == ".set coc7" else "member")
             assert native["outputs"], (command, native)
             evidence["results"].append(native)
         evidence["checks"].append("native ra rc sc en pc command handlers")

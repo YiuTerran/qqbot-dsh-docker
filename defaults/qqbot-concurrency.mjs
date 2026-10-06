@@ -1,5 +1,6 @@
 import { isRecentImageSnapshot } from './qqbot-pending-images.mjs';
 import { getOnebotDirectFallback } from './qqbot-onebot-scope.mjs';
+import { captureOnebotGroupRole } from './qqbot-sealdice-policy.mjs';
 
 const DEFAULT_MAX_QUEUE = 20;
 const BUSY_NOTICE = '主人，本鱼太忙啦，请等一会儿再来找本鱼吧。';
@@ -32,6 +33,7 @@ function snapshotGenerationRequest(ctx) {
     const directFallback = getOnebotDirectFallback(ctx);
     return Object.freeze({
         ownerId: message.senderId,
+        groupRole: captureOnebotGroupRole(message, message.replyTarget ?? ctx?.replyTarget) ?? 'unknown',
         replyTarget,
         text: typeof message.content === 'string' ? message.content.slice(0, 4000) : '',
         originalTextLength: typeof message.content === 'string' ? message.content.length : 0,
@@ -48,7 +50,7 @@ function snapshotGenerationRequest(ctx) {
 }
 
 function captureGenerationRequests(entries, mergedCtx) {
-    const requests = entries.map(({ ctx }) => snapshotGenerationRequest(ctx)).filter(Boolean);
+    const requests = entries.map((entry) => entry.generationRequest ?? snapshotGenerationRequest(entry.ctx)).filter(Boolean);
     if (!mergedCtx || typeof mergedCtx !== 'object') return;
     generationRequestsByContext.set(mergedCtx, Object.freeze(requests));
     // Keep the extra quote set separate from state.quote so ordinary quoted
@@ -231,7 +233,9 @@ export function createMergeConcurrencyGuard(options = {}) {
             state = { busy: false, mergeBuffer: [] };
             locks.set(key, state);
         }
-        const entry = { ctx, next };
+        // Freeze per-original identity and role before this entry can wait in
+        // mergeBuffer or be folded into another sender's surviving context.
+        const entry = { ctx, next, generationRequest: snapshotGenerationRequest(ctx) };
         if (!state.busy) {
             state.busy = true;
             state.activeCtx = ctx;

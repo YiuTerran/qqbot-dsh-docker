@@ -27,6 +27,7 @@ pre_concurrency_fixture="${repo_root}/scripts/prepare-pre-concurrency-fixture.mj
 previous_stock_agents_fixture="${repo_root}/scripts/fixtures/agents-v0.9.0-stock.md"
 previous_stock_agents_v0_10_fixture="${repo_root}/scripts/fixtures/agents-v0.10.0-stock.md"
 previous_stock_agents_v0_10_3_fixture="${repo_root}/scripts/fixtures/agents-v0.10.3-stock.md"
+previous_stock_agents_v0_11_fixture="${repo_root}/scripts/fixtures/agents-v0.11.0-stock.md"
 persistent_reset_probe="${repo_root}/scripts/test-persistent-reset.mjs"
 suffix="$(date +%s)-$$"
 data_volume="dsh-qqbot-test-data-${suffix}"
@@ -113,6 +114,11 @@ fi
 
 if [[ ! -r "$previous_stock_agents_v0_10_fixture" ]]; then
     echo "missing previous stock AGENTS.md fixture: $previous_stock_agents_v0_10_fixture" >&2
+    exit 66
+fi
+
+if [[ ! -r "$previous_stock_agents_v0_11_fixture" ]]; then
+    echo "missing previous stock AGENTS.md fixture: $previous_stock_agents_v0_11_fixture" >&2
     exit 66
 fi
 
@@ -395,6 +401,18 @@ docker run --rm \
     '
 
 log "Checking exact stock AGENTS.md migration and read-only preservation"
+docker run --rm --entrypoint sh \
+    --volume "${stock_agents_v0_10_data_volume}:/data" \
+    --mount "type=bind,src=${previous_stock_agents_v0_11_fixture},dst=/tmp/agents-stock.md,readonly" \
+    "$IMAGE" -ec 'cp /tmp/agents-stock.md /data/AGENTS.md; chmod 0644 /data/AGENTS.md'
+docker run --rm \
+    --volume "${stock_agents_v0_10_data_volume}:/data" \
+    "$IMAGE" sh -ec 'cmp /data/AGENTS.md /opt/qqbot-defaults/AGENTS.md'
+docker run --rm \
+    --volume "${readonly_stock_agents_v0_10_data_volume}:/data" \
+    --mount "type=bind,src=${previous_stock_agents_v0_11_fixture},dst=/data/AGENTS.md,readonly" \
+    --mount "type=bind,src=${previous_stock_agents_v0_11_fixture},dst=/tmp/agents-stock.md,readonly" \
+    "$IMAGE" sh -ec 'cmp /data/AGENTS.md /tmp/agents-stock.md'
 docker run --rm --entrypoint sh \
     --volume "${stock_agents_v0_10_data_volume}:/data" \
     --mount "type=bind,src=${previous_stock_agents_v0_10_3_fixture},dst=/tmp/agents-stock.md,readonly" \

@@ -16,7 +16,7 @@ const LOG_TOOLS = new Set([
 const LOG_STAGES = new Set([
     'execute', 'execute-result', 'execute-throw', 'quota-acquire', 'quota-reserve',
     'download', 'normalize-image', 'provider', 'qq-delivery', 'markdown-delivery',
-    'registration', 'probe', 'call', 'private-delivery', 'send-notice', 'send-image',
+    'registration', 'probe', 'call', 'authorize', 'private-delivery', 'send-notice', 'send-image',
     'send-markdown',
 ]);
 const LOG_CODES = new Set([
@@ -26,6 +26,8 @@ const LOG_CODES = new Set([
     'server_error', 'invalid_prompt', 'rate_limit_exceeded', 'UNSUPPORTED_SCHEMA',
     'ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT',
     'EHOSTUNREACH', 'ENETUNREACH', 'EPIPE', 'ERR_TLS_CERT_ALTNAME_INVALID',
+    'group_state_private', 'group_role_unknown', 'group_role_denied', 'group_role_unsupported',
+    'group_state_source_mismatch',
     'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET', 'UND_ERR_HEADERS_TIMEOUT',
 ]);
 const LOG_ERROR_TYPES = new Set([

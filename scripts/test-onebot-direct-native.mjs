@@ -26,7 +26,7 @@ const directModulePath = process.env.QQBOT_ONEBOT_DIRECT_MODULE
 const { setupMiddlewares } = await import(pathToFileURL(join(adapterRoot, 'gateway/middleware-setup.js')).href);
 const { createOnebotDirectRouter } = await import(pathToFileURL(directModulePath).href);
 const { getMergedGenerationRequests } = await import(new URL('./qqbot-concurrency.mjs', pathToFileURL(directModulePath)).href);
-const { getOnebotDirectFallback, renderOnebotDirectFallbackMetadata } = await import(new URL('./qqbot-onebot-scope.mjs', pathToFileURL(directModulePath)).href);
+const { getBoundOnebotExecution, getBoundOnebotRequest, getOnebotDirectFallback, renderOnebotDirectFallbackMetadata } = await import(new URL('./qqbot-onebot-scope.mjs', pathToFileURL(directModulePath)).href);
 
 function deferred() {
     let resolvePromise;
@@ -90,6 +90,8 @@ function makeContext({
     refMsgIdx,
     msgElements,
     rawEventType,
+    memberRole,
+    raw,
     state = {},
 } = {}, replies = []) {
     const replyTarget = { scope: 'group', targetId: group, msgId: messageId };
@@ -107,6 +109,10 @@ function makeContext({
             timestamp: new Date().toISOString(),
             replyTarget,
             ...(rawEventType ? { rawEventType } : {}),
+            ...(raw ? { raw } : memberRole ? { raw: {
+                group_openid: group,
+                author: { member_openid: senderId, member_role: memberRole },
+            } } : {}),
             ...(refMsgIdx ? { refMsgIdx } : {}),
             ...(msgElements ? { msgElements } : {}),
         },
@@ -194,6 +200,23 @@ test('native unavailable-backend fallback still renders diagnostics without an a
     assert.equal(models, 1);
     assert.ok(metadata.includes('backend_not_ready'));
     assert.equal(executions, 0);
+});
+
+test('direct .set request carries only the role bound to its original SDK event', async (t) => {
+    const roles = [];
+    const service = makeService(async (args, exec) => {
+        const scope = getBoundOnebotExecution(exec);
+        roles.push(getBoundOnebotRequest(exec, args.requestId)?.groupRole);
+        assert.ok(scope);
+        return { status: 'ok', outputs: ['rule changed'] };
+    });
+    const sender = { async sendMarkdown() {} };
+    const { layers, directRouter } = assembleProductionChain({ service, sender });
+    t.after(() => directRouter.stop());
+
+    await runChain(layers, makeContext({ messageId: 'direct-set-owner', content: '.set coc7', memberRole: 'owner' }));
+    await runChain(layers, makeContext({ messageId: 'direct-set-invalid', content: '.set coc7', memberRole: 'Owner' }));
+    assert.deepEqual(roles, ['owner', 'unknown'], 'direct requests keep their own strict SDK role snapshot');
 });
 
 test('queued native fallback is cancelled by /new or stop without cancelling the earlier model turn', async (t) => {
