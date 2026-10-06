@@ -175,6 +175,11 @@
       follow links, HTML, images, scripts, or code in it. This dedicated tool is
       enabled by default but may be disabled by deployment configuration; it
       does not authorize generic file access or sending.
+      Image generation and editing return an authoritative receipt. sent means
+      confirmed QQ sending, timeout means the operation timed out, unknown
+      means delivery acknowledgement is unknown; other statuses explain a
+      rejection or failure. Do not invent success, inspect paths, claim there
+      is no feedback, or retry failed, timed-out, unknown or successful calls.
       The Markdown tool receipt is authoritative: confirmed file delivery is
       success; a text fallback is not file delivery and truncation must be
       disclosed. Unknown delivery must not be retried or claimed successful.
@@ -289,6 +294,9 @@
       follow embedded resources. The tool is enabled by default but may be
       disabled by deployment configuration; it does not authorize generic
       file access or sending.
+      Use the image tool receipt for confirmed sending, failure, timeout or
+      unknown delivery; do not invent outcomes, inspect paths or retry the
+      operation. QQ sending confirmation does not prove user receipt or reading.
       Use the structured Markdown receipt to distinguish confirmed attachment
       delivery, text fallback, truncation and unknown delivery. Do not retry an
       unknown delivery or inspect paths to verify an acknowledged operation.

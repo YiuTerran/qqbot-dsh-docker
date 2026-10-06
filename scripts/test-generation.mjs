@@ -113,6 +113,13 @@ function assertRenderedMarkdownReceipt(output) {
         'the structured delivery receipt is returned to the model as tool content');
 }
 
+function assertRenderedImageReceipt(output) {
+    assert.equal(output.isError, false, JSON.stringify(output));
+    assert.deepEqual(output.content, [{ type: 'text', text: JSON.stringify(output.value) }],
+        'the bounded image status and notice reach the model as tool content');
+    assert.deepEqual(Object.keys(output.value), ['status', 'notice']);
+}
+
 function makeSdkHarness({
     tokenManager = { async getAccessToken() { return 'fixture-access-token'; } },
     fetchImpl,
@@ -871,7 +878,7 @@ test('registered native image tool uses same-source attachment bytes, user quota
         agent, 'image-original-source-call');
     assert.equal(output.isError, false, JSON.stringify(output));
     assert.equal(output.value.status, 'sent');
-    assert.equal(output.content?.length ?? 0, 0, 'native output does not send a duplicate generic tool reply');
+    assertRenderedImageReceipt(output);
     assert.equal(providerCalls.length, 1);
     assert.equal(providerCalls[0].prompt, finalPrompt, 'image execution forwards the model-prepared prompt unchanged without transport-side rewriting');
     assert.deepEqual(providerCalls[0].imageBytes, png);
@@ -886,6 +893,7 @@ test('registered native image tool uses same-source attachment bytes, user quota
         { requestId: secondId, imageAttachmentId: selected, prompt: finalPrompt },
         agent, 'image-original-source-call');
     assert.equal(repeat.value.status, 'sent');
+    assertRenderedImageReceipt(repeat);
     assert.equal(providerCalls.length, 1, 'a duplicate callId returns the cached success without another provider call');
     assert.equal(imageSends.length, 1, 'cached success does not duplicate QQ delivery');
 
@@ -1038,7 +1046,7 @@ test('image conversion enforces pixel bounds and drains its worker before cancel
         await stopped.promise;
         assert.equal(settled, false, 'concurrency remains owned while worker termination is pending');
         releaseTermination.resolve(0);
-        await assert.rejects(operation, (error) => error.kind === (mode === 'cancel' ? 'cancelled' : 'failed'));
+        await assert.rejects(operation, (error) => error.kind === (mode === 'cancel' ? 'cancelled' : 'timeout'));
         assert.equal(worker.listenerCount('message'), 0);
         assert.equal(worker.listenerCount('error'), 0);
         assert.equal(worker.listenerCount('exit'), 0);
@@ -1213,8 +1221,18 @@ test('lazy quoted image failures, limits and cancellation never reach the genera
 
     const failed = start();
     fetchImpl = async () => ({ response: new Response('denied', { status: 403 }), close: async () => {} });
-    assert.equal((await nativeCall(ctx, GENERATE_IMAGE_TOOL, args(failed.metadata), agent, 'lazy-failed')).value.status, 'failed');
+    const failedOutput = await nativeCall(ctx, GENERATE_IMAGE_TOOL, args(failed.metadata), agent, 'lazy-failed');
+    assert.equal(failedOutput.value.status, 'failed');
+    assertRenderedImageReceipt(failedOutput);
     await finish(failed);
+
+    const timedOut = start();
+    fetchImpl = async () => { throw new DOMException('private source URL', 'TimeoutError'); };
+    const timeoutOutput = await nativeCall(ctx, GENERATE_IMAGE_TOOL, args(timedOut.metadata), agent, 'lazy-timeout');
+    assert.equal(timeoutOutput.value.status, 'timeout');
+    assertRenderedImageReceipt(timeoutOutput);
+    assert.doesNotMatch(JSON.stringify(timeoutOutput.content), /private source URL/u);
+    await finish(timedOut);
 
     const bounded = start({ enabled: true, maxMB: 1 / (1024 * 1024) });
     fetchImpl = async () => ({ response: new Response(png, { headers: { 'content-type': 'image/png' } }), close: async () => {} });
@@ -1238,7 +1256,7 @@ test('lazy quoted image failures, limits and cancellation never reach the genera
     endDocumentTurn(agent, cancelled.documentScope);
     assert.equal(providerCalls.length, 0);
     assert.equal(imageSends.length, 0);
-    assert.equal(quota.events.filter(([name]) => name === 'release').length, 3, 'failed and cancelled downloads release concurrency slots');
+    assert.equal(quota.events.filter(([name]) => name === 'release').length, 4, 'failed, timed out and cancelled downloads release concurrency slots');
 });
 
 test('native Markdown remains available in document mode, validates UTF-8, and falls back once on the same request', async (t) => {
@@ -1459,7 +1477,134 @@ test('native image unknown acknowledgement does not trigger a contradictory fail
     });
     assert.equal(sent.length, 1);
     assert.deepEqual(notices, [], 'unknown delivery does not send a contradictory QQ failure notice');
-    assert.equal(output.content?.length ?? 0, 0, 'image tool keeps its established empty model projection');
+    assertRenderedImageReceipt(output);
+    await endGenerationTurn(agent, scope);
+    endDocumentTurn(agent, documentScope);
+});
+
+for (const scenario of [
+    { name: 'provider failure', status: 'failed', notice: '主人，这次图片或文件操作没有完成，稍后再试吧。' },
+    { name: 'provider timeout', status: 'timeout', notice: '主人，这次图片处理超时了，稍后再试吧。' },
+    { name: 'nested Undici connect timeout', code: 'UND_ERR_CONNECT_TIMEOUT', status: 'timeout', notice: '主人，这次图片处理超时了，稍后再试吧。' },
+    { name: 'nested Undici headers timeout', code: 'UND_ERR_HEADERS_TIMEOUT', status: 'timeout', notice: '主人，这次图片处理超时了，稍后再试吧。' },
+    { name: 'nested Undici body timeout', code: 'UND_ERR_BODY_TIMEOUT', status: 'timeout', notice: '主人，这次图片处理超时了，稍后再试吧。' },
+    { name: 'HTTP 408', httpStatus: 408, status: 'timeout', notice: '主人，这次图片处理超时了，稍后再试吧。' },
+    { name: 'HTTP 503', httpStatus: 503, status: 'failed', notice: '主人，这次图片或文件操作没有完成，稍后再试吧。' },
+    { name: 'internal deadline', status: 'timeout', notice: '主人，这次图片处理超时了，稍后再试吧。' },
+    { name: 'late provider result', status: 'timeout', notice: '主人，这次图片处理超时了，稍后再试吧。' },
+]) test(`native image ${scenario.name} returns one safe model receipt and one QQ notice`, async (t) => {
+    let providerCalls = 0;
+    let imageSends = 0;
+    const notices = [];
+    const service = {
+        async generate({ signal }) {
+            providerCalls += 1;
+            if (scenario.name === 'provider failure') throw new Error('private-image-prompt secret-provider-body');
+            if (scenario.name === 'provider timeout') throw new DOMException('secret-provider-body', 'TimeoutError');
+            if (scenario.code) {
+                throw new TypeError('secret-provider-body', {
+                    cause: new Error('private-image-prompt', {
+                        cause: Object.assign(new Error('secret nested timeout'), { code: scenario.code }),
+                    }),
+                });
+            }
+            if (scenario.httpStatus) {
+                throw Object.assign(new Error('secret-provider-body'), { status: scenario.httpStatus });
+            }
+            if (scenario.name === 'late provider result') {
+                await new Promise((resolve) => setTimeout(resolve, 40));
+                return png;
+            }
+            await new Promise((resolve, reject) => {
+                if (signal.aborted) reject(signal.reason);
+                else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+            });
+            assert.fail('the deadline must cancel the provider operation');
+        },
+    };
+    const { ctx } = await nativeGenerationRuntime(t, {
+        route: route(), quota: makeQuota(), markdownEnabled: false, imageService: service,
+        imageOperationTimeoutMs: 20,
+        sender: {
+            async sendImage() { imageSends += 1; return { sent: true }; },
+            async sendNotice(_request, notice, signal) {
+                assert.equal(signal.aborted, false, 'internal timeout must leave a window for the QQ notice');
+                notices.push(notice);
+                return { sent: true };
+            },
+        },
+    });
+    const agent = {};
+    beginDocumentTurn(agent, { content: 'Draw an image.' });
+    const documentScope = getDocumentTurn(agent);
+    const scope = beginGenerationTurn(agent,
+        [makeGenerationRequest('owner-failure', 'group-failure', 'message-failure')], [], { documentScope });
+    const [requestId] = [...scope.requests.keys()];
+    const args = { requestId, prompt: 'private-image-prompt' };
+    const first = await nativeCall(ctx, GENERATE_IMAGE_TOOL, args, agent, `image-${scenario.status}-call`);
+    assert.deepEqual(first.value, { status: scenario.status, notice: scenario.notice });
+    assertRenderedImageReceipt(first);
+    assert.doesNotMatch(JSON.stringify(first.content), /private-image-prompt|secret-provider-body|requestId/u);
+    const repeat = await nativeCall(ctx, GENERATE_IMAGE_TOOL, args, agent, `image-${scenario.status}-call`);
+    assert.deepEqual(repeat.value, first.value);
+    assertRenderedImageReceipt(repeat);
+    assert.equal(providerCalls, 1, 'cached call does not start another provider request');
+    assert.equal(imageSends, 0);
+    assert.deepEqual(notices, [scenario.notice], 'cached call does not repeat the QQ notice');
+    await endGenerationTurn(agent, scope);
+    endDocumentTurn(agent, documentScope);
+});
+
+test('native image deadline returns a timeout receipt after a slow QQ notice is cancelled', { timeout: 15_000 }, async (t) => {
+    let providerCalls = 0;
+    let imageSends = 0;
+    let noticeAttempts = 0;
+    let deliveredNotices = 0;
+    let noticeCancelled = false;
+    const { ctx } = await nativeGenerationRuntime(t, {
+        route: route(), quota: makeQuota(), markdownEnabled: false, imageOperationTimeoutMs: 20,
+        imageService: {
+            async generate({ signal }) {
+                providerCalls += 1;
+                await new Promise((resolve, reject) => {
+                    if (signal.aborted) reject(signal.reason);
+                    else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+                });
+            },
+        },
+        sender: {
+            async sendImage() { imageSends += 1; return { sent: true }; },
+            async sendNotice(_request, _notice, signal) {
+                noticeAttempts += 1;
+                assert.equal(signal.aborted, false);
+                await new Promise((resolve, reject) => {
+                    signal.addEventListener('abort', () => {
+                        noticeCancelled = signal.reason?.name === 'TimeoutError';
+                        reject(signal.reason);
+                    }, { once: true });
+                });
+                deliveredNotices += 1;
+                return { sent: true };
+            },
+        },
+    });
+    const agent = {};
+    beginDocumentTurn(agent, { content: 'Draw an image.' });
+    const documentScope = getDocumentTurn(agent);
+    const scope = beginGenerationTurn(agent,
+        [makeGenerationRequest('owner-slow-notice', 'group-slow-notice', 'message-slow-notice')], [], { documentScope });
+    const [requestId] = [...scope.requests.keys()];
+    const args = { requestId, prompt: 'Draw one image.' };
+    const output = await nativeCall(ctx, GENERATE_IMAGE_TOOL, args, agent, 'image-slow-notice-call');
+    assert.deepEqual(output.value, { status: 'timeout', notice: '主人，这次图片处理超时了，稍后再试吧。' });
+    assertRenderedImageReceipt(output);
+    assert.equal(noticeCancelled, true, 'the image notice receives its own ten-second deadline');
+    const repeat = await nativeCall(ctx, GENERATE_IMAGE_TOOL, args, agent, 'image-slow-notice-call');
+    assertRenderedImageReceipt(repeat);
+    assert.equal(providerCalls, 1);
+    assert.equal(imageSends, 0);
+    assert.equal(noticeAttempts, 1);
+    assert.equal(deliveredNotices, 0, 'an aborted notice cannot be sent later');
     await endGenerationTurn(agent, scope);
     endDocumentTurn(agent, documentScope);
 });
@@ -1509,7 +1654,8 @@ test('native image call rechecks document mode after public DNS and before makin
 
         assert.equal(providerRequests.length, 0, 'a mode change while resolving DNS blocks the API fetch itself');
         assert.equal(sent.length, 0, 'no QQ result or generic failure is emitted after the turn becomes document protected');
-        assert.equal(output.content?.length ?? 0, 0);
+        assertRenderedImageReceipt(output);
+        assert.equal(output.value.status, 'expired');
     }
     finally {
         releaseDns.resolve();
@@ -1557,6 +1703,7 @@ test('native generation cancellation drains the call but cannot send after the Q
         const output = await pending;
         await ending;
         assert.equal(output.value.status, 'expired');
+        assertRenderedImageReceipt(output);
         assert.deepEqual(sends, [], 'old work cannot send to either the old or replacement target');
         assert.equal(replacementScope.active, true, 'draining a retired scope leaves the new turn installed');
     }

@@ -6,7 +6,7 @@ qq-bot 使用专用工具调用 Gensokyo-MCP；桥将请求变成虚拟 OneBot v
 
 两个 fork 固定为子模块：`third_party/gensokyo-mcp`、`third_party/sealdice-core`。初始化使用 `git submodule update --init --recursive`。海豹嵌套资源按其自己的 gitlink 检出，不改变 UI。
 
-镜像分别为 `tryao/qqbot-dsh:v0.11.1`、`tryao/gensokyo-mcp:v0.2.1`、`tryao/sealdice-core:v1.6.2-bridge.5`，只使用版本标签，没有 latest。主镜像不包含两个 Go 项目源码或运行程序。
+镜像分别为 `tryao/qqbot-dsh:v0.11.2`、`tryao/gensokyo-mcp:v0.2.1`、`tryao/sealdice-core:v1.6.2-bridge.5`，只使用版本标签，没有 latest。主镜像不包含两个 Go 项目源码或运行程序。
 
 v0.11.0 新增 Markdown 投递回执、扩展命令和连接级 Master ACL；三项镜像版本须一同升级，旧后端未协商 ACL 时仍可处理普通命令。
 
@@ -14,10 +14,29 @@ v0.11.1 增加群主／管理员的整群规则修改权限，以及单条自然
 
 ## 启动
 
-保留当前聊天凭据。在 `.env` 中配置三份不同的随机服务密钥；不要复用 QQ/LLM 密钥：
+可以直接使用仓库的 `docker-compose.qnap.yml`，或将下方完整 YAML 保存为 `docker-compose.yml`。在同一目录创建 `.env`；QQ 和聊天凭据按实际账号填写，三份 OneBot 服务密钥使用不同的随机值，不复用 QQ/LLM 密钥。已有配置可保留聊天、视觉和生图路由，只更新三个镜像版本及 OneBot 配置。
 
 ```dotenv
-IMAGE_TAG=v0.11.1
+IMAGE_TAG=v0.11.2
+QQBOT_APPID=
+QQBOT_SECRET=
+# 官方聊天模式填此项；不要同时配置 LLM_API_KEY。
+DEEPSEEK_API_KEY=
+# 第三方模式：DEEPSEEK_API_KEY 留空，以下四项一起填写。
+LLM_API_KEY=
+LLM_PROVIDER=
+LLM_MODEL=
+LLM_API_BASE_URL=
+LLM_API_PROTOCOL=openai-responses
+# 第三方原生搜索独立配置，留空关闭搜索，不影响聊天。
+LLM_SEARCH_BASE_URL=
+LLM_SEARCH_MODEL=
+# 可选独立生图服务：启用时 key/base URL/model 三项一起填写。
+IMAGE_API_KEY=
+IMAGE_API_BASE_URL=
+IMAGE_MODEL=
+# 未启用生图时也留空；启用后默认 openai-images，可选 xai-images。
+IMAGE_API_PROTOCOL=
 QQBOT_ONEBOT_ENABLED=true
 QQBOT_ONEBOT_DIRECT_ENABLED=true
 QQBOT_ONEBOT_DEFAULT_BACKEND=
@@ -31,6 +50,145 @@ QQBOT_ONEBOT_HIDDEN_ENABLED=false
 GENSOKYO_IMAGE_TAG=v0.2.1
 SEALDICE_IMAGE_TAG=v1.6.2-bridge.5
 ```
+
+聊天模式的详细配置见 [运行指南](runtime-guide.md)。生图字段全部留空时不提供生图工具，Markdown 默认启用。Master 清单默认 `[]`；需授权时使用私聊 `.userid` 返回的完整身份，而非 QQ 号或 Compose 服务名称。
+
+### 完整 Docker Compose YAML
+
+以下示例与仓库 Compose 使用相同配置；通过 `trpg` profile 启动两个后端。环境变量值传入容器后均为字符串，服务端再校验布尔、整数及 JSON 清单。
+
+```yaml
+services:
+  qqbot:
+    image: "tryao/qqbot-dsh:${IMAGE_TAG:?Set IMAGE_TAG to a versioned Docker Hub image tag}"
+    container_name: dsh-qqbot
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Taipei
+      DSH_HOME: /data
+      # Mutually exclusive with LLM_API_KEY; selects the official chat/search mode.
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      # Selects third-party chat mode; reused by native search when enabled.
+      # Optional: use this generic key name from an OpenAI-compatible dsh
+      # provider configuration (apiKeyEnv: LLM_API_KEY).
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      # Set the four required LLM_* values together to configure a third-party
+      # route. LLM_API_PROTOCOL is optional and defaults to openai-responses.
+      LLM_PROVIDER: ${LLM_PROVIDER:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_API_BASE_URL: ${LLM_API_BASE_URL:-}
+      LLM_API_PROTOCOL: ${LLM_API_PROTOCOL:-}
+      # Optional independent DeepSeek-native Messages search endpoint. Empty
+      # disables web_search in LLM_API_KEY mode.
+      LLM_SEARCH_BASE_URL: ${LLM_SEARCH_BASE_URL:-}
+      # Optional model alias for native search; defaults to deepseek-flash.
+      LLM_SEARCH_MODEL: ${LLM_SEARCH_MODEL:-}
+      QQBOT_VISION_PROVIDER: ${QQBOT_VISION_PROVIDER:-}
+      QQBOT_VISION_MODEL: ${QQBOT_VISION_MODEL:-}
+      QQBOT_MEDIA_ENABLED: ${QQBOT_MEDIA_ENABLED:-true}
+      QQBOT_VISION_ENABLED: ${QQBOT_VISION_ENABLED:-true}
+      QQBOT_IMAGE_DEBUG: ${QQBOT_IMAGE_DEBUG:-false}
+      # Independent image API route; leave all four blank to hide image tools.
+      IMAGE_API_KEY: ${IMAGE_API_KEY:-}
+      IMAGE_API_BASE_URL: ${IMAGE_API_BASE_URL:-}
+      IMAGE_MODEL: ${IMAGE_MODEL:-}
+      IMAGE_API_PROTOCOL: ${IMAGE_API_PROTOCOL:-}
+      QQBOT_MARKDOWN_ENABLED: ${QQBOT_MARKDOWN_ENABLED:-true}
+      QQBOT_IMAGE_USER_HOURLY_LIMIT: ${QQBOT_IMAGE_USER_HOURLY_LIMIT:-10}
+      QQBOT_MARKDOWN_USER_HOURLY_LIMIT: ${QQBOT_MARKDOWN_USER_HOURLY_LIMIT:-30}
+      QQBOT_IMAGE_MAX_CONCURRENT: ${QQBOT_IMAGE_MAX_CONCURRENT:-2}
+      QQBOT_MARKDOWN_MAX_CONCURRENT: ${QQBOT_MARKDOWN_MAX_CONCURRENT:-4}
+      QQBOT_ONEBOT_ENABLED: ${QQBOT_ONEBOT_ENABLED:-false}
+      # Directly route supported commands only when OneBot is enabled.
+      QQBOT_ONEBOT_DIRECT_ENABLED: ${QQBOT_ONEBOT_DIRECT_ENABLED:-true}
+      # Empty auto-selects a command's unique matching backend; set an ID for ambiguous matches.
+      QQBOT_ONEBOT_DEFAULT_BACKEND: ${QQBOT_ONEBOT_DEFAULT_BACKEND:-}
+      QQBOT_ONEBOT_MCP_URL: ${QQBOT_ONEBOT_MCP_URL:-http://gensokyo-mcp:8090/mcp}
+      QQBOT_ONEBOT_MCP_TOKEN: ${QQBOT_ONEBOT_MCP_TOKEN:-}
+      QQBOT_ONEBOT_INTERNAL_TOKEN: ${QQBOT_ONEBOT_INTERNAL_TOKEN:-}
+      QQBOT_ONEBOT_BACKENDS: ${QQBOT_ONEBOT_BACKENDS:-sealdice}
+      # JSON array of appId:SDK-openid identities from private .userid results.
+      QQBOT_ONEBOT_MASTER_USERS: ${QQBOT_ONEBOT_MASTER_USERS:-[]}
+      QQBOT_ONEBOT_HIDDEN_ENABLED: ${QQBOT_ONEBOT_HIDDEN_ENABLED:-false}
+      # A diagnostic only; it does not contain or print credentials.
+      QQBOT_STARTUP_WARN_MS: ${QQBOT_STARTUP_WARN_MS:-20000}
+      QQBOT_APPID: ${QQBOT_APPID}
+      QQBOT_SECRET: ${QQBOT_SECRET}
+    volumes:
+      - dsh-data:/data
+      - dsh-workspace:/workspace
+    networks:
+      - default
+      - trpg-control
+
+  gensokyo-mcp:
+    profiles: [trpg]
+    image: "tryao/gensokyo-mcp:${GENSOKYO_IMAGE_TAG:-v0.2.1}"
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      LLM_BRIDGE_ENABLED: "true"
+      LLM_BRIDGE_DATA_DIR: /data
+      LLM_BRIDGE_MCP_TOKEN: ${QQBOT_ONEBOT_MCP_TOKEN:-}
+      LLM_BRIDGE_INTERNAL_TOKEN: ${QQBOT_ONEBOT_INTERNAL_TOKEN:-}
+      LLM_BRIDGE_MASTER_USER_KEYS: ${QQBOT_ONEBOT_MASTER_USERS:-[]}
+      ONEBOT_WS_TOKEN: ${ONEBOT_WS_TOKEN:-}
+      ONEBOT_WS_URL: ws://sealdice:18081/ws
+      ONEBOT_BACKEND_ID: sealdice
+    volumes:
+      - gensokyo-data:/data
+    networks:
+      - trpg-control
+      - trpg-backend
+    depends_on:
+      - sealdice
+
+  sealdice:
+    profiles: [trpg]
+    image: "tryao/sealdice-core:${SEALDICE_IMAGE_TAG:-v1.6.2-bridge.5}"
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      SEALDICE_LLM_BRIDGE_ENABLED: "true"
+      SEALDICE_ONEBOT_BIND: 0.0.0.0:18081
+      ONEBOT_WS_TOKEN: ${ONEBOT_WS_TOKEN:-}
+    volumes:
+      - sealdice-data:/app/data
+      - sealdice-backups:/app/backups
+    networks:
+      - trpg-backend
+
+volumes:
+  dsh-data:
+    name: dsh-qqbot-data
+  dsh-workspace:
+    name: dsh-qqbot-workspace
+  gensokyo-data:
+    name: dsh-qqbot-gensokyo-data
+  sealdice-data:
+    name: dsh-qqbot-sealdice-data
+  sealdice-backups:
+    name: dsh-qqbot-sealdice-backups
+
+networks:
+  trpg-control:
+    internal: true
+  trpg-backend:
+    internal: true
+```
+
+### 启动与检查
+
+使用复制出的 `docker-compose.yml`：
+
+```sh
+docker compose --profile trpg config --quiet
+docker compose --profile trpg pull
+docker compose --profile trpg up -d
+docker compose --profile trpg logs -f qqbot gensokyo-mcp sealdice
+```
+
+若直接使用仓库文件，将上述命令加上 `-f docker-compose.qnap.yml`，例如：
 
 ```sh
 docker compose -f docker-compose.qnap.yml --profile trpg up -d

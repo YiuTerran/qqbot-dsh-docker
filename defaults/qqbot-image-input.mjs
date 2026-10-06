@@ -54,7 +54,7 @@ export async function normalizeEditImage(bytes, { signal, inspectImage, createWo
             worker.on('error', () => settle(imageError('failed')));
             worker.on('exit', () => settle(imageError('failed')));
             signal?.addEventListener('abort', onAbort, { once: true });
-            timer = setTimeout(() => settle(imageError('failed')), timeoutMs);
+            timer = setTimeout(() => settle(imageError('timeout')), timeoutMs);
             if (signal?.aborted) return onAbort();
             worker.postMessage({ bytes: Uint8Array.from(bytes), expectedFormat: format });
         }

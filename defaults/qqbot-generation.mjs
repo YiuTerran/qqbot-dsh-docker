@@ -24,6 +24,7 @@ const MAX_API_JSON_BYTES = 16 * 1024 * 1024;
 const MAX_MARKDOWN_BYTES = 128 * 1024;
 const API_TIMEOUT_MS = 120000;
 const TOOL_TIMEOUT_MS = 180000;
+const IMAGE_OPERATION_TIMEOUT_MS = 165000;
 const IMAGE_USER_HOURLY_LIMIT = 10;
 const MARKDOWN_USER_HOURLY_LIMIT = 30;
 const IMAGE_CONCURRENCY = 2;
@@ -40,6 +41,7 @@ const notices = Object.freeze({
     busy: '主人，本鱼这会儿正忙着处理同类任务，稍后再试吧。',
     state: '主人，这项功能的本地额度记录暂时不可用，稍后再试吧。',
     failed: '主人，这次图片或文件操作没有完成，稍后再试吧。',
+    timeout: '主人，这次图片处理超时了，稍后再试吧。',
     expired: '主人，这条消息已经过期，本鱼不能再替它发送结果啦。',
     'image-type': '主人，这张图没法解码成可编辑图片，请重新发送原图再试吧。',
     'too-large': '主人，这张图或文档超出大小限制，请缩小后再试吧。',
@@ -441,13 +443,18 @@ export function createImageService({ route, transport, resolvePublic, fetchImpl 
         : createPinnedRequest({ resolvePublic: resolvePublic ?? resolvePublicHttpAddresses, fetchImpl });
     if (typeof requestImpl !== 'function') throw imageRouteError();
     const request = async (options) => {
-        if (options.signal?.aborted || (typeof options.assertActive === 'function' && options.assertActive() !== true)) {
-            throw new Error('expired');
+        if (options.signal?.aborted) throw options.signal.reason ?? new Error('aborted');
+        if (typeof options.assertActive === 'function' && options.assertActive() !== true) throw new Error('expired');
+        let response;
+        try {
+            response = await requestImpl(options);
         }
-        const response = await requestImpl(options);
-        if (options.signal?.aborted || (typeof options.assertActive === 'function' && options.assertActive() !== true)) {
-            throw new Error('expired');
+        catch (error) {
+            if (options.signal?.aborted) throw options.signal.reason ?? error;
+            throw error;
         }
+        if (options.signal?.aborted) throw options.signal.reason ?? new Error('aborted');
+        if (typeof options.assertActive === 'function' && options.assertActive() !== true) throw new Error('expired');
         return response;
     };
     const base = new URL(route.baseUrl);
@@ -582,6 +589,18 @@ function result(status, notice = notices[status] ?? notices.failed) {
     return { status, notice };
 }
 
+function imageFailureStatus(error, exec) {
+    if (exec.timeoutSignal?.aborted) return 'timeout';
+    const timeoutCodes = new Set(['ETIMEDOUT', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT']);
+    let cause = error;
+    for (let depth = 0; depth < 4 && cause && typeof cause === 'object'; depth += 1) {
+        if (cause.kind === 'timeout' || cause.name === 'TimeoutError' || timeoutCodes.has(cause.code)
+            || cause.status === 408) return 'timeout';
+        cause = cause.cause;
+    }
+    return error?.kind === 'image-type' ? 'image-type' : error?.kind === 'too-large' ? 'too-large' : 'failed';
+}
+
 function markdownReceipt(status, notice, filename, bytes, delivery = 'none', truncated = false) {
     return {
         ...result(status, notice),
@@ -665,7 +684,10 @@ async function sendOperationalNotice(sender, scope, request, notice, kind, signa
     // been disabled by document mode; scope/record expiry still blocks it.
     if (!request || generationScopeFailure(scope, 'markdown')) return;
     try {
-        await sender.sendNotice(makeTrustedSenderRequest(scope, request, kind), notice, signal);
+        const noticeSignal = kind === 'image'
+            ? signal ? AbortSignal.any([signal, AbortSignal.timeout(10_000)]) : AbortSignal.timeout(10_000)
+            : signal;
+        await sender.sendNotice(makeTrustedSenderRequest(scope, request, kind), notice, noticeSignal);
     }
     catch (error) {
         logToolFailure(kind === 'image' ? GENERATE_IMAGE_TOOL : CREATE_MARKDOWN_TOOL, 'send-notice', error);
@@ -676,7 +698,13 @@ async function sendOperationalNotice(sender, scope, request, notice, kind, signa
 async function performImageTask({ scope, request, args, exec, service, quota, sender }) {
     const operationSignal = getGenerationRequestSignal(scope, exec.signal, 'image');
     const noticeSignal = exec.noticeSignal ?? operationSignal;
-    const assertActive = () => generationScopeFailure(scope, 'image') === undefined;
+    const assertActive = () => !operationSignal.aborted && generationScopeFailure(scope, 'image') === undefined;
+    const interrupted = async () => {
+        if (generationScopeFailure(scope, 'image') || exec.callerSignal?.aborted) return result('expired');
+        if (!exec.timeoutSignal?.aborted) return undefined;
+        await sendOperationalNotice(sender, scope, request, notices.timeout, 'image', noticeSignal);
+        return result('timeout');
+    };
     const imageGrant = args.imageAttachmentId
         ? getGenerationImageAttachment(scope, args.requestId, args.imageAttachmentId)
             ?? getGenerationRecentImageAttachment(scope, args.requestId, args.imageAttachmentId)
@@ -697,6 +725,8 @@ async function performImageTask({ scope, request, args, exec, service, quota, se
         return result(status, notice);
     }
     try {
+        const afterAcquire = await interrupted();
+        if (afterAcquire) return afterAcquire;
         let imageBytes;
         if (imageGrant) {
             const maxBytes = imageGrant.maxBytes ?? MAX_IMAGE_BYTES;
@@ -724,24 +754,26 @@ async function performImageTask({ scope, request, args, exec, service, quota, se
             catch (error) {
                 logToolFailure(GENERATE_IMAGE_TOOL, 'download', error);
                 if (remote) logDownloadDiagnostics(imageGrant, 'failed', error);
-                if (generationScopeFailure(scope, 'image')) return result('expired');
-                const notice = notices.failed;
+                if (generationScopeFailure(scope, 'image') || exec.callerSignal?.aborted) return result('expired');
+                const status = imageFailureStatus(error, exec);
+                const notice = notices[status];
                 await sendOperationalNotice(sender, scope, request, notice, 'image', noticeSignal);
-                return result('failed', notice);
+                return result(status, notice);
             }
             try {
                 imageBytes = await normalizeEditImage(imageBytes, { signal: operationSignal, inspectImage });
             }
             catch (error) {
                 logToolFailure(GENERATE_IMAGE_TOOL, 'normalize-image', error);
-                if (generationScopeFailure(scope, 'image')) return result('expired');
-                const status = error?.kind === 'too-large' ? 'too-large' : error?.kind === 'image-type' ? 'image-type' : 'failed';
+                if (generationScopeFailure(scope, 'image') || exec.callerSignal?.aborted) return result('expired');
+                const status = imageFailureStatus(error, exec);
                 const notice = notices[status];
                 await sendOperationalNotice(sender, scope, request, notice, 'image', noticeSignal);
                 return result(status, notice);
             }
         }
-        if (generationScopeFailure(scope, 'image')) return result('expired');
+        const afterInput = await interrupted();
+        if (afterInput) return afterInput;
         let reserved;
         try {
             reserved = await quota.reserve({ ownerId: request.ownerId, type: 'image' });
@@ -756,20 +788,22 @@ async function performImageTask({ scope, request, args, exec, service, quota, se
             await sendOperationalNotice(sender, scope, request, notice, 'image', noticeSignal);
             return result(status, notice);
         }
-        if (generationScopeFailure(scope, 'image')) return result('expired');
+        const afterReserve = await interrupted();
+        if (afterReserve) return afterReserve;
         let generated;
         try {
             generated = await service.generate({ prompt: args.prompt, imageBytes, signal: operationSignal, assertActive });
         }
         catch (error) {
             logToolFailure(GENERATE_IMAGE_TOOL, 'provider', error);
-            if (generationScopeFailure(scope, 'image')) return result('expired');
-            const status = error?.kind === 'image-type' ? 'image-type' : error?.kind === 'too-large' ? 'too-large' : 'failed';
+            if (generationScopeFailure(scope, 'image') || exec.callerSignal?.aborted) return result('expired');
+            const status = imageFailureStatus(error, exec);
             const notice = notices[status];
             await sendOperationalNotice(sender, scope, request, notice, 'image', noticeSignal);
             return result(status, notice);
         }
-        if (generationScopeFailure(scope, 'image')) return result('expired');
+        const afterGeneration = await interrupted();
+        if (afterGeneration) return afterGeneration;
         const sendRequest = makeTrustedSenderRequest(scope, request, 'image');
         let sent;
         let sendThrew = false;
@@ -789,9 +823,10 @@ async function performImageTask({ scope, request, args, exec, service, quota, se
             return result('unknown');
         }
         if (!sendThrew) logToolFailure(GENERATE_IMAGE_TOOL, 'send-image', new Error(`send-${sent?.reason === 'limit' ? 'limit' : sent?.reason === 'expired' ? 'expired' : 'failed'}`));
-        const status = sent?.reason === 'limit' ? 'quota' : sent?.reason === 'expired' ? 'expired' : 'failed';
+        const status = exec.timeoutSignal?.aborted ? 'timeout'
+            : sent?.reason === 'limit' ? 'quota' : sent?.reason === 'expired' ? 'expired' : 'failed';
         const notice = notices[status];
-        await sendOperationalNotice(sender, scope, request, notice, 'image', operationSignal);
+        await sendOperationalNotice(sender, scope, request, notice, 'image', noticeSignal);
         return result(status, notice);
     }
     finally {
@@ -908,7 +943,8 @@ function executeGeneration(args, exec, kind, context) {
     const requestCalls = kind === 'image' ? request.imageCalls : request.markdownCalls;
     requestCalls.set(exec.callId, argsFingerprint);
     const timeoutController = new AbortController();
-    const timeout = setTimeout(() => timeoutController.abort(new Error('generation-timeout')), TOOL_TIMEOUT_MS);
+    const timeout = setTimeout(() => timeoutController.abort(new Error('generation-timeout')),
+        kind === 'image' ? context.imageOperationTimeoutMs : TOOL_TIMEOUT_MS);
     timeout.unref?.();
     const signals = [timeoutController.signal];
     if (exec.signal) signals.push(exec.signal);
@@ -916,7 +952,9 @@ function executeGeneration(args, exec, kind, context) {
         callId: exec.callId,
         arguments: args,
         signal: AbortSignal.any(signals),
-        noticeSignal: AbortSignal.any(signals),
+        callerSignal: exec.signal,
+        noticeSignal: kind === 'image' ? exec.signal : AbortSignal.any(signals),
+        timeoutSignal: timeoutController.signal,
         sourceExecution: exec,
     };
     const operation = (async () => {
@@ -973,7 +1011,8 @@ function registerStatusTool(ctx, definition, markdownReceiptOutput = false) {
             schema: {
                 type: 'object',
                 properties: {
-                    status: { type: 'string' },
+                    status: markdownReceiptOutput ? { type: 'string' } : { type: 'string',
+                        enum: ['sent', 'failed', 'timeout', 'busy', 'quota', 'state', 'image-type', 'too-large', 'expired', 'unknown'] },
                     notice: { type: 'string' },
                     ...(markdownReceiptOutput ? {
                         filename: { type: 'string' },
@@ -987,12 +1026,7 @@ function registerStatusTool(ctx, definition, markdownReceiptOutput = false) {
                     : ['status', 'notice'],
                 additionalProperties: false,
             },
-            // Image delivery keeps its existing empty model projection. Markdown
-            // needs its receipt in the model tool result so the assistant can
-            // describe the actual delivery without a second sender-side notice.
-            render: markdownReceiptOutput
-                ? (_args, value) => [{ type: 'text', text: JSON.stringify(value) }]
-                : () => [],
+            render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
         },
     });
 }
@@ -1013,10 +1047,14 @@ export function registerGenerationTools(ctx, options = {}) {
     });
     const sender = options.sender;
     if (!sender || typeof sender.sendNotice !== 'function') throw new Error('Generation sender is unavailable.');
+    const imageOperationTimeoutMs = options.imageOperationTimeoutMs ?? IMAGE_OPERATION_TIMEOUT_MS;
+    if (!Number.isSafeInteger(imageOperationTimeoutMs) || imageOperationTimeoutMs < 1
+        || imageOperationTimeoutMs > IMAGE_OPERATION_TIMEOUT_MS) throw new Error('Invalid image operation timeout.');
     const context = {
         route,
         sender,
         quota,
+        imageOperationTimeoutMs,
         imageService: route ? (options.imageService ?? createImageService({
             route,
             transport: options.imageTransport,

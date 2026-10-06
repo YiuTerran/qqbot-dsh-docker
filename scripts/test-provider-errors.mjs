@@ -481,6 +481,36 @@ integration('native successful tool results retain their existing display behavi
     }
 });
 
+integration('image and Markdown model receipts never produce a separate public tool-result message', async () => {
+    await prepareAdapterPeers();
+    const { createOutboundHandler } = await import(`${resolve(adapterDist)}/transport/outbound.js`);
+    for (const showToolResults of [false, true]) {
+        for (const name of ['qqbot_generate_image', 'qqbot_create_markdown']) {
+            for (const status of ['sent', 'failed', 'timeout', 'unknown']) {
+                const sent = [];
+                const record = { sessionId: `receipt-${name}-${status}`, agent: {}, replyTarget: { scope: 'c2c', targetId: 'peer' } };
+                const handler = createOutboundHandler({ findBySessionId() { return record; } }, {
+                    async sendMarkdown(_target, text) { sent.push(text); },
+                }, { textChunkLimit: 2000, streaming: false, showToolResults }, {
+                    info() {}, debug() {}, warn() {}, error() {},
+                }, {});
+                const callId = `${name}-${status}`;
+                handler({ header: { id: record.sessionId } }, {
+                    type: 'tool/call', data: { callId, name, arguments: '{}' },
+                });
+                handler({ header: { id: record.sessionId } }, {
+                    type: 'tool/result', data: { message: { source: { callId }, content: [
+                        { type: 'tool-result', isError: false, content: [{ type: 'text',
+                            text: JSON.stringify({ status, notice: 'Fixed receipt' }) }] },
+                    ] } },
+                });
+                await new Promise((resolvePromise) => setImmediate(resolvePromise));
+                assert.deepEqual(sent, [], `${name}/${status} with showToolResults=${showToolResults} duplicated public receipt`);
+            }
+        }
+    }
+});
+
 integration('native outbound send failures log fixed diagnostics instead of raw QQ errors', async () => {
     await prepareAdapterPeers();
     const { createOutboundHandler } = await import(`${resolve(adapterDist)}/transport/outbound.js`);
