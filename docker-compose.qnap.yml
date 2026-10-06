@@ -63,7 +63,7 @@ services:
 
   gensokyo-mcp:
     profiles: [trpg]
-    image: "tryao/gensokyo-mcp:${GENSOKYO_IMAGE_TAG:-v0.2.0}"
+    image: "tryao/gensokyo-mcp:${GENSOKYO_IMAGE_TAG:-v0.2.1}"
     restart: unless-stopped
     environment:
       TZ: Asia/Shanghai
@@ -85,7 +85,7 @@ services:
 
   sealdice:
     profiles: [trpg]
-    image: "tryao/sealdice-core:${SEALDICE_IMAGE_TAG:-v1.6.2-bridge.4}"
+    image: "tryao/sealdice-core:${SEALDICE_IMAGE_TAG:-v1.6.2-bridge.5}"
     restart: unless-stopped
     environment:
       TZ: Asia/Shanghai

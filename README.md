@@ -73,7 +73,7 @@ Master 默认关闭。`QQBOT_ONEBOT_MASTER_USERS=[]` 为 JSON 身份数组，使
 
 群规则修改（当前开放的 `.set dnd/dnd5e/coc/coc7`）仅允许 QQ 当前群的群主或管理员，单条原始请求允许自然语言改规则；混合批次须匹配该人员原消息中的完整原生命令，不能借用另一人的请求 ID。权限取自本条 SDK 原始事件的 `author.member_role`，并与发送者和群核对；未提供或无法核实时拒绝修改，不能由昵称、聊天声明或 Master 清单补授。`.set info`、现有 `.setcoc` 查询及本人角色卡操作仍对普通成员开放。后端需协商 `group-role-v1`；旧后端保留普通功能，但不能修改整群规则。
 
-v0.11.0 提供新增命令、Markdown 回执与 Master 权限，镜像组合为 `tryao/gensokyo-mcp:v0.2.0` 和 `tryao/sealdice-core:v1.6.2-bridge.4`。上述群角色保护属于后续源码变更，尚未发布镜像；验证时需从主仓库及固定子模块源码构建三端，不能仅替换一个已发布镜像。配置见 [OneBot 集成说明](docs/onebot-integration.md)。
+v0.11.1 提供上述群角色保护，并保留新增命令、Markdown 回执与 Master 权限。完整部署请同时升级为 `tryao/qqbot-dsh:v0.11.1`、`tryao/gensokyo-mcp:v0.2.1` 和 `tryao/sealdice-core:v1.6.2-bridge.5`，不能仅替换一个服务镜像。配置见 [OneBot 集成说明](docs/onebot-integration.md)。
 
 ### 图片生成路由与 Markdown 限额
 

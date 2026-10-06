@@ -6,16 +6,18 @@ qq-bot 使用专用工具调用 Gensokyo-MCP；桥将请求变成虚拟 OneBot v
 
 两个 fork 固定为子模块：`third_party/gensokyo-mcp`、`third_party/sealdice-core`。初始化使用 `git submodule update --init --recursive`。海豹嵌套资源按其自己的 gitlink 检出，不改变 UI。
 
-镜像分别为 `tryao/qqbot-dsh:v0.11.0`、`tryao/gensokyo-mcp:v0.2.0`、`tryao/sealdice-core:v1.6.2-bridge.4`，只使用版本标签，没有 latest。主镜像不包含两个 Go 项目源码或运行程序。
+镜像分别为 `tryao/qqbot-dsh:v0.11.1`、`tryao/gensokyo-mcp:v0.2.1`、`tryao/sealdice-core:v1.6.2-bridge.5`，只使用版本标签，没有 latest。主镜像不包含两个 Go 项目源码或运行程序。
 
 v0.11.0 新增 Markdown 投递回执、扩展命令和连接级 Master ACL；三项镜像版本须一同升级，旧后端未协商 ACL 时仍可处理普通命令。
+
+v0.11.1 增加群主／管理员的整群规则修改权限，以及单条自然语言、混合批次原生命令的身份绑定保护；配套桥与海豹必须同时升级以协商 `group-role-v1`。
 
 ## 启动
 
 保留当前聊天凭据。在 `.env` 中配置三份不同的随机服务密钥；不要复用 QQ/LLM 密钥：
 
 ```dotenv
-IMAGE_TAG=v0.11.0
+IMAGE_TAG=v0.11.1
 QQBOT_ONEBOT_ENABLED=true
 QQBOT_ONEBOT_DIRECT_ENABLED=true
 QQBOT_ONEBOT_DEFAULT_BACKEND=
@@ -26,8 +28,8 @@ QQBOT_ONEBOT_MCP_TOKEN=replace-with-random-mcp-secret
 QQBOT_ONEBOT_INTERNAL_TOKEN=replace-with-different-random-internal-secret
 ONEBOT_WS_TOKEN=replace-with-different-random-onebot-secret
 QQBOT_ONEBOT_HIDDEN_ENABLED=false
-GENSOKYO_IMAGE_TAG=v0.2.0
-SEALDICE_IMAGE_TAG=v1.6.2-bridge.4
+GENSOKYO_IMAGE_TAG=v0.2.1
+SEALDICE_IMAGE_TAG=v1.6.2-bridge.5
 ```
 
 ```sh
@@ -62,7 +64,7 @@ qq-bot 容器日志中的 `[qqbot-onebot] ready backends=1 available=true` 表�
 
 qq-bot 从本条 SDK 原始事件的 `author.member_role` 获取角色，核对 `author.member_openid`、`group_openid` 与当前发送者和群，再在入队前固定。缺失、非法或身份不一致时拒绝群规则修改；不从历史、引用、昵称或同批其他成员补取权限。每条原始请求的只读角色元数据供模型解释，模型不能指定角色。
 
-桥将可信内部 `group_role` 转为标准 OneBot `sender.role`，海豹解析原生命令后再次校验。必须协商 `group-role-v1`；不支持时普通命令继续工作，但群规则修改明确要求升级配套后端。无新增开关，不自动重试或换身份。该保护尚未发布镜像，源码验证需同时构建 qq-bot、Gensokyo 和 SeaDice。
+桥将可信内部 `group_role` 转为标准 OneBot `sender.role`，海豹解析原生命令后再次校验。必须协商 `group-role-v1`；不支持时普通命令继续工作，但群规则修改明确要求升级配套后端。无新增开关，不自动重试或换身份。该保护自 v0.11.1 镜像组合提供，源码验证也需同时构建 qq-bot、Gensokyo 和 SeaDice。
 
 真实 QQ 验收需分别由群主、管理员、普通成员发送规则切换，确认允许／拒绝与实际群身份一致，并确认 `.set info`、角色卡和掷骰仍可使用。合成身份容器测试不代表平台一定返回角色字段。
 
