@@ -69,6 +69,7 @@ const FAILURE_TEXT = Object.freeze({
     multiline: '骰子直连命令必须单独占一行。',
     unsupported_compact: '这条骰子指令写法不明确，请在命令与参数间加空格。',
     invalid_command: '这条骰子指令不在直连支持范围内。',
+    command_not_allowed: '这类骰子操作当前不开放。',
     queue_full: '海豹骰请求队列已满，本次命令未执行。',
     expired: '这条骰子命令已过期，本次未执行。',
     uncertain: '骰子结果未能确认，请勿重复发送同一条命令。',
@@ -111,8 +112,15 @@ function isLineBreak(value) {
 function onebotCommandCandidate(line) {
     const policy = inspectSeaDiceCommand(line, { direct: true });
     if (!policy) return undefined;
-    // Unknown/ambiguous rule selection retains the existing LLM route.
-    if (policy.kind === 'set' && !policy.allowed) return undefined;
+    // A recognized but unsupported operation must not be rewritten into a
+    // different tool call by the model. Help/unknown .log subcommands remain
+    // ordinary chat so the model can explain the available commands.
+    if (!policy.allowed && (policy.admin || policy.kind === 'set' || policy.unsafeTarget || policy.resourceLimitExceeded
+        || policy.kind === 'ww' && /^\s*\.?ww\s+set(?:\s|$)/iu.test(line)
+        || policy.kind === 'log' && policy.logAction)) {
+        return { issue: 'command_not_allowed' };
+    }
+    if (!policy.allowed && policy.reason === 'invalid_command') return undefined;
     return policy.allowed ? { command: policy.command } : { issue: policy.reason };
 }
 
@@ -448,7 +456,8 @@ export function createOnebotDirectRouter({
         addActive(entry);
         try {
             if (!entry.cancelled && !stopped) {
-                if (options.next && ['config_invalid', 'backend_conflict', 'backend_not_ready', 'service_unavailable'].includes(reason)) {
+                if (options.next && (options.explainOnly
+                    || ['config_invalid', 'backend_conflict', 'backend_not_ready', 'service_unavailable'].includes(reason))) {
                     await handoff(ctx, entry, reason, undefined, options.next, startedAt);
                     return;
                 }
@@ -531,7 +540,10 @@ export function createOnebotDirectRouter({
             return;
         }
         if (match.issue) {
-            await reportFailure(source, backend, match.issue, startedAt, ctx);
+            await reportFailure(source, backend, match.issue, startedAt, ctx, {
+                next,
+                explainOnly: ['hidden_disabled', 'command_not_allowed'].includes(match.issue),
+            });
             return;
         }
         if (typeof match.command !== 'string' || match.command.length < 1 || match.command.length > 4000

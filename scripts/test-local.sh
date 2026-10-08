@@ -38,6 +38,7 @@ previous_stock_agents_v0_11_fixture="${repo_root}/scripts/fixtures/agents-v0.11.
 previous_stock_agents_v0_11_1_fixture="${repo_root}/scripts/fixtures/agents-v0.11.1-stock.md"
 previous_stock_agents_v0_11_2_fixture="${repo_root}/scripts/fixtures/agents-v0.11.2-stock.md"
 previous_stock_agents_v0_12_2_fixture="${repo_root}/scripts/fixtures/agents-v0.12.2-stock.md"
+previous_stock_agents_v0_12_5_fixture="${repo_root}/scripts/fixtures/agents-v0.12.5-stock.md"
 persistent_reset_probe="${repo_root}/scripts/test-persistent-reset.mjs"
 suffix="$(date +%s)-$$"
 data_volume="dsh-qqbot-test-data-${suffix}"
@@ -58,6 +59,7 @@ stock_agents_data_volume="dsh-qqbot-test-stock-agents-data-${suffix}"
 readonly_stock_agents_data_volume="dsh-qqbot-test-readonly-stock-agents-data-${suffix}"
 stock_agents_v0_10_data_volume="dsh-qqbot-test-stock-agents-v0-10-data-${suffix}"
 readonly_stock_agents_v0_10_data_volume="dsh-qqbot-test-readonly-stock-agents-v0-10-data-${suffix}"
+symlink_stock_agents_data_volume="dsh-qqbot-test-symlink-stock-agents-data-${suffix}"
 container="dsh-qqbot-test-${suffix}"
 instructions_file="$(mktemp)"
 incompatible_log="$(mktemp)"
@@ -75,7 +77,7 @@ on_error() {
 cleanup() {
     log "Cleaning up temporary container, volumes, and instruction file"
     docker rm --force "$container" >/dev/null 2>&1 || true
-    docker volume rm "$data_volume" "$workspace_volume" "$override_data_volume" "$legacy_data_volume" "$dice_legacy_data_volume" "$incompatible_data_volume" "$media_guard_data_volume" "$search_env_data_volume" "$official_data_volume" "$no_search_data_volume" "$partial_recovery_data_volume" "$recovery_v1_data_volume" "$pre_concurrency_data_volume" "$partial_concurrency_data_volume" "$stock_agents_data_volume" "$readonly_stock_agents_data_volume" "$stock_agents_v0_10_data_volume" "$readonly_stock_agents_v0_10_data_volume" >/dev/null 2>&1 || true
+    docker volume rm "$data_volume" "$workspace_volume" "$override_data_volume" "$legacy_data_volume" "$dice_legacy_data_volume" "$incompatible_data_volume" "$media_guard_data_volume" "$search_env_data_volume" "$official_data_volume" "$no_search_data_volume" "$partial_recovery_data_volume" "$recovery_v1_data_volume" "$pre_concurrency_data_volume" "$partial_concurrency_data_volume" "$stock_agents_data_volume" "$readonly_stock_agents_data_volume" "$stock_agents_v0_10_data_volume" "$readonly_stock_agents_v0_10_data_volume" "$symlink_stock_agents_data_volume" >/dev/null 2>&1 || true
     rm -f "$instructions_file"
     rm -f "$incompatible_log"
 }
@@ -120,6 +122,10 @@ fi
 if [[ ! -r "$previous_stock_agents_fixture" ]]; then
     echo "missing previous stock AGENTS.md fixture: $previous_stock_agents_fixture" >&2
     exit 66
+fi
+if [[ ! -r "$previous_stock_agents_v0_12_5_fixture" ]]; then
+    echo "missing previous stock AGENTS.md fixture: $previous_stock_agents_v0_12_5_fixture" >&2
+    exit 1
 fi
 
 if [[ ! -r "$previous_stock_agents_v0_10_fixture" ]]; then
@@ -429,6 +435,25 @@ docker run --rm \
     --mount "type=bind,src=${previous_stock_agents_v0_12_2_fixture},dst=/data/AGENTS.md,readonly" \
     --mount "type=bind,src=${previous_stock_agents_v0_12_2_fixture},dst=/tmp/agents-stock.md,readonly" \
     "$IMAGE" sh -ec 'cmp /data/AGENTS.md /tmp/agents-stock.md'
+docker run --rm --entrypoint sh \
+    --volume "${stock_agents_v0_10_data_volume}:/data" \
+    --mount "type=bind,src=${previous_stock_agents_v0_12_5_fixture},dst=/tmp/agents-stock.md,readonly" \
+    "$IMAGE" -ec 'cp /tmp/agents-stock.md /data/AGENTS.md; chmod 0644 /data/AGENTS.md'
+docker run --rm \
+    --volume "${stock_agents_v0_10_data_volume}:/data" \
+    "$IMAGE" sh -ec 'cmp /data/AGENTS.md /opt/qqbot-defaults/AGENTS.md'
+docker run --rm \
+    --volume "${readonly_stock_agents_v0_10_data_volume}:/data" \
+    --mount "type=bind,src=${previous_stock_agents_v0_12_5_fixture},dst=/data/AGENTS.md,readonly" \
+    --mount "type=bind,src=${previous_stock_agents_v0_12_5_fixture},dst=/tmp/agents-stock.md,readonly" \
+    "$IMAGE" sh -ec 'cmp /data/AGENTS.md /tmp/agents-stock.md'
+docker run --rm --entrypoint sh \
+    --volume "${symlink_stock_agents_data_volume}:/data" \
+    --mount "type=bind,src=${previous_stock_agents_v0_12_5_fixture},dst=/tmp/agents-stock.md,readonly" \
+    "$IMAGE" -ec 'cp /tmp/agents-stock.md /data/previous-stock.md; ln -s previous-stock.md /data/AGENTS.md'
+docker run --rm \
+    --volume "${symlink_stock_agents_data_volume}:/data" \
+    "$IMAGE" sh -ec 'test -L /data/AGENTS.md && cmp /data/AGENTS.md /data/previous-stock.md'
 docker run --rm --entrypoint sh \
     --volume "${stock_agents_v0_10_data_volume}:/data" \
     --mount "type=bind,src=${previous_stock_agents_v0_11_2_fixture},dst=/tmp/agents-stock.md,readonly" \

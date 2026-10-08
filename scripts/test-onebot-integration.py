@@ -158,6 +158,9 @@ def main():
                 raise AssertionError("native SeaDice registration did not become ready")
             time.sleep(0.25)
         client.initialize()
+        display_status = client.http("/internal/backends", token=private_token)
+        assert "log-display-v1" in display_status.get("capabilities", []), "bridge display capability missing"
+        assert any("log-display-v1" in item.get("capabilities", []) for item in display_status["backends"]), "backend display capability missing"
         roll = client.command(".r 1d1")
         assert "1d1" in text(roll) and "1" in text(roll), roll
         evidence["checks"].append("native registration and r1d1")
@@ -372,6 +375,7 @@ def main():
             claimed = client.http("/internal/artifacts/claim", body, token=private_token)
             content = base64.b64decode(claimed["bytes_base64"], validate=True)
             assert claimed["filename"].endswith("." + expected_format)
+            assert not re.search(r"8[0-9]{15}", claimed["filename"]), "virtual ID leaked in filename"
             assert len(content) == claimed["size"] == receipt["size"]
             assert hashlib.sha256(content).hexdigest() == claimed["sha256"] == receipt["sha256"]
             assert client.http("/internal/artifacts/ack", {
@@ -402,6 +406,17 @@ def main():
                     "nickname": "测试玩家", "text": payload, "kind": "message", "is_bot": False}
         assert client.http("/internal/log/events", captured, token=private_token)["accepted"]
         assert client.http("/internal/log/events", captured, token=private_token)["accepted"]
+        display_event = {**captured, "event_id": str(uuid.uuid4()),
+                         "text": "提及 <@fixtureLogOwner> <@unknownTarget> <@!unknownTarget> <@fixtureBot> [@显示名](mqqapi://markdown/mention?at_type=1&at_tinyid=112233)",
+                         "display": {"author_aliases": ["openid:fixtureLogOwner"], "mentions": [
+                             {"target": "openid:fixtureLogOwner", "name": "事件昵称"},
+                             {"target": "openid:fixtureBot", "is_bot": True},
+                             {"target": "tinyid:112233", "name": "SDK昵称"}]}}
+        assert client.http("/internal/log/events", display_event, token=private_token)["accepted"]
+        assert client.http("/internal/log/events", {**display_event, "display": {
+            "author_aliases": ["openid:fixtureLogOwner"], "mentions": [
+                {"target": "openid:fixtureLogOwner", "name": "不应覆盖"}]}}, token=private_token)["accepted"]
+        log_event(str(uuid.uuid4()), "旧事件 <@fixtureLogOwner> <@legacyUnknown>")
         log_event(str(uuid.uuid4()), "公开机器人回复", is_bot=True)
         log_event(str(uuid.uuid4()), "另一个群的内容", group_key="123456789:fixtureOtherGroup")
         log_event(str(uuid.uuid4()), "采集中断，部分记录未确认。", kind="gap")
@@ -410,10 +425,18 @@ def main():
         assert "&lt;script&gt;" in md and "<script>" not in md, "Markdown did not escape message HTML"
         assert "style=" in md and md.count("唯一正文") == 1 and "公开机器人回复" in md
         assert "另一个群的内容" not in md and "缺口" in md
+        assert "群组虚拟ID" not in md and not re.search(r"<code>8[0-9]{15}</code>", md)
+        assert "@事件昵称" in md and "@SDK昵称" in md and "@机器人" in md
+        assert "@测试玩家" in md and "@成员1" in md and "@成员2" in md
+        assert "fixtureLogOwner" not in md and "unknownTarget" not in md and "mqqapi://" not in md
+        assert "不应覆盖" not in md and md.count("提及 ") == 1
+        evidence["checks"].append("display capability, names, stable anonymous mentions and first-snapshot dedup survive real transport")
         assert log_command(".log off", role="admin")["status"] == "ok"
         log_event(str(uuid.uuid4()), "暂停后不应记录")
         txt = claim_artifact(log_command(".log export story --format=txt"), expected_format="txt")
         assert payload in txt and "暂停后不应记录" not in txt
+        assert display_event["text"] in txt and "旧事件 <@fixtureLogOwner> <@legacyUnknown>" in txt
+        assert "群组虚拟ID" not in txt and "virtual:" not in txt
         assert log_command(".log on story", role="admin")["status"] == "ok"
         docker("restart", "-t", "30", sea)
         deadline = time.monotonic() + 90

@@ -74,10 +74,56 @@ test('SeaDice direct matcher accepts only safe full-line forms and keeps compact
     assert.deepEqual(matchOnebotDirectCommand('.en敏捷'), { command: '.en 敏捷' });
     assert.deepEqual(matchOnebotDirectCommand('.set coc7'), { command: '.set coc7' });
     assert.deepEqual(matchOnebotDirectCommand('.pc show'), { command: '.pc show' });
+    assert.deepEqual(matchOnebotDirectCommand('.r malformed-dice'), { command: '.r malformed-dice' },
+        'the backend owns ordinary dice-parameter parsing');
+    assert.equal(matchOnebotDirectCommand('.log 还有啥指令'), undefined, 'a help question is not a command attempt');
+    assert.equal(matchOnebotDirectCommand('.log help'), undefined, 'help remains ordinary chat');
+    assert.deepEqual(matchOnebotDirectCommand('.log on --format=txt'), { issue: 'command_not_allowed' });
+    assert.deepEqual(matchOnebotDirectCommand('.master add QQ:1234567890123456'), { issue: 'command_not_allowed' });
+    assert.deepEqual(matchOnebotDirectCommand('.set clr'), { issue: 'command_not_allowed' });
+    assert.deepEqual(matchOnebotDirectCommand('.ww set'), { issue: 'command_not_allowed' });
+    assert.deepEqual(matchOnebotDirectCommand('.coc 11'), { issue: 'command_not_allowed' });
+    assert.deepEqual(matchOnebotDirectCommand('.find Alice --num=11'), { issue: 'command_not_allowed' });
     for (const content of [
-        '.random', '.rdelete', '.rdata', '.pcshow', '.scskill', '.set coc7 extra',
+        '.random', '.rdelete', '.rdata', '.pcshow', '.scskill',
         '.r 1d100\nplease explain', 'plain text',
     ]) assert.equal(matchOnebotDirectCommand(content), undefined, content);
+});
+
+test('log help questions reach the LLM while unsupported operations hand off without tool execution', async () => {
+    const sent = [];
+    const executed = [];
+    const service = fakeService({ execute(args) {
+        executed.push(args);
+        return { status: 'ok', outputs: ['should not run'] };
+    } });
+    const router = createOnebotDirectRouter({
+        service, appId: APP_ID,
+        sender: { async sendMarkdown(_target, text) { sent.push(text); } },
+        env: { QQBOT_ONEBOT_ENABLED: 'true' },
+    });
+    const question = context({ content: '@蓝色大肥鱼 .log 还有啥指令', msgId: 'log-help-question' });
+    let modelHandoffs = 0;
+    await router.middleware(question, async () => { modelHandoffs++; });
+    assert.equal(modelHandoffs, 1);
+    assert.equal(executed.length, 0, 'help is answered in the model path without a backend call');
+    assert.equal(sent.length, 0, 'the direct router does not send a fixed refusal for help');
+    assert.equal(getOnebotDirectFallback(question), undefined, 'ordinary help is not a failed backend attempt');
+
+    for (const [index, text, expectedReason] of [
+        [0, '.rh 1d20', 'hidden_disabled'],
+        [1, '.master add QQ:1234567890123456', 'command_not_allowed'],
+        [2, '.set clr', 'command_not_allowed'],
+        [3, '.log on --format=txt', 'command_not_allowed'],
+    ]) {
+        const blocked = context({ content: text, msgId: `blocked-policy-${index}` });
+        await router.middleware(blocked, async () => { modelHandoffs++; });
+        assert.equal(getOnebotDirectFallback(blocked)?.reason, expectedReason);
+    }
+    assert.equal(modelHandoffs, 5, 'blocked operations are handed to the LLM for explanation');
+    assert.equal(executed.length, 0, 'policy handoffs never dispatch to OneBot');
+    assert.equal(sent.length, 0, 'the user receives the model explanation instead of a fixed direct reply');
+    router.stop();
 });
 
 test('direct log commands get an artifact delivery deadline without extending ordinary dice commands', async () => {

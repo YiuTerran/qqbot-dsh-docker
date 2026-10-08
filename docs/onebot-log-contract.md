@@ -44,6 +44,40 @@ model tools. Bot outputs are observed only after the final QQ ACK; unknown
 delivery is a gap. A virtual command and its backend reply are not independently
 logged at the native execution hook.
 
+## Optional log display metadata
+
+`log-display-v1` is a display-only extension. `/internal/backends` advertises
+bridge HTTP support in its top-level `capabilities`; each backend independently
+advertises support through its connection negotiation. qq-bot sends the optional
+`display` field only to a supporting bridge, and the bridge forwards it only to
+a supporting backend. Older components continue accepting the original capture
+schema. Pending events keep their captured display snapshot across reconnects.
+
+`display` contains `author_aliases` and up to 64 `mentions`. A mention contains
+`target`, optional `aliases`, `name`, and `is_bot`. Targets are namespaced
+`openid:<id>` or `tinyid:<id>`; aliases are joined only by the current SDK event's
+structural evidence, never by matching nicknames. Each identity accepts at most
+eight aliases of at most 160 UTF-8 bytes each. Names are bounded to 80 Unicode
+code points and 256 UTF-8 bytes. Serialized display metadata is at most 16 KiB;
+excess display information is discarded without discarding message text. Only
+the capture HTTP endpoint accepts a body up to 128 KiB. Queue limits include
+display bytes. Event deduplication uses the original authoritative v1 fields;
+display changes on a duplicate do not overwrite the first accepted snapshot.
+
+SeaDice stores this metadata in the existing `command_info` field. Export hides
+generated virtual IDs in headings, speaker labels and filenames. Markdown
+resolves recognized QQ mentions using event names, Markdown labels, then recorded
+author aliases from the same log. Unknown targets receive stable `@成员N` labels;
+known bot targets use `@机器人`. Names never affect identity or authorization.
+TXT preserves stored message bodies, including their original mention tokens.
+Both formats keep original times and public text. Names and Markdown text remain
+HTML-escaped; no remote lookup or media download is performed.
+
+The name-index pass and render pass share one database read transaction and
+cutoff. An export accepts at most 10,000 indexed identities and 10 MiB of final
+UTF-8 output, rejecting excess rather than truncating it. Existing rows need no
+migration: re-export hides generated IDs and anonymizes unresolved mentions.
+
 ## Artifacts
 
 Backend action `_llm_bridge_artifact` params:

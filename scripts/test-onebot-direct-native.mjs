@@ -31,6 +31,7 @@ const { setupMiddlewares } = await import(pathToFileURL(join(adapterRoot, 'gatew
 const { QQBot } = await import(pathToFileURL(join(sdkRoot, 'QQBot.js')).href);
 const { dispatchEvent } = await import(pathToFileURL(join(sdkRoot, 'protocol/gateway/event-dispatcher.js')).href);
 const { createOnebotDirectRouter } = await import(pathToFileURL(directModulePath).href);
+const { SEALDICE_TOOL_GUIDANCE } = await import(new URL('./qqbot-sealdice-policy.mjs', pathToFileURL(directModulePath)).href);
 const { attachOnebotDeliveryObserver } = await import(new URL('./qqbot-onebot-log.mjs', pathToFileURL(directModulePath)).href);
 const { registerOnebotCommandTool } = await import(new URL('./qqbot-onebot.mjs', pathToFileURL(directModulePath)).href);
 const { getMergedGenerationRequests } = await import(new URL('./qqbot-concurrency.mjs', pathToFileURL(directModulePath)).href);
@@ -517,6 +518,55 @@ test('access, mention, current quote and history context keep direct-looking tex
     await runChain(layers, attached, async () => { modelCalls++; });
     assert.equal(calls.length, 0, 'a current message with attachments continues through normal chat processing');
     assert.equal(modelCalls, 3, 'quoted, historic, and attached inputs continue to downstream chat exactly once');
+});
+
+test('native Markdown self mention asking for .log help reaches the model once without a direct reply', async (t) => {
+    const calls = [];
+    const replies = [];
+    const modelInputs = [];
+    const sender = { async sendMarkdown(target, text) { replies.push({ target, text }); } };
+    const service = makeService(async (args) => {
+        calls.push(args);
+        return { status: 'ok', outputs: ['unexpected direct result'] };
+    });
+    const naturalChain = assembleProductionChain({ service, sender, requireMention: false });
+    const helpChain = assembleProductionChain({ service, sender, requireMention: true });
+    t.after(() => naturalChain.directRouter.stop());
+    t.after(() => helpChain.directRouter.stop());
+
+    for (const [messageId, content] of [
+        ['natural-own-card', '我要看我已有的人物卡'],
+        ['natural-check', '骰一个心理学'],
+    ]) {
+        const ctx = makeContext({ group: 'direct-group', senderId: 'member-direct', messageId, content }, replies);
+        await runChain(naturalChain.layers, ctx, async (terminalCtx) => { modelInputs.push(terminalCtx.message.content); });
+    }
+
+    const messageId = 'log-help-question';
+    const mention = '[@蓝色大肥鱼](mqqapi://markdown/mention?at_type=1&at_tinyid=4011912066)';
+    const content = `${mention} .log 还有啥指令`;
+    const help = makeContext({
+        group: 'direct-group', senderId: 'member-direct', messageId, content,
+        rawEventType: 'GROUP_AT_MESSAGE_CREATE',
+        raw: {
+            id: messageId,
+            group_openid: 'direct-group',
+            author: { member_openid: 'member-direct', member_role: 'member' },
+            content,
+            mentions: [{ member_openid: '4011912066', id: '4011912066', user_openid: '4011912066', is_you: true }],
+        },
+    }, replies);
+    await runChain(helpChain.layers, help, async (ctx) => { modelInputs.push(ctx.message.content); });
+
+    assert.equal(calls.length, 0, 'ordinary natural requests and a .log help question never execute directly');
+    assert.equal(replies.length, 3, 'each model request receives its normal thinking notice');
+    assert.ok(replies.every((reply) => reply.text === '收到啦，主人，本鱼正在思考中…'),
+        'only normal chat thinking notices are sent, never a fixed direct refusal');
+    assert.equal(modelInputs.length, 3, 'each original reaches the model exactly once');
+    assert.ok(modelInputs[2].includes('.log 还有啥指令'), 'the model receives the current help question after @bot cleanup');
+    assert.match(SEALDICE_TOOL_GUIDANCE, /看我已有的人物卡/u);
+    assert.match(SEALDICE_TOOL_GUIDANCE, /骰一个心理学/u);
+    assert.match(SEALDICE_TOOL_GUIDANCE, /Answer questions about available \.log commands in text/u);
 });
 
 test('mention gating precedes direct routing and sanitized /new cancels the active conversation before slash handling', async (t) => {

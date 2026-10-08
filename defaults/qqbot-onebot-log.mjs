@@ -15,11 +15,18 @@ const MAX_PENDING_BYTES = 6 * 1024 * 1024;
 const MAX_TEXT_CHARS = 8192;
 const MAX_NICKNAME_CHARS = 80;
 const MAX_NICKNAME_BYTES = 256;
+const MAX_DISPLAY_BYTES = 16 * 1024;
+const MAX_DISPLAY_ALIASES = 8;
+const MAX_DISPLAY_MENTIONS = 64;
 const MAX_OWN_MESSAGE_IDS = 50_000;
 const EVENT_TTL_MS = 24 * 60 * 60 * 1000;
 const GAP_TEXT = '记录缺口：部分群消息未能保存。';
 const RESTART_GAP_TEXT = '记录缺口：记录服务重启期间的消息可能不完整。';
 const OWN_USER_SUFFIX = '__qqbot__';
+const DISPLAY_ALIAS_PATTERN = /^(?:openid:[A-Za-z0-9_-]{1,128}|tinyid:[1-9][0-9]{0,19})$/u;
+const DISPLAY_URL_PATTERN = /(?:[a-z][a-z0-9+.-]{1,20}:\/\/|www\.)/iu;
+const NATIVE_MENTION_PATTERN = /<@!?([A-Za-z0-9_-]{1,128})>/gu;
+const MARKDOWN_MENTION_PATTERN = /\[([^\[\]\r\n]{1,160})\]\((mqqapi:\/\/markdown\/mention\?[^()]*)\)/gu;
 const GAP_WARNING_REASONS = new Set(['raw_event_mismatch', 'raw_event_invalid', 'raw_text_invalid',
     'local_state_unavailable', 'local_queue_full', 'local_state_full', 'local_persist_failed',
     'bridge_queue_full', 'event_expired', 'bot_delivery_unknown', 'bot_output_too_large',
@@ -43,6 +50,145 @@ function safeNickname(value) {
         result += codePoint;
     }
     return result;
+}
+
+function safeDisplayAlias(value) {
+    return typeof value === 'string' && Buffer.byteLength(value, 'utf8') <= 160
+        && DISPLAY_ALIAS_PATTERN.test(value) ? value : undefined;
+}
+
+function safeDisplayName(value) {
+    const name = safeNickname(value);
+    return name && Array.from(name).length <= MAX_NICKNAME_CHARS && !DISPLAY_URL_PATTERN.test(name)
+        ? name : undefined;
+}
+
+function displaySourceId(value) {
+    if (typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(value)) return value;
+    if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) return String(value);
+    return undefined;
+}
+
+function isLogDisplay(display) {
+    if (!display || typeof display !== 'object' || Array.isArray(display)
+        || !Array.isArray(display.author_aliases) || display.author_aliases.length > MAX_DISPLAY_ALIASES
+        || !Array.isArray(display.mentions) || display.mentions.length > MAX_DISPLAY_MENTIONS) return false;
+    const aliasesValid = (aliases, allowEmpty = false) => Array.isArray(aliases)
+        && aliases.length <= MAX_DISPLAY_ALIASES && (allowEmpty || aliases.length > 0)
+        && aliases.every((alias) => safeDisplayAlias(alias) !== undefined);
+    if (!aliasesValid(display.author_aliases) || !display.mentions.every((mention) => mention
+        && typeof mention === 'object' && !Array.isArray(mention)
+        && safeDisplayAlias(mention.target) !== undefined
+        && (mention.aliases === undefined || aliasesValid(mention.aliases, true))
+        && (mention.name === undefined || (typeof mention.name === 'string'
+            && safeDisplayName(mention.name) === mention.name))
+        && (mention.is_bot === undefined || typeof mention.is_bot === 'boolean'))) return false;
+    return Buffer.byteLength(JSON.stringify(display), 'utf8') <= MAX_DISPLAY_BYTES;
+}
+
+function markdownMentionTarget(urlText) {
+    if (typeof urlText !== 'string' || urlText.length > 2048
+        || !urlText.startsWith('mqqapi://markdown/mention?')) return undefined;
+    const match = /^(?:at_type=1&at_tinyid=([1-9][0-9]{0,19})|at_tinyid=([1-9][0-9]{0,19})&at_type=1)$/u
+        .exec(urlText.slice(urlText.indexOf('?') + 1));
+    return match?.[1] ?? match?.[2];
+}
+
+function displayFromRaw(raw) {
+    const author = safeDisplayAlias(`openid:${raw?.author?.member_openid ?? ''}`);
+    if (!author || (Array.isArray(raw?.mentions) && raw.mentions.length > MAX_DISPLAY_MENTIONS)) return undefined;
+
+    const mentionCandidates = [];
+    const sdkMentions = Array.isArray(raw?.mentions) ? raw.mentions : [];
+    for (const source of sdkMentions) {
+        if (!source || typeof source !== 'object' || Array.isArray(source)) continue;
+        const aliases = new Set();
+        for (const field of ['member_openid', 'user_openid']) {
+            const value = displaySourceId(source[field]);
+            const alias = value ? `openid:${value}` : undefined;
+            if (alias) aliases.add(alias);
+        }
+        for (const field of ['tiny_id', 'tinyid', 'at_tinyid']) {
+            const value = source[field];
+            const alias = (typeof value === 'string' || typeof value === 'number')
+                && /^[1-9][0-9]{0,19}$/u.test(String(value)) ? `tinyid:${value}` : undefined;
+            if (alias) aliases.add(alias);
+        }
+        const id = displaySourceId(source.id);
+        if (id) {
+            aliases.add(/^[1-9][0-9]{0,19}$/u.test(id) ? `tinyid:${id}` : `openid:${id}`);
+        }
+        if (aliases.size === 0) continue;
+        if (aliases.size > MAX_DISPLAY_ALIASES) return undefined;
+        const name = safeDisplayName(source.username ?? source.nickname ?? source.name);
+        const record = {
+            aliases: [...aliases],
+            ...(name ? { name } : {}),
+            ...((source.is_you === true || source.is_bot === true || source.bot === true) ? { is_bot: true } : {}),
+        };
+        const signature = JSON.stringify({
+            aliases: [...record.aliases].sort(),
+            name: record.name ?? '',
+            is_bot: record.is_bot === true,
+        });
+        mentionCandidates.push({ record, signature });
+    }
+
+    const aliasSignatures = new Map();
+    for (const { record, signature } of mentionCandidates) {
+        for (const alias of record.aliases) {
+            const signatures = aliasSignatures.get(alias) ?? new Set();
+            signatures.add(signature);
+            aliasSignatures.set(alias, signatures);
+        }
+    }
+    const ambiguousAliases = new Set([...aliasSignatures]
+        .filter(([, signatures]) => signatures.size > 1)
+        .map(([alias]) => alias));
+    const mentionRecords = new Map();
+    for (const { record } of mentionCandidates) {
+        const aliases = record.aliases.filter((alias) => !ambiguousAliases.has(alias));
+        const safeRecord = {
+            aliases,
+            ...(record.name ? { name: record.name } : {}),
+            ...(record.is_bot ? { is_bot: true } : {}),
+        };
+        for (const alias of aliases) mentionRecords.set(alias, safeRecord);
+    }
+
+    const mentions = new Map();
+    const remember = (targetAlias, fallbackName, record) => {
+        if (!targetAlias) return;
+        if (ambiguousAliases.has(targetAlias)) {
+            mentions.set(targetAlias, { target: targetAlias });
+            return;
+        }
+        const current = mentions.get(targetAlias) ?? { target: targetAlias };
+        if (record?.aliases?.length) current.aliases = [...new Set([...(current.aliases ?? []), ...record.aliases])].slice(0, MAX_DISPLAY_ALIASES);
+        const name = record?.name ?? fallbackName;
+        if (!current.name && name) current.name = name;
+        if (record?.is_bot) current.is_bot = true;
+        mentions.set(targetAlias, current);
+    };
+
+    if (typeof raw.content === 'string') {
+        MARKDOWN_MENTION_PATTERN.lastIndex = 0;
+        for (const match of raw.content.matchAll(MARKDOWN_MENTION_PATTERN)) {
+            const tinyId = markdownMentionTarget(match[2]);
+            if (!tinyId) continue;
+            const target = `tinyid:${tinyId}`;
+            const label = match[1].startsWith('@') ? match[1].slice(1) : match[1];
+            remember(target, safeDisplayName(label), mentionRecords.get(target));
+        }
+        NATIVE_MENTION_PATTERN.lastIndex = 0;
+        for (const match of raw.content.matchAll(NATIVE_MENTION_PATTERN)) {
+            const target = `openid:${match[1]}`;
+            remember(target, undefined, mentionRecords.get(target));
+        }
+    }
+    if (mentions.size > MAX_DISPLAY_MENTIONS) return undefined;
+    const display = { author_aliases: [author], mentions: [...mentions.values()] };
+    return isLogDisplay(display) ? display : undefined;
 }
 
 function unixSeconds(value) {
@@ -142,6 +288,7 @@ export function createOnebotLogCapture({ config, appId, options = {} } = {}) {
     const ownMessageIds = new Map();
     const captureBackendIds = new Set(config.backendIds);
     const readyBackendIds = new Set();
+    const displayBackendIds = new Set();
     const unsupportedBackendIds = new Set();
     const missingCapabilityGaps = new Set();
     const captureTasks = new Map();
@@ -211,7 +358,10 @@ export function createOnebotLogCapture({ config, appId, options = {} } = {}) {
         }
         const storedItems = data.pending.filter(validStoredItem);
         if (storedItems.length !== data.pending.length) throw new Error('invalid pending capture items');
-        for (const item of storedItems) pending.push({ backendId: item.backendId, event: item.event });
+        for (const item of storedItems) {
+            if (item.event.display !== undefined && !isLogDisplay(item.event.display)) delete item.event.display;
+            pending.push({ backendId: item.backendId, event: item.event });
+        }
         trackingSaturated = data.incomplete === true;
         for (const item of pending) knownGroups.set(keyForEvent(item.event), item.event.group_key);
         for (const entry of data.gaps) {
@@ -435,6 +585,7 @@ export function createOnebotLogCapture({ config, appId, options = {} } = {}) {
     async function enqueue(event) {
         await initialized;
         if (stopped || !isLogEvent(event) || !config.backendIds?.includes(event.backend_id)) return false;
+        if (event.display !== undefined && !isLogDisplay(event.display)) delete event.display;
         if (backendSetKnown && !captureBackendIds.has(event.backend_id)) {
             if (unsupportedBackendIds.has(event.backend_id)) {
                 noteGap(event.backend_id, event.group_key, 'capability_unavailable', event.time);
@@ -522,6 +673,9 @@ export function createOnebotLogCapture({ config, appId, options = {} } = {}) {
 
     async function postEvent(item) {
         const url = new URL('/internal/log/events', config.url.origin);
+        const event = item.event;
+        const wireEvent = event.display && displayBackendIds.has(event.backend_id)
+            ? event : Object.fromEntries(Object.entries(event).filter(([key]) => key !== 'display'));
         const response = await fetchImpl(url, {
             method: 'POST',
             headers: {
@@ -529,7 +683,7 @@ export function createOnebotLogCapture({ config, appId, options = {} } = {}) {
                 Accept: 'application/json',
                 'Content-Type': 'application/json',
             },
-            body: JSON.stringify(item.event),
+            body: JSON.stringify(wireEvent),
             signal: AbortSignal.timeout(options.requestTimeoutMs ?? 5000),
             redirect: 'error',
         });
@@ -743,9 +897,12 @@ export function createOnebotLogCapture({ config, appId, options = {} } = {}) {
         for (const key of keys) pumpKey(key);
     }
 
-    function setBackends(backends) {
+    function setBackends(backends, bridgeCapabilities = []) {
         backendSetKnown = true;
         readyBackendIds.clear();
+        displayBackendIds.clear();
+        const bridgeSupportsDisplay = Array.isArray(bridgeCapabilities)
+            && bridgeCapabilities.includes('log-display-v1');
         for (const backend of Array.isArray(backends) ? backends : []) {
             if (!backend || !safeKey(backend.id) || !config.backendIds?.includes(backend.id)) continue;
             if (backend.ready !== true) continue;
@@ -753,6 +910,9 @@ export function createOnebotLogCapture({ config, appId, options = {} } = {}) {
                 captureBackendIds.add(backend.id);
                 readyBackendIds.add(backend.id);
                 unsupportedBackendIds.delete(backend.id);
+                if (bridgeSupportsDisplay && backend.capabilities.includes('log-display-v1')) {
+                    displayBackendIds.add(backend.id);
+                }
             }
             else {
                 captureBackendIds.delete(backend.id);
@@ -773,6 +933,7 @@ export function createOnebotLogCapture({ config, appId, options = {} } = {}) {
 
     function setUnavailable() {
         readyBackendIds.clear();
+        displayBackendIds.clear();
     }
 
     async function captureRaw(ctx) {
@@ -813,6 +974,7 @@ export function createOnebotLogCapture({ config, appId, options = {} } = {}) {
             return false;
         }
         const userKey = rawUser;
+        const display = displayFromRaw(raw);
         const event = {
             event_id: stableEventId(appId, groupKey, raw.id),
             group_key: groupKey,
@@ -822,6 +984,7 @@ export function createOnebotLogCapture({ config, appId, options = {} } = {}) {
             text: cleanText,
             is_bot: raw.author?.bot === true,
             kind: 'message',
+            ...(display ? { display } : {}),
         };
         return await enqueueEventForActive(event);
     }

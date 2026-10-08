@@ -136,7 +136,7 @@ if [ ! -e /data/AGENTS.md ]; then
     install -o node -g node -m 0644 /opt/qqbot-defaults/AGENTS.md /data/AGENTS.md
 fi
 
-# Upgrade only exact stock instructions shipped by v0.9.0 through v0.12.2. A
+# Upgrade only exact stock instructions shipped by v0.9.0 through v0.12.5. A
 # customized, symlinked, or read-only AGENTS.md remains user-owned and is never
 # replaced.
 previous_v0_9_stock_agents_sha256=17aa60a400c6c541e11d21da1eb527ebd5330791e646d8e6ca4eb02c8ac2b02b
@@ -146,6 +146,7 @@ previous_v0_11_stock_agents_sha256=81ca9f07b266e25113fbc978352d4a53d882423dc556c
 previous_v0_11_1_stock_agents_sha256=0a9885b97202d0a4134336df95eb63e5977f6a565d7f4839516cb39898f8b485
 previous_v0_11_2_stock_agents_sha256=74bb7a1c63fec6c418fc7c888d8604316b6d8d5d78c1904b1d2ca39494685d63
 previous_v0_12_2_stock_agents_sha256=abf2b148fbd709941051a5488e696c2f84f105d37930bf2bcc6457f5a5db00bf
+previous_v0_12_5_stock_agents_sha256=6ad2a30bb50a5d55be9b9290f4b1b35167fedeb16d20c94c28b881a16bed09d9
 if [ -f /data/AGENTS.md ] && [ ! -L /data/AGENTS.md ] && [ -r /data/AGENTS.md ] && [ -w /data/AGENTS.md ]; then
     current_agents_sha256=$(sha256sum /data/AGENTS.md | cut -d ' ' -f 1)
     if [ "$current_agents_sha256" = "$previous_v0_9_stock_agents_sha256" ] \
@@ -154,7 +155,8 @@ if [ -f /data/AGENTS.md ] && [ ! -L /data/AGENTS.md ] && [ -r /data/AGENTS.md ] 
         || [ "$current_agents_sha256" = "$previous_v0_11_stock_agents_sha256" ] \
         || [ "$current_agents_sha256" = "$previous_v0_11_1_stock_agents_sha256" ] \
         || [ "$current_agents_sha256" = "$previous_v0_11_2_stock_agents_sha256" ] \
-        || [ "$current_agents_sha256" = "$previous_v0_12_2_stock_agents_sha256" ]; then
+        || [ "$current_agents_sha256" = "$previous_v0_12_2_stock_agents_sha256" ] \
+        || [ "$current_agents_sha256" = "$previous_v0_12_5_stock_agents_sha256" ]; then
         agents_migration_tmp="/data/.AGENTS.md.$$"
         if install -o node -g node -m 0644 /opt/qqbot-defaults/AGENTS.md "$agents_migration_tmp" \
             && mv -f "$agents_migration_tmp" /data/AGENTS.md; then

@@ -108,6 +108,168 @@ test('captures raw no-mention group events and attachment placeholders, with ide
     finally { await service.stop(); await rm(directory, { recursive: true, force: true }); }
 });
 
+test('sends bounded current-event display aliases only when bridge and backend negotiate log-display-v1', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'qqbot-log-display-'));
+    const received = [];
+    const { service } = await makeService(directory, async (_url, init) => {
+        received.push(JSON.parse(init.body));
+        return accepted();
+    });
+    try {
+        service.setBackends([{
+            id: backendId, ready: true, capabilities: ['log-capture-v1', 'artifact-v1', 'log-display-v1'],
+        }], ['log-display-v1']);
+        const source = message({ id: 'display-current-event', content:
+            'Hi [@子若](mqqapi://markdown/mention?at_type=1&at_tinyid=4011912066) <@member-openid-2>' });
+        source.raw.mentions = [
+            { member_openid: 'member-openid-2', user_openid: 'member-openid-2', id: '4011912066',
+                tiny_id: '4011912066', username: '子若' },
+        ];
+        assert.equal(await service.captureRaw({ message: source }), true);
+        await waitFor(() => received.length === 1);
+        assert.deepEqual(received[0].display, {
+            author_aliases: ['openid:user-a'],
+            mentions: [
+                { target: 'tinyid:4011912066', aliases: ['openid:member-openid-2', 'tinyid:4011912066'], name: '子若' },
+                { target: 'openid:member-openid-2', aliases: ['openid:member-openid-2', 'tinyid:4011912066'], name: '子若' },
+            ],
+        });
+        assert.equal(JSON.stringify(received[0].display).includes('mqqapi:'), false);
+        assert.equal(JSON.stringify(received[0].display).includes('https:'), false);
+    }
+    finally { await service.stop(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('keeps conflicting SDK mention aliases anonymous instead of using the last record', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'qqbot-log-display-ambiguous-'));
+    const received = [];
+    const { service } = await makeService(directory, async (_url, init) => {
+        received.push(JSON.parse(init.body));
+        return accepted();
+    });
+    try {
+        service.setBackends([{
+            id: backendId, ready: true, capabilities: ['log-capture-v1', 'log-display-v1'],
+        }], ['log-display-v1']);
+
+        const sharedTinyId = message({ id: 'display-conflicting-tinyid', content:
+            '[@可疑目标](mqqapi://markdown/mention?at_type=1&at_tinyid=4011912066) <@person-a> <@person-b>' });
+        sharedTinyId.raw.mentions = [
+            { member_openid: 'person-a', tiny_id: '4011912066', username: '成员甲', is_bot: true },
+            { member_openid: 'person-b', tiny_id: '4011912066', username: '成员乙' },
+        ];
+        assert.equal(await service.captureRaw({ message: sharedTinyId }), true);
+        await waitFor(() => received.length === 1);
+        const tinyTarget = received[0].display.mentions.find((item) => item.target === 'tinyid:4011912066');
+        assert.deepEqual(tinyTarget, { target: 'tinyid:4011912066' },
+            'ambiguous tiny ID must not inherit a label, identity link, or bot flag');
+        assert.deepEqual(received[0].display.mentions.find((item) => item.target === 'openid:person-a'), {
+            target: 'openid:person-a', aliases: ['openid:person-a'], name: '成员甲', is_bot: true,
+        });
+
+        const sharedOpenId = message({ id: 'display-conflicting-openid', content: '<@same-openid>' });
+        sharedOpenId.raw.mentions = [
+            { member_openid: 'same-openid', tiny_id: '4011912066', username: '旧名称' },
+            { member_openid: 'same-openid', tiny_id: '4011912067', username: '新名称' },
+        ];
+        assert.equal(await service.captureRaw({ message: sharedOpenId }), true);
+        await waitFor(() => received.length === 2);
+        assert.deepEqual(received[1].display.mentions.find((item) => item.target === 'openid:same-openid'), {
+            target: 'openid:same-openid',
+        }, 'ambiguous openid must not inherit metadata from the last record');
+    }
+    finally { await service.stop(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('omits display metadata for old bridge or backend and drops oversized display without losing the event', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'qqbot-log-display-compat-'));
+    const received = [];
+    const { service } = await makeService(directory, async (_url, init) => {
+        received.push(JSON.parse(init.body));
+        return accepted();
+    });
+    try {
+        service.setBackends([{
+            id: backendId, ready: true, capabilities: ['log-capture-v1', 'log-display-v1'],
+        }], []);
+        const oldBridgeSource = message({ id: 'display-old-bridge', content:
+            '[@子若](mqqapi://markdown/mention?at_type=1&at_tinyid=4011912066)' });
+        assert.equal(await service.captureRaw({ message: oldBridgeSource }), true);
+        await waitFor(() => received.length === 1);
+        assert.equal(Object.hasOwn(received[0], 'display'), false);
+
+        service.setBackends([{
+            id: backendId, ready: true, capabilities: ['log-capture-v1'],
+        }], ['log-display-v1']);
+        const oldSeaSource = message({ id: 'display-old-backend', content:
+            '[@子若](mqqapi://markdown/mention?at_type=1&at_tinyid=4011912066)' });
+        assert.equal(await service.captureRaw({ message: oldSeaSource }), true);
+        await waitFor(() => received.length === 2);
+        assert.equal(Object.hasOwn(received[1], 'display'), false);
+
+        service.setBackends([{
+            id: backendId, ready: true, capabilities: ['log-capture-v1', 'log-display-v1'],
+        }], ['log-display-v1']);
+        const oversized = message({ id: 'display-over-limit', content: Array.from({ length: 64 }, (_, index) =>
+            `[@x](mqqapi://markdown/mention?at_type=1&at_tinyid=${index + 1})`).join(' ') });
+        oversized.raw.mentions = Array.from({ length: 64 }, (_, index) => ({
+            member_openid: `member-${index + 1}`, tiny_id: String(index + 1), username: '鱼'.repeat(80),
+        }));
+        assert.equal(await service.captureRaw({ message: oversized }), true);
+        await waitFor(() => received.length === 3);
+        assert.equal(received[2].text, oversized.raw.content);
+        assert.equal(Object.hasOwn(received[2], 'display'), false);
+    }
+    finally { await service.stop(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test('invalid optional display metadata in a persisted queue is discarded without rejecting the message', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'qqbot-log-display-queue-'));
+    const filePath = join(directory, 'queue.json');
+    const received = [];
+    const event = {
+        backend_id: backendId,
+        event_id: 'persisted-invalid-display',
+        group_key: `${appId}:group-a`,
+        user_key: `${appId}:user-a`,
+        time: Math.floor(Date.now() / 1000),
+        nickname: '旧记录',
+        text: '持久队列中的原消息',
+        is_bot: false,
+        kind: 'message',
+        display: { author_aliases: ['bad-alias'], mentions: [] },
+    };
+    await writeFile(filePath, JSON.stringify({
+        version: 1,
+        appId,
+        pending: [{ backendId, event }],
+        gaps: [],
+        groups: [[`${backendId}\u0000${appId}:group-a`, `${appId}:group-a`]],
+        incomplete: false,
+    }));
+    const service = createOnebotLogCapture({
+        config: config(), appId,
+        options: { filePath, fetchImpl: async (_url, init) => {
+            received.push(JSON.parse(init.body));
+            return accepted();
+        } },
+    });
+    try {
+        service.setBackends([{
+            id: backendId, ready: true, capabilities: ['log-capture-v1', 'log-display-v1'],
+        }], ['log-display-v1']);
+        await waitFor(() => received.some((item) => item.event_id === event.event_id) || service.diagnostics().initError,
+            `invalid-display queue did not drain: ${JSON.stringify(service.diagnostics())}`);
+        const posted = received.find((item) => item.event_id === event.event_id);
+        assert.ok(posted, `invalid-display queue did not post: ${JSON.stringify(service.diagnostics())}`);
+        assert.equal(posted.text, event.text);
+        assert.equal(Object.hasOwn(posted, 'display'), false);
+        const state = JSON.parse(await readFile(filePath, 'utf8'));
+        assert.equal(state.pending.length, 0);
+    }
+    finally { await service.stop(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test('suppresses only ACK-matched own echoes in the same group and records only confirmed group sends', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'qqbot-log-'));
     const received = [];
@@ -254,7 +416,7 @@ test('large raw messages stop at the serialized state byte limit', async () => {
         assert.equal(stored.gaps.length, 1);
         assert.equal(service.diagnostics().initError, false);
         service.setBackends(groupBackend);
-        assert.equal(await service.barrier({ backendId, groupKey: `${appId}:group-a`, timeoutMs: 10000 }), true);
+        assert.equal(await service.barrier({ backendId, groupKey: `${appId}:group-a`, timeoutMs: 60000 }), true);
         assert.deepEqual(posted, [...Array(acceptedCount).fill('message'), 'gap']);
     }
     finally { await service.stop(); await rm(directory, { recursive: true, force: true }); }

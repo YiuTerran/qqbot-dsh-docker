@@ -1541,7 +1541,7 @@ export function registerOnebotCommandTool(ctx, options = {}) {
                     .filter((backend) => backend && backend.version === 1 && config.backendIds.includes(backend.id)
                         && Array.isArray(backend.capabilities) && backend.capabilities.includes('artifact-v1'))
                     .map((backend) => backend.id));
-                runtime.logCapture.setBackends(listedBackends);
+                runtime.logCapture.setBackends(listedBackends, result?.capabilities);
                 const readyIds = new Set((Array.isArray(result?.backends) ? result.backends : [])
                     .filter((backend) => backend && backend.version === 1 && config.backendIds.includes(backend.id) && backend.ready === true)
                     .map((backend) => backend.id));
