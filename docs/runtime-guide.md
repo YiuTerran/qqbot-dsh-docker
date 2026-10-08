@@ -93,7 +93,7 @@ mkdir -p /tmp/qqbot-image-probe
 docker run --rm --entrypoint node --env-file .env \
   --mount "type=bind,src=$PWD/scripts/verify-image-route.mjs,dst=/tmp/verify-image-route.mjs,readonly" \
   --mount type=bind,src=/tmp/qqbot-image-probe,dst=/probe-output \
-  tryao/qqbot-dsh:v0.12.5 /tmp/verify-image-route.mjs /probe-output
+  tryao/qqbot-dsh:v0.12.6 /tmp/verify-image-route.mjs /probe-output
 ```
 
 探测会发起真实图片服务请求并消耗服务额度；不会发送真实 QQ 消息或修改生产额度。真实 QQ 图片和文件投递仍需用机器人账号验证。
