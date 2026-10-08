@@ -43,7 +43,7 @@ const {
     renderOnebotRequestMetadata,
 } = scopeModule;
 
-const { captureCurrentLogSource, isCurrentLogSource } = await import(pathToFileURL(join(defaultsRoot, 'qqbot-sealdice-policy.mjs')).href);
+const { captureCurrentLogSource, captureOnebotGroupRole, isCurrentLogSource } = await import(pathToFileURL(join(defaultsRoot, 'qqbot-sealdice-policy.mjs')).href);
 const appId = '123456789';
 const config = (hiddenEnabled = false, masterUsers = [], logEnabled = false) => ({
     enabled: true,
@@ -66,7 +66,10 @@ function logOriginal(text, role = 'owner', ownerId = 'member-a', groupId = 'grou
     const message = { kind: 'group', senderId: ownerId, groupOpenid: groupId,
         messageId: original.replyTarget.msgId, replyTarget: original.replyTarget,
         raw: { id: original.replyTarget.msgId, group_openid: groupId,
-            author: { member_openid: ownerId }, content: `<@!${appId}> ${text}` } };
+            author: { member_openid: ownerId, member_role: role },
+            content: `[@蓝色大肥鱼](mqqapi://markdown/mention?at_type=1&at_tinyid=4011912066) ${text}`,
+            mentions: [{ member_openid: '4011912066', id: '4011912066', user_openid: '4011912066', is_you: true }] } };
+    original.groupRole = captureOnebotGroupRole(message, message.replyTarget) ?? 'unknown';
     original.currentLogSource = captureCurrentLogSource(message, message.replyTarget, appId);
     return original;
 }
@@ -958,6 +961,7 @@ test('native log accepts full current command with quote context and prevents me
         assert.equal((await run([logOriginal('.log on', 'owner', 'owner-a', 'group-a', {
             hasQuote: true, hasAttachments: true, text: 'rendered envelope containing quote text',
         })], 0, '.log on')).status, 'ok');
+        assert.equal((await run([logOriginal('.log on', 'admin', 'admin-a')], 0, '.log on')).status, 'ok');
         const member = logOriginal('.log on', 'member', 'member-b');
         assert.equal((await run([member], 0, '.log on')).failureReason, 'log_role_denied');
         const ownerProse = { ...groupOriginal('owner-a', 'group-a', 'owner'), text: '请开启记录' };
@@ -967,7 +971,7 @@ test('native log accepts full current command with quote context and prevents me
         assert.equal((await run([stolen], 0, '.log on')).failureReason, 'log_exact_source_required');
         assert.equal((await run([{ ...ownerProse, text: '.log on', hasQuote: true }], 0, '.log on')).failureReason,
             'log_exact_source_required', 'a rendered or quoted command cannot substitute for a raw current command');
-        assert.equal(service.calls, 1);
+        assert.equal(service.calls, 2, 'only owner and admin exact current commands reach the backend');
     }
     finally { await service.service.stop(); }
 });

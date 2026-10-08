@@ -20,6 +20,7 @@ const onebotPolicy = '/opt/qqbot-defaults/qqbot-onebot.mjs';
 const onebotScopePolicy = '/opt/qqbot-defaults/qqbot-onebot-scope.mjs';
 const onebotDirectPolicy = '/opt/qqbot-defaults/qqbot-onebot-direct.mjs';
 const onebotLogPolicy = '/opt/qqbot-defaults/qqbot-onebot-log.mjs';
+const mentionTextPolicy = '/opt/qqbot-defaults/qqbot-mention-text.mjs';
 const imageToolPolicyImport = `import { loadChatImageBytes } from '${policy}';`;
 const imageLoaderV3Marker = '// Chat-only scoped image loader v3.';
 const imageSchemaV3Marker = '// Chat-only image schema: scoped QQ media paths or public HTTPS image URLs v3.';
@@ -546,6 +547,26 @@ await patch('gateway/middleware-setup.js', '// Chat-only deferred image prompts 
     return content;
 });
 
+await patch('gateway/middleware-setup.js', '// Chat-only current-event self mention text normalization v1.', (content, file) => {
+    const importLine = `import { normalizeOwnMentionText } from '${mentionTextPolicy}';`;
+    if (content.includes(importLine)) throw new Error(`Chat-only patch: self mention normalization import exists without its marker in ${file}`);
+    const sanitizer = [
+        '    bot.use(contentSanitizer({',
+        '        parseFaceTags: true,',
+        '    }));',
+    ].join('\n');
+    const normalizedSanitizer = [
+        '    // Chat-only current-event self mention text normalization v1.',
+        '    bot.use(contentSanitizer({',
+        '        stripBotMention: false,',
+        '        parseFaceTags: true,',
+        '        transform: (content, ctx) => normalizeOwnMentionText(content, ctx.message, config.appId).trim(),',
+        '    }));',
+    ].join('\n');
+    content = `${importLine}\n${content}`;
+    return replaceOne(content, sanitizer, normalizedSanitizer, file);
+});
+
 const middlewareSetupPath = join(root, 'gateway/middleware-setup.js');
 let patchedMiddlewareSetup = updates.get(middlewareSetupPath) ?? await readFile(middlewareSetupPath, 'utf8');
 const historySnapshotMarker = '// Chat-only history snapshot epoch guard v1.';
@@ -588,6 +609,20 @@ const mentionPosition = patchedMiddlewareSetup.indexOf('    bot.use(mentionGate(
 const logCapturePosition = patchedMiddlewareSetup.indexOf('// Chat-only OneBot log capture after access policy v1.');
 const logCaptureCall = 'bot.use(createOnebotLogCaptureMiddleware(onebotService));';
 const sanitizerPosition = patchedMiddlewareSetup.indexOf('    bot.use(contentSanitizer({');
+const ownMentionMarker = '// Chat-only current-event self mention text normalization v1.';
+const ownMentionImport = `import { normalizeOwnMentionText } from '${mentionTextPolicy}';`;
+const ownMentionTransform = 'transform: (content, ctx) => normalizeOwnMentionText(content, ctx.message, config.appId).trim(),';
+const ownMentionStripSetting = 'stripBotMention: false,';
+const canonicalSelfMentionSanitizer = [
+    `    ${ownMentionMarker}`,
+    '    bot.use(contentSanitizer({',
+    '        stripBotMention: false,',
+    '        parseFaceTags: true,',
+    `        ${ownMentionTransform}`,
+    '    }));',
+].join('\n');
+const ownMentionPosition = patchedMiddlewareSetup.indexOf(ownMentionMarker);
+const ownMentionTransformPosition = patchedMiddlewareSetup.indexOf(ownMentionTransform);
 const attachmentPosition = patchedMiddlewareSetup.indexOf('    bot.use(attachmentProcessor(config, logger));');
 const capturePosition = patchedMiddlewareSetup.indexOf('bot.use(createPendingImageCaptureMiddleware({ appId: config.appId }));');
 const promptCleanupPosition = patchedMiddlewareSetup.indexOf('bot.use(createPendingImageNewCommandCleanup({ appId: config.appId }));');
@@ -608,6 +643,13 @@ if (patchedMiddlewareSetup.split(historySnapshotMarker).length !== 2
     || patchedMiddlewareSetup.includes('createDiceAwareHistoryBuffer')
     || patchedMiddlewareSetup.includes('createGroupHistoryBuffer')
     || !patchedMiddlewareSetup.includes('bot.use(createHistorySnapshotBuffer(historyBuffer, {')
+    || patchedMiddlewareSetup.split(ownMentionMarker).length !== 2
+    || patchedMiddlewareSetup.split(ownMentionImport).length !== 2
+    || patchedMiddlewareSetup.split(ownMentionTransform).length !== 2
+    || patchedMiddlewareSetup.split(ownMentionStripSetting).length !== 2
+    || patchedMiddlewareSetup.split(canonicalSelfMentionSanitizer).length !== 2
+    || ownMentionPosition <= mentionPosition || ownMentionPosition >= sanitizerPosition
+    || ownMentionTransformPosition <= sanitizerPosition || ownMentionTransformPosition >= rateLimitPosition
     || accessPosition < 0 || mentionPosition <= accessPosition || sanitizerPosition <= mentionPosition
     || rateLimitPosition <= sanitizerPosition
     || slashPosition <= rateLimitPosition || attachmentPosition <= slashPosition) {

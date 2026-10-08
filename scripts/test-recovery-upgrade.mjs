@@ -73,6 +73,10 @@ async function assertCurrentPatch(root) {
             "if (ctx.message.content?.trim() === '/new') await directRouter?.cancelConversation(ctx);",
             '// Chat-only OneBot direct router middleware v1.',
             'if (directRouter) bot.use(directRouter.middleware);',
+            '// Chat-only current-event self mention text normalization v1.',
+            "import { normalizeOwnMentionText } from '/opt/qqbot-defaults/qqbot-mention-text.mjs';",
+            'stripBotMention: false,',
+            'transform: (content, ctx) => normalizeOwnMentionText(content, ctx.message, config.appId).trim(),',
             "import { createMergeConcurrencyGuard, sendMergeQueueFullNotice, sendMergeThinkingNotice } from '/opt/qqbot-defaults/qqbot-concurrency.mjs';",
             "import { createHistorySnapshotBuffer } from '/opt/qqbot-defaults/qqbot-history-snapshot.mjs';",
             '// Chat-only history snapshot epoch guard v1.',
@@ -194,10 +198,11 @@ async function assertCurrentPatch(root) {
     }
 }
 
-for (const version of ['pre-thinking', 'pre-concurrency', 'pre-recovery', 'recovery-v1', 'onebot-v10.2', 'onebot-v11.2']) {
+for (const version of ['v0.12.4', 'pre-thinking', 'pre-concurrency', 'pre-recovery', 'recovery-v1', 'onebot-v10.2', 'onebot-v11.2']) {
     integration(`${version} adapter upgrades completely and a second patch pass changes no file hashes`, async (t) => {
         const root = await isolatedAdapter(t);
-        if (version === 'pre-thinking') await run(concurrencyFixture, [root, 'thinking-only']);
+        if (version === 'v0.12.4') await run(concurrencyFixture, [root, 'mention-only']);
+        else if (version === 'pre-thinking') await run(concurrencyFixture, [root, 'thinking-only']);
         else if (version === 'pre-concurrency') await run(concurrencyFixture, [root]);
         else if (version === 'onebot-v10.2') await run(concurrencyFixture, [root, 'direct-only']);
         else if (version === 'onebot-v11.2') {
@@ -218,6 +223,23 @@ for (const version of ['pre-thinking', 'pre-concurrency', 'pre-recovery', 'recov
         assert.deepEqual(await hashes(root), upgraded, 'the full dist is byte-for-byte unchanged on repeat startup');
     });
 }
+
+integration('a partial current-event mention sanitizer fails before writing any adapter file', async (t) => {
+    const root = await isolatedAdapter(t);
+    await run(enforcer, [root]);
+    const middlewarePath = join(root, 'gateway/middleware-setup.js');
+    const middleware = await readFile(middlewarePath, 'utf8');
+    const setting = '        stripBotMention: false,';
+    assert.equal(middleware.split(setting).length, 2, 'the canonical sanitizer disables SDK pre-stripping exactly once');
+    await writeFile(middlewarePath, middleware.replace(setting, '        stripBotMention: true,'));
+    const before = await hashes(root);
+    await assert.rejects(run(enforcer, [root]), (error) => {
+        assert.notEqual(error.code, 0);
+        assert.match(error.stderr, /native history snapshot wrapper is incomplete or outside the guarded chain/u);
+        return true;
+    });
+    assert.deepEqual(await hashes(root), before, 'strict mention migration rejection performs zero adapter writes');
+});
 
 integration('a partial released direct-router delivery upgrade fails before any adapter write', async (t) => {
     const root = await isolatedAdapter(t);

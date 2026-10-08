@@ -22,6 +22,12 @@ onebot_direct_test="${repo_root}/scripts/test-onebot-direct.mjs"
 sealdice_policy_test="${repo_root}/scripts/test-sealdice-policy.mjs"
 sealdice_policy_fixture="${repo_root}/third_party/sealdice-core/dice/testdata/onebot-bridge-policy.json"
 onebot_direct_native_test="${repo_root}/scripts/test-onebot-direct-native.mjs"
+mention_text_test="${repo_root}/scripts/test-qqbot-mention-text.mjs"
+mention_text_module="${repo_root}/defaults/qqbot-mention-text.mjs"
+pending_images_module="${repo_root}/defaults/qqbot-pending-images.mjs"
+sealdice_policy_module="${repo_root}/defaults/qqbot-sealdice-policy.mjs"
+onebot_scope_module="${repo_root}/defaults/qqbot-onebot-scope.mjs"
+enforcer_script="${repo_root}/scripts/enforce-chat-only.mjs"
 recovery_upgrade_test="${repo_root}/scripts/test-recovery-upgrade.mjs"
 pre_recovery_fixture="${repo_root}/scripts/prepare-pre-recovery-fixture.mjs"
 pre_concurrency_fixture="${repo_root}/scripts/prepare-pre-concurrency-fixture.mjs"
@@ -178,6 +184,12 @@ fi
 
 if [[ ! -r "$onebot_direct_native_test" ]]; then
     echo "missing native OneBot direct router regression script: $onebot_direct_native_test" >&2
+    exit 66
+fi
+
+if [[ ! -r "$mention_text_test" || ! -r "$mention_text_module" || ! -r "$pending_images_module" \
+    || ! -r "$sealdice_policy_module" || ! -r "$onebot_scope_module" || ! -r "$enforcer_script" ]]; then
+    echo "missing current-event mention normalization regression inputs" >&2
     exit 66
 fi
 
@@ -532,6 +544,12 @@ docker create \
     --mount "type=bind,src=${sealdice_policy_test},dst=/tmp/test-sealdice-policy.mjs,readonly" \
     --mount "type=bind,src=${sealdice_policy_fixture},dst=/tmp/onebot-bridge-policy.json,readonly" \
     --mount "type=bind,src=${onebot_direct_native_test},dst=/tmp/test-onebot-direct-native.mjs,readonly" \
+    --mount "type=bind,src=${mention_text_test},dst=/tmp/test-qqbot-mention-text.mjs,readonly" \
+    --mount "type=bind,src=${mention_text_module},dst=/opt/qqbot-defaults/qqbot-mention-text.mjs,readonly" \
+    --mount "type=bind,src=${pending_images_module},dst=/opt/qqbot-defaults/qqbot-pending-images.mjs,readonly" \
+    --mount "type=bind,src=${sealdice_policy_module},dst=/opt/qqbot-defaults/qqbot-sealdice-policy.mjs,readonly" \
+    --mount "type=bind,src=${onebot_scope_module},dst=/opt/qqbot-defaults/qqbot-onebot-scope.mjs,readonly" \
+    --mount "type=bind,src=${enforcer_script},dst=/usr/local/lib/enforce-chat-only.mjs,readonly" \
     --mount "type=bind,src=${recovery_upgrade_test},dst=/tmp/test-recovery-upgrade.mjs,readonly" \
     --mount "type=bind,src=${pre_recovery_fixture},dst=/tmp/prepare-pre-recovery-fixture.mjs,readonly" \
     --mount "type=bind,src=${pre_concurrency_fixture},dst=/tmp/prepare-pre-concurrency-fixture.mjs,readonly" \
@@ -586,6 +604,10 @@ docker create \
         node --check /opt/qqbot-defaults/qqbot-generation-sender.mjs
         node --check /opt/qqbot-defaults/qqbot-generation-scope.mjs
         node --check /opt/qqbot-defaults/qqbot-generation-quotas.mjs
+        node --check /opt/qqbot-defaults/qqbot-mention-text.mjs
+        node --check /opt/qqbot-defaults/qqbot-pending-images.mjs
+        node --check /opt/qqbot-defaults/qqbot-sealdice-policy.mjs
+        node --check /opt/qqbot-defaults/qqbot-onebot-scope.mjs
         node --check /opt/qqbot-defaults/qqbot-onebot-log.mjs
         node --check /opt/qqbot-defaults/qqbot-log-text.mjs
         node --check /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/transport/inbound.js
@@ -612,6 +634,7 @@ docker create \
         test "$(grep -A6 -F -- "- id: im-qqbot" "$dump" | grep -Fc "appId: __FROM_ENV__")" -eq 1
         test "$(grep -A6 -F -- "- id: im-qqbot" "$dump" | grep -Fc "appSecret: __FROM_ENV__")" -eq 1
         node --test /tmp/test-chat-policy.mjs
+        node --test /tmp/test-qqbot-mention-text.mjs
         QQBOT_LLM_MODULE=/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm/lib/index.js QQBOT_RUNTIME_ROOT=/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-model-context.mjs
         QQBOT_HISTORY_SNAPSHOT_MODULE=/opt/qqbot-defaults/qqbot-history-snapshot.mjs node --test /tmp/test-group-history.mjs
         QQBOT_PENDING_IMAGES_MODULE=/opt/qqbot-defaults/qqbot-pending-images.mjs QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs node --test /tmp/test-pending-images.mjs

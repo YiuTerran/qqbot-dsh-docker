@@ -216,7 +216,8 @@ test('native QQ middleware preserves a current .log capability in the no-quote/n
         const request = onebotRequestMetadata(scope)[0];
         assert.equal(request.currentLogCommand, '.log on');
         assert.deepEqual(request.currentLogSourceStatus,
-            { status: 'ready', reason: 'ready', credentialPresent: true });
+            { status: 'ready', reason: 'ready', credentialPresent: true,
+                rawEventBound: true, selfMentionCount: 0, hasUnresolvedMarkdownMention: false });
         const diagnostics = renderCurrentLogSourceDiagnostics(captured, { appId, toolAvailable: false });
         assert.match(diagnostics, /"status":"ready"/u);
         assert.match(diagnostics, /"onebotToolAvailable":false/u);
@@ -245,7 +246,8 @@ test('pinned SDK dispatchEvent and QQBot inbound handler preserve current .log d
         timestamp: new Date().toISOString(),
         group_openid: 'direct-group',
         author: { member_openid: 'member-direct', username: 'SDK fixture', bot: false, member_role: 'owner' },
-        content: `<@!${appId}>.log on`,
+        content: '[@蓝色大肥鱼](mqqapi://markdown/mention?at_type=1&at_tinyid=4011912066) .log on',
+        mentions: [{ member_openid: '4011912066', id: '4011912066', user_openid: '4011912066', is_you: true }],
         attachments: [],
     };
     const dispatch = dispatchEvent('GROUP_AT_MESSAGE_CREATE', rawEvent, appId, testLogger);
@@ -256,13 +258,15 @@ test('pinned SDK dispatchEvent and QQBot inbound handler preserve current .log d
     assert.deepEqual(captured[0].replyTarget, { scope: 'group', targetId: 'direct-group', msgId: 'sdk-dispatch-log' });
     assert.equal(captured[0].hasQuote, false);
     assert.equal(captured[0].hasAttachments, false);
+    assert.equal(captured[0].text, '.log on', 'the SDK sanitizer and raw capture share the validated current self-mention rule');
     const agent = {};
     const scope = beginOnebotTurn(agent, captured, { appId });
     try {
         const request = onebotRequestMetadata(scope)[0];
         assert.equal(request.currentLogCommand, '.log on');
         assert.deepEqual(request.currentLogSourceStatus,
-            { status: 'ready', reason: 'ready', credentialPresent: true });
+            { status: 'ready', reason: 'ready', credentialPresent: true,
+                rawEventBound: true, selfMentionCount: 1, hasUnresolvedMarkdownMention: false });
         const diagnostic = renderCurrentLogSourceDiagnostics(captured, { appId, toolAvailable: false });
         assert.match(diagnostic, /"directRouteReason":"direct_disabled"/u);
         assert.match(diagnostic, /"onebotToolAvailable":false/u);
@@ -272,6 +276,50 @@ test('pinned SDK dispatchEvent and QQBot inbound handler preserve current .log d
     assert.match(safeRoute, /"reason":"direct_disabled"/u);
     assert.equal(authLogs.some((entry) => entry.includes('sdk-dispatch-log') || entry.includes('member-direct')
         || entry.includes('fixture-only-secret')), false);
+});
+
+test('pinned SDK dispatcher and QQBot handler route current self-mentioned .r2d7 and .log on without model fallback', async (t) => {
+    const calls = [];
+    const sent = [];
+    const testLogger = { info() {}, warn() {}, debug() {}, error() {} };
+    const sender = {
+        async sendMarkdown(target, text) { sent.push({ target, text }); },
+        async sendText(target, text) { sent.push({ target, text }); },
+    };
+    const service = makeService(async (args) => {
+        calls.push(args);
+        return { status: 'ok', outputs: [args.command === '.log on' ? 'recording enabled' : '2d7 = 9'] };
+    });
+    const bot = new QQBot({ appId, appSecret: 'fixture-only-secret', logger: testLogger });
+    const directRouter = createOnebotDirectRouter({ service, appId, sender, logger: testLogger });
+    t.after(() => directRouter.stop());
+    const manager = { questionChannel: { tryAnswer() { return false; } }, async remove() {} };
+    setupMiddlewares(bot, gatewayConfig({ groupAllow: ['direct-group'] }), manager, testLogger, sender, directRouter, service);
+    let modelMessages = 0;
+    bot.on('message', async () => { modelMessages++; });
+
+    for (const [id, command, expected] of [
+        ['sdk-dispatch-self-r2d7', '.r2d7', '.r 2d7'],
+        ['sdk-dispatch-self-log', '.log on', '.log on'],
+    ]) {
+        const content = `[@蓝色大肥鱼](mqqapi://markdown/mention?at_type=1&at_tinyid=4011912066)${command.startsWith('.log') ? ' ' : ''}${command}`;
+        const rawEvent = {
+            id,
+            timestamp: new Date().toISOString(),
+            group_openid: 'direct-group',
+            author: { member_openid: 'member-direct', username: 'SDK fixture', bot: false, member_role: 'owner' },
+            content,
+            mentions: [{ member_openid: '4011912066', id: '4011912066', user_openid: '4011912066', is_you: true }],
+            attachments: [],
+        };
+        const dispatch = dispatchEvent('GROUP_AT_MESSAGE_CREATE', rawEvent, appId, testLogger);
+        assert.equal(dispatch.action, 'message');
+        assert.equal(dispatch.msg.raw, rawEvent);
+        await bot.handleInboundMessage(dispatch.msg);
+    }
+    assert.deepEqual(calls.map(({ command }) => command), ['.r 2d7', '.log on']);
+    assert.equal(modelMessages, 0, 'the SDK middleware stops both direct commands before model dispatch');
+    assert.deepEqual(sent.map(({ text }) => text), ['2d7 = 9', 'recording enabled']);
 });
 
 test('native unavailable-backend fallback still renders diagnostics without an available tool', async (t) => {
@@ -384,7 +432,13 @@ test('the real SDK chain routes .r2d7 directly while same-group model work is bl
 
     let directModelCalls = 0;
     await runChain(layers, makeContext({
-        group: 'busy-group', senderId: 'busy-member', messageId: 'direct-r2d7', content: '.r2d7',
+        group: 'busy-group', senderId: 'busy-member', messageId: 'direct-r2d7',
+        content: '[@蓝色大肥鱼](mqqapi://markdown/mention?at_type=1&at_tinyid=4011912066).r2d7',
+        rawEventType: 'GROUP_AT_MESSAGE_CREATE',
+        raw: { id: 'direct-r2d7', group_openid: 'busy-group',
+            author: { member_openid: 'busy-member', member_role: 'owner' },
+            content: '[@蓝色大肥鱼](mqqapi://markdown/mention?at_type=1&at_tinyid=4011912066).r2d7',
+            mentions: [{ member_openid: '4011912066', id: '4011912066', user_openid: '4011912066', is_you: true }] },
     }, sent), async () => { directModelCalls++; });
     assert.equal(calls.length, 1, 'the current .r2d7 message makes exactly one OneBot service call');
     assert.equal(calls[0].args.backend, 'sealdice');
@@ -397,6 +451,19 @@ test('the real SDK chain routes .r2d7 directly while same-group model work is bl
         text: '2d7 = 9',
     }, 'the OneBot result replies to the current SDK message while earlier same-group model work is blocked');
     assert.equal(modelCalls, 1, 'the blocked ordinary message remains the only model turn so far');
+
+    await runChain(layers, makeContext({
+        group: 'busy-group', senderId: 'busy-member', messageId: 'direct-log-on',
+        content: '[@蓝色大肥鱼](mqqapi://markdown/mention?at_type=1&at_tinyid=4011912066) .log on',
+        rawEventType: 'GROUP_AT_MESSAGE_CREATE',
+        raw: { id: 'direct-log-on', group_openid: 'busy-group',
+            author: { member_openid: 'busy-member', member_role: 'owner' },
+            content: '[@蓝色大肥鱼](mqqapi://markdown/mention?at_type=1&at_tinyid=4011912066) .log on',
+            mentions: [{ member_openid: '4011912066', id: '4011912066', user_openid: '4011912066', is_you: true }] },
+    }, sent), async () => { directModelCalls++; });
+    assert.equal(calls.length, 2, 'the current .log on message also makes exactly one service call');
+    assert.equal(calls[1].args.command, '.log on');
+    assert.equal(directModelCalls, 0, 'both current self-mention commands stay out of the downstream model');
 
     releaseModel.resolve();
     await blockedChat;

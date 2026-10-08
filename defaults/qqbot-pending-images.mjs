@@ -1,3 +1,5 @@
+import { normalizeOwnMentionText } from './qqbot-mention-text.mjs';
+
 const DEFAULT_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_MAX_IMAGES = 8;
 const DEFAULT_MAX_GROUPS = 200;
@@ -62,13 +64,14 @@ function imageAttachment(value) {
 
 function selfMentionPattern(appId) {
     const escaped = appId.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
-    return new RegExp(`<@!?${escaped}>|<qqbot-at-user\\s+id=["']${escaped}["']\\s*\\/>`, 'gu');
+    return new RegExp(`<qqbot-at-user\\s+id=["']${escaped}["']\\s*\\/>`, 'gu');
 }
 
 function visibleText(message, appId) {
     const content = typeof message?.content === 'string' ? message.content : '';
-    if (typeof appId !== 'string' || !APP_ID.test(appId)) return content.trim();
-    return content.replace(selfMentionPattern(appId), '').trim();
+    const normalized = normalizeOwnMentionText(content, message, appId);
+    if (typeof appId !== 'string' || !APP_ID.test(appId)) return normalized.trim();
+    return normalized.replace(selfMentionPattern(appId), '').trim();
 }
 
 function identityFor(message, appId) {

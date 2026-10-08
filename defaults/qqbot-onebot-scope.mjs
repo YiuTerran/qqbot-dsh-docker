@@ -197,8 +197,6 @@ function isCurrentLogCandidateText(text) {
 
 function currentLogStatus(source, appId, ownerId, target, currentLogSource) {
     const captured = readCurrentLogCaptureDiagnostic(source?.currentLogCaptureDiagnostic);
-    if (currentLogSource) return Object.freeze({ status: 'ready', reason: 'ready', credentialPresent: true });
-    if (!captured && !isCurrentLogCandidateText(source?.text)) return undefined;
     const bound = captured && isCurrentLogCaptureDiagnosticBound(source.currentLogCaptureDiagnostic, {
         appId,
         ownerId,
@@ -207,9 +205,19 @@ function currentLogStatus(source, appId, ownerId, target, currentLogSource) {
         targetId: target.targetId,
         targetScope: target.scope,
     });
+    const mentionEvidence = bound ? Object.freeze({
+        rawEventBound: captured.rawEventBound === true,
+        selfMentionCount: Number.isSafeInteger(captured.selfMentionCount)
+            ? Math.min(64, Math.max(0, captured.selfMentionCount)) : 0,
+        hasUnresolvedMarkdownMention: captured.hasUnresolvedMarkdownMention === true,
+    }) : undefined;
+    if (currentLogSource) return Object.freeze({ status: 'ready', reason: 'ready', credentialPresent: true,
+        ...(mentionEvidence ?? {}) });
+    if (!captured && !isCurrentLogCandidateText(source?.text)) return undefined;
     if (!bound) return Object.freeze({ status: 'provenance_lost', reason: 'provenance_lost', credentialPresent: false });
     if (captured.status === 'capture_failed') {
-        return Object.freeze({ status: 'capture_failed', reason: logCaptureDiagnosticReason(captured.reason), credentialPresent: false });
+        return Object.freeze({ status: 'capture_failed', reason: logCaptureDiagnosticReason(captured.reason), credentialPresent: false,
+            ...(mentionEvidence ?? {}) });
     }
     if (currentLogSource && captured.status === 'ready' && captured.credentialPresent) {
         return Object.freeze({ status: 'ready', reason: 'ready', credentialPresent: true });
@@ -241,7 +249,11 @@ function currentLogStatusEntries(originalSnapshots, appId) {
 function writeSafeCurrentLogDiagnostic(logger, stage, status, originalCount, toolAvailable) {
     if (!status) return;
     try {
-        const record = { stage, reason: status.reason, credentialPresent: status.credentialPresent, toolAvailable };
+        const record = { stage, reason: status.reason, credentialPresent: status.credentialPresent, toolAvailable,
+            ...(status.rawEventBound === undefined ? {} : { rawEventBound: status.rawEventBound }),
+            ...(status.selfMentionCount === undefined ? {} : { selfMentionCount: status.selfMentionCount }),
+            ...(status.hasUnresolvedMarkdownMention === undefined
+                ? {} : { hasUnresolvedMarkdownMention: status.hasUnresolvedMarkdownMention }) };
         if (Number.isSafeInteger(originalCount) && originalCount >= 0) record.originalCount = originalCount;
         const line = `[qqbot-onebot-auth] ${JSON.stringify(record)}`;
         if (typeof logger?.info === 'function') logger.info(line);
@@ -257,7 +269,7 @@ export function renderCurrentLogSourceDiagnostics(originalSnapshots, { appId, lo
     const originalCount = originalSnapshots.length;
     for (const entry of entries) writeSafeCurrentLogDiagnostic(logger, 'bound', entry.currentLogSourceStatus, originalCount, toolAvailable === true);
     const withAvailability = entries.map((entry) => ({ ...entry, onebotToolAvailable: toolAvailable === true }));
-    return `[Diagnostic only: currentLogSourceStatus reports capture provenance and directRouteReason, when present, reports the fixed direct-router outcome. These values are never permission to call a tool. Report actual values without guessing; do not infer absence from historical messages. A .log call still requires a matching currentLogCommand, and a tool call is available only when onebotToolAvailable is true.]\n${JSON.stringify(withAvailability)}`;
+    return `[Diagnostic only: currentLogSourceStatus reports capture provenance and fixed current-event mention evidence; directRouteReason, when present, reports the fixed direct-router outcome. These values are never permission to call a tool. Report actual values without guessing; do not infer absence from historical messages. A .log call still requires a matching currentLogCommand, and a tool call is available only when onebotToolAvailable is true.]\n${JSON.stringify(withAvailability)}`;
 }
 
 function abortTurn(scope, reason = new Error('QQ OneBot command turn ended.')) {

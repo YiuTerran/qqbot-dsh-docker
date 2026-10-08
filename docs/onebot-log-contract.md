@@ -81,7 +81,7 @@ Capture defaults on when OneBot is enabled; `QQBOT_ONEBOT_LOG_ENABLED=false`
 disables it (qq-bot). Persistent recording still requires `.log new/on`. Native `.log`
 supports `new/on/off/halt/end/list/stat/get/export/del` in the current group only.
 State mutations require the current owner/admin role, never Master privilege;
-every log command must match the identity-bound current QQ event text after removing only this bot mention. QQ users send `@bot .log …` through qq-bot; quotes, history and attachments cannot supply a missing command, while accompanying quote or attachment context does not invalidate a full current command. `get/export/end` default to
+every log command must match the identity-bound current QQ event text after removing native bot mentions or a canonical Markdown mention whose target is marked `is_you` in that same raw event. Nicknames, quoted content and history do not establish a self mention. QQ users send `@bot .log …` through qq-bot; quotes, history and attachments cannot supply a missing command, while accompanying quote or attachment context does not invalidate a full current command. `get/export/end` default to
 colored Markdown, `get/export --format=txt` optionally produce raw TXT.
 No email, external upload, cross-group target or hidden output is supported.
 These defaults do not modify ordinary OneBot mode or existing identity/card data.

@@ -93,6 +93,16 @@ test('current log inspection reports each fixed capture predicate without exposi
     compactMention.content = compactMention.raw.content;
     const compactCapture = captureCurrentLogSourceSnapshot(compactMention, target, appId);
     assert.equal(compactCapture.source.command, '.log on', 'pre-sanitizer mention removal remains compatible without whitespace');
+    const markdownSelfMention = makeMessage();
+    markdownSelfMention.raw.content = '[@蓝色大肥鱼](mqqapi://markdown/mention?at_type=1&at_tinyid=4011912066).log on';
+    markdownSelfMention.raw.mentions = [{ member_openid: '4011912066', id: '4011912066',
+        user_openid: '4011912066', is_you: true }];
+    markdownSelfMention.content = markdownSelfMention.raw.content;
+    const markdownCapture = captureCurrentLogSourceSnapshot(markdownSelfMention, target, appId);
+    assert.equal(markdownCapture.source.command, '.log on');
+    assert.equal(markdownCapture.diagnostic.rawEventBound, true);
+    assert.equal(markdownCapture.diagnostic.selfMentionCount, 1);
+    assert.equal(markdownCapture.diagnostic.hasUnresolvedMarkdownMention, false);
     for (const content of ['@nickname .log on', '请帮我 .log on', `<@!999> .log on`]) {
         const candidate = makeMessage();
         candidate.raw.content = content;
@@ -127,7 +137,8 @@ test('current log diagnostics are branded, identity bound, safe to log, and neve
         assert.equal(logs.join('\n').includes(forbidden), false, forbidden);
     }
     assert.deepEqual(JSON.parse(logs[0].slice('[qqbot-onebot-auth] '.length)), {
-        stage: 'bound', reason: 'not_exact_log_command', credentialPresent: false, toolAvailable: false, originalCount: 1,
+        stage: 'bound', reason: 'not_exact_log_command', credentialPresent: false, toolAvailable: false,
+        rawEventBound: true, selfMentionCount: 0, hasUnresolvedMarkdownMention: false, originalCount: 1,
     });
 
     const forged = { ...original, currentLogCaptureDiagnostic: { candidate: true, status: 'ready',
@@ -152,6 +163,19 @@ test('current log diagnostics are branded, identity bound, safe to log, and neve
     assert.match(readyMetadata, /"status":"ready"/u);
     assert.match(readyMetadata, /"credentialPresent":true/u);
     assert.match(readyMetadata, /"onebotToolAvailable":false/u);
+
+    const otherMessage = { ...message, messageId: 'other-msg', content: '[@蓝色大肥鱼](mqqapi://markdown/mention?at_type=1&at_tinyid=4011912066) .log on',
+        raw: { ...message.raw, id: 'other-msg', content: '[@蓝色大肥鱼](mqqapi://markdown/mention?at_type=1&at_tinyid=4011912066) .log on',
+            mentions: [{ member_openid: '4011912066', is_you: true }] } };
+    const otherTarget = { ...target, msgId: 'other-msg' };
+    const other = captureCurrentLogSourceSnapshot(otherMessage, otherTarget, appId);
+    assert.equal(other.diagnostic.selfMentionCount, 1);
+    const copiedDiagnostic = { ownerId: 'member-openid', replyTarget: target, text: '.log on',
+        currentLogSource: ready.source, currentLogCaptureDiagnostic: other.diagnostic };
+    const copied = renderCurrentLogSourceDiagnostics([copiedDiagnostic], { appId, toolAvailable: false });
+    assert.match(copied, /"status":"ready"/u, 'the current capability remains independent of copied diagnostics');
+    assert.doesNotMatch(copied, /"selfMentionCount"/u, 'mention evidence must stay bound to the diagnostic original');
+    assert.doesNotMatch(copied, /"rawEventBound"/u, 'unbound raw-event evidence must not be mixed into a ready capability');
 });
 
 test('group role capture requires an exact SDK role bound to this sender and group', () => {

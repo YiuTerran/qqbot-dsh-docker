@@ -7,6 +7,7 @@ const helper = '/opt/qqbot-defaults/qqbot-concurrency.mjs';
 const thinkingOnly = process.argv[3] === 'thinking-only';
 const directOnly = process.argv[3] === 'direct-only';
 const logOnly = process.argv[3] === 'log-only';
+const mentionOnly = process.argv[3] === 'mention-only';
 
 function replaceOnce(source, before, after, label) {
     const parts = source.split(before);
@@ -17,6 +18,37 @@ function replaceOnce(source, before, after, label) {
 async function edit(file, operation) {
     const path = join(root, file);
     await writeFile(path, operation(await readFile(path, 'utf8')));
+}
+
+await edit('gateway/middleware-setup.js', (source) => {
+    const marker = '    // Chat-only current-event self mention text normalization v1.\n';
+    const importLine = "import { normalizeOwnMentionText } from '/opt/qqbot-defaults/qqbot-mention-text.mjs';\n";
+    const transform = '        transform: (content, ctx) => normalizeOwnMentionText(content, ctx.message, config.appId).trim(),\n';
+    const stripSetting = '        stripBotMention: false,\n';
+    if (!source.includes(marker)) {
+        if (source.includes(importLine) || source.includes(transform) || source.includes(stripSetting)) {
+            throw new Error('pre-concurrency fixture found partial self mention normalization');
+        }
+        return source;
+    }
+    source = replaceOnce(source, importLine, '', 'self mention normalization import');
+    return replaceOnce(source, [
+        marker.trimEnd(),
+        '    bot.use(contentSanitizer({',
+        '        stripBotMention: false,',
+        '        parseFaceTags: true,',
+        transform.trimEnd(),
+        '    }));',
+    ].join('\n'), [
+        '    bot.use(contentSanitizer({',
+        '        parseFaceTags: true,',
+        '    }));',
+    ].join('\n'), 'self mention normalization middleware');
+});
+
+if (mentionOnly) {
+    process.stdout.write('Prepared pre-self-mention-normalization adapter fixture.\n');
+    process.exit(0);
 }
 
 if (!logOnly) {

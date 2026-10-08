@@ -86,6 +86,26 @@ test('pure image messages are cached before mention handling and stop without do
     assert.deepEqual(cache.inspect(ctx.message, APP), { count: 1, lastImageAt: cache.inspect(ctx.message, APP).lastImageAt });
 });
 
+test('pre-sanitizer image capture uses only the current raw is_you mention proof', () => {
+    const cache = makeCache();
+    const content = '[@蓝色大肥鱼](mqqapi://markdown/mention?at_type=1&at_tinyid=4011912066)';
+    const message = groupMessage({ id: 'photo-markdown-self', content,
+        attachments: [image('https://cdn.example/photo.png')] });
+    message.raw = {
+        id: message.messageId,
+        group_openid: message.groupOpenid,
+        author: { member_openid: message.senderId },
+        mentions: [{ member_openid: '4011912066', is_you: true }],
+    };
+    assert.equal(cache.capture(message, APP), true);
+    assert.equal(cache.inspect(message, APP).count, 1);
+
+    const unproven = groupMessage({ id: 'photo-markdown-unproven', content,
+        attachments: [image('https://cdn.example/photo.png')] });
+    assert.equal(cache.capture(unproven, APP), false,
+        'an unresolved Markdown mention remains visible and cannot become a pure-image message');
+});
+
 test('only same app, peer, and sender share a snapshot; group text needs an actual bot mention', () => {
     const cache = makeCache();
     const source = groupMessage({ attachments: [image('https://cdn.example/a.png')] });
