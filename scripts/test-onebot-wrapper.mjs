@@ -1,8 +1,10 @@
 // Production qq-bot wrapper -> real MCP -> native SeaDice. QQ identities are fixtures.
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
+import { createOnebotLogCaptureMiddleware } from '/opt/qqbot-defaults/qqbot-onebot-log.mjs';
 import { registerOnebotCommandTool } from '/opt/qqbot-defaults/qqbot-onebot.mjs';
 import { createOnebotDirectRouter } from '/opt/qqbot-defaults/qqbot-onebot-direct.mjs';
-import { captureOnebotGroupRole } from '/opt/qqbot-defaults/qqbot-sealdice-policy.mjs';
+import { captureOnebotGroupRole, captureCurrentLogSource } from '/opt/qqbot-defaults/qqbot-sealdice-policy.mjs';
 import {
     beginOnebotTurn, endOnebotTurn, bindOnebotExecution, onebotRequestMetadata,
     getOnebotDirectFallback, getOnebotDirectFallbackForSnapshot,
@@ -25,16 +27,23 @@ const controller = registerOnebotCommandTool(context, {
         assert.ok(filename.endsWith('.md'));
         const body = bytes.toString('utf8');
         assert.ok(body.includes('原生桥接完整导出测试'));
+        assert.ok(body.includes('[表情: 微笑]') && body.includes('[表情]'));
+        assert.doesNotMatch(body, /faceType=|faceId=|ext=|OPAQUE_FACE_METADATA/);
+        assert.equal(body.includes('A'.repeat(128)), false, 'opaque face payload entered the native export');
         deliveredLogFiles.push({ filename, size: bytes.length });
         return { sent: true };
     },
 });
 const summary = [];
 const groupOriginal = (ownerId, group, text, role = 'member') => {
-    const message = { kind: 'group', senderId: ownerId, groupOpenid: group,
-        replyTarget: { scope: 'group', targetId: group },
-        raw: { author: { member_openid: ownerId, ...(role ? { member_role: role } : {}) }, group_openid: group } };
-    return { ownerId, text, replyTarget: message.replyTarget, groupRole: captureOnebotGroupRole(message) ?? 'unknown' };
+    const messageId = `wrapper-${randomUUID()}`;
+    const timestamp = new Date().toISOString();
+    const message = { kind: 'group', senderId: ownerId, groupOpenid: group, messageId, timestamp,
+        replyTarget: { scope: 'group', targetId: group, msgId: messageId },
+        raw: { id: messageId, timestamp, content: `<@!${appId}> ${text}`,
+            author: { member_openid: ownerId, ...(role ? { member_role: role } : {}) }, group_openid: group } };
+    return { ownerId, text, replyTarget: message.replyTarget, groupRole: captureOnebotGroupRole(message) ?? 'unknown',
+        currentLogSource: captureCurrentLogSource(message, message.replyTarget, appId), currentMessage: message };
 };
 try {
     assert.equal(await controller.ready, true, 'real backend is not ready for qq-bot wrapper');
@@ -121,34 +130,43 @@ try {
 
     const freshCommand = async (ownerId, command, { group, text = command, role = 'member' } = {}) => {
         const agent = {};
-        const scope = beginOnebotTurn(agent, [group ? groupOriginal(ownerId, group, text, role) : { ownerId, text, replyTarget: {
-            scope: group ? 'group' : 'c2c', targetId: group || ownerId,
-        } }], { appId });
+        const original = group ? groupOriginal(ownerId, group, text, role) : { ownerId, text, replyTarget: {
+            scope: 'c2c', targetId: ownerId,
+        } };
+        const scope = beginOnebotTurn(agent, [original], { appId });
         try {
-            return await descriptor.execute({ requestId: onebotRequestMetadata(scope)[0].requestId,
+            const execute = () => descriptor.execute({ requestId: onebotRequestMetadata(scope)[0].requestId,
                 backend: 'sealdice', command }, { agent });
+            if (!original.currentLogSource) return await execute();
+            let result;
+            await createOnebotLogCaptureMiddleware(controller)({ message: original.currentMessage, state: {} },
+                async () => { result = await execute(); });
+            return result;
         } finally { await endOnebotTurn(agent, scope); }
     };
     if (process.env.QQBOT_ONEBOT_LOG_ENABLED === 'true') {
         const logGroup = 'fixtureWrapperLog';
         assert.equal((await freshCommand('fixtureLogOwner', '.log new wrapper', { group: logGroup, role: 'owner' })).status, 'ok');
         const timestamp = new Date().toISOString();
+        const faceExt = Buffer.from(JSON.stringify({ text: '微笑', ignored: 'OPAQUE_FACE_METADATA' })).toString('base64');
         const captured = await controller.captureRaw({ message: {
             kind: 'group', groupOpenid: logGroup, senderId: 'fixtureLogMember',
             messageId: 'wrapper-raw-log-id', timestamp,
             content: 'SDK history must not enter exported data',
             raw: { id: 'wrapper-raw-log-id', timestamp, group_openid: logGroup,
                 author: { member_openid: 'fixtureLogMember', username: '测试玩家' },
-                content: '原生桥接完整导出测试' },
+                content: `原生桥接完整导出测试 <faceType=1,faceId="1",ext="${faceExt}"> <faceType=1,faceId="2",ext="${'A'.repeat(64 * 1024)}">` },
         } });
         assert.equal(captured, true);
         const logAgent = {};
-        const logScope = beginOnebotTurn(logAgent,
-            [groupOriginal('fixtureLogMember', logGroup, '.log export wrapper')], { appId });
+        const exportOriginal = groupOriginal('fixtureLogMember', logGroup, '.log export wrapper');
+        const logScope = beginOnebotTurn(logAgent, [exportOriginal], { appId });
         try {
             const args = { requestId: onebotRequestMetadata(logScope)[0].requestId,
                 backend: 'sealdice', command: '.log export wrapper' };
-            const first = await descriptor.execute(args, { agent: logAgent });
+            let first;
+            await createOnebotLogCaptureMiddleware(controller)({ message: exportOriginal.currentMessage, state: {} },
+                async () => { first = await descriptor.execute(args, { agent: logAgent }); });
             assert.equal(first.status, 'ok');
             assert.equal(first.artifactDelivery[0].status, 'sent');
             assert.equal(JSON.stringify(first).includes('原生桥接完整导出测试'), false);

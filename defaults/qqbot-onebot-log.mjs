@@ -1,7 +1,8 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import { inspectSeaDiceCommand } from './qqbot-sealdice-policy.mjs';
+import { captureCurrentLogSource } from './qqbot-sealdice-policy.mjs';
+import { normalizeOnebotLogText } from './qqbot-log-text.mjs';
 
 const KEY_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
 const EVENT_ID_PATTERN = /^[A-Za-z0-9_-]{16,128}$/u;
@@ -625,14 +626,8 @@ export function createOnebotLogCapture({ config, appId, options = {} } = {}) {
         const message = ctx?.message;
         const raw = message?.raw;
         const groupKey = groupKeyFromRaw(raw, appId);
-        if (!groupKey || message.kind !== 'group' || message.groupOpenid !== raw.group_openid
-            || message.messageId !== raw.id || message.senderId !== raw.author?.member_openid
-            || isOwnEcho(raw, groupKey) || typeof raw.content !== 'string'
-            || (Array.isArray(raw.attachments) && raw.attachments.length > 0)
-            || ctx.state?.quote || raw.message_reference || raw.quote) return undefined;
-        const source = raw.content.replace(new RegExp(`<@!?${appId}>\\s*`, 'gu'), '').trim();
-        const policy = inspectSeaDiceCommand(source, { direct: true });
-        if (!policy?.allowed || policy.kind !== 'log') return undefined;
+        if (!groupKey || isOwnEcho(raw, groupKey)
+            || !captureCurrentLogSource(message, message?.replyTarget ?? ctx?.replyTarget, appId)) return undefined;
         return holdControlSource(raw, groupKey);
     }
 
@@ -801,12 +796,16 @@ export function createOnebotLogCapture({ config, appId, options = {} } = {}) {
         }
         if ((raw.content !== undefined && typeof raw.content !== 'string')
             || (raw.attachments !== undefined && !Array.isArray(raw.attachments))
-            || (raw.content === undefined && (!Array.isArray(raw.attachments) || raw.attachments.length === 0))
-            || (typeof raw.content === 'string' && raw.content.length > MAX_TEXT_CHARS)) {
+            || (raw.content === undefined && (!Array.isArray(raw.attachments) || raw.attachments.length === 0))) {
             for (const backendId of (backendSetKnown ? captureBackendIds : (config.backendIds ?? []))) noteGap(backendId, groupKey, 'raw_event_invalid');
             return false;
         }
-        const parts = [typeof raw.content === 'string' ? raw.content : '', ...(raw.attachments ?? []).map(attachmentPlaceholder)];
+        const normalizedContent = normalizeOnebotLogText(raw.content ?? '');
+        if (normalizedContent === undefined) {
+            for (const backendId of (backendSetKnown ? captureBackendIds : (config.backendIds ?? []))) noteGap(backendId, groupKey, 'raw_text_invalid', rawTime);
+            return false;
+        }
+        const parts = [normalizedContent, ...(raw.attachments ?? []).map(attachmentPlaceholder)];
         const text = parts.filter(Boolean).join('\n');
         const cleanText = boundedText(text);
         if (cleanText === undefined) {
@@ -837,7 +836,8 @@ export function createOnebotLogCapture({ config, appId, options = {} } = {}) {
             return false;
         }
         if (typeof messageId === 'string') rememberOwnMessageId(groupKey, messageId);
-        const output = typeof text === 'string' ? text : mediaType === 'image' ? '[image attachment]' : '[file attachment]';
+        const output = normalizeOnebotLogText(typeof text === 'string' ? text
+            : mediaType === 'image' ? '[image attachment]' : '[file attachment]');
         if (boundedText(output) === undefined) {
             for (const backendId of (backendSetKnown ? captureBackendIds : (config.backendIds ?? []))) noteGap(backendId, groupKey, 'bot_output_too_large');
             return false;

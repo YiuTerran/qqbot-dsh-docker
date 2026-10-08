@@ -1,7 +1,8 @@
 // Run inside the built image; exercise the pinned QQ middleware and bootstrap
 // without connecting to QQ, OneBot, SeaDice, or a paid model API.
 import assert from 'node:assert/strict';
-import { mkdir, readFile, symlink } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import vm from 'node:vm';
@@ -27,8 +28,9 @@ const defaultsRoot = process.env.QQBOT_NATIVE_DEFAULTS_ROOT ?? '/opt/qqbot-defau
 const { setupMiddlewares } = await import(pathToFileURL(join(adapterRoot, 'gateway/middleware-setup.js')).href);
 const { createOnebotDirectRouter } = await import(pathToFileURL(directModulePath).href);
 const { attachOnebotDeliveryObserver } = await import(new URL('./qqbot-onebot-log.mjs', pathToFileURL(directModulePath)).href);
+const { registerOnebotCommandTool } = await import(new URL('./qqbot-onebot.mjs', pathToFileURL(directModulePath)).href);
 const { getMergedGenerationRequests } = await import(new URL('./qqbot-concurrency.mjs', pathToFileURL(directModulePath)).href);
-const { getBoundOnebotExecution, getBoundOnebotRequest, getOnebotDirectFallback, renderOnebotDirectFallbackMetadata } = await import(new URL('./qqbot-onebot-scope.mjs', pathToFileURL(directModulePath)).href);
+const { beginOnebotTurn, endOnebotTurn, onebotRequestMetadata, bindOnebotExecution, getBoundOnebotExecution, getBoundOnebotRequest, getOnebotDirectFallback, renderOnebotDirectFallbackMetadata } = await import(new URL('./qqbot-onebot-scope.mjs', pathToFileURL(directModulePath)).href);
 
 function deferred() {
     let resolvePromise;
@@ -68,18 +70,18 @@ function makeService(execute) {
     };
 }
 
-function assembleProductionChain({ service, groupAllow, requireMention = false, sender, manager } = {}) {
+function assembleProductionChain({ service, groupAllow, requireMention = false, sender, manager, env = {} } = {}) {
     const directRouter = createOnebotDirectRouter({
         service,
         appId,
         sender,
-        env: {},
+        env,
         logger,
     });
     const layers = [];
     const actualManager = manager ?? { questionChannel: { tryAnswer() { return false; } }, async remove() {} };
     setupMiddlewares({ use(middleware) { layers.push(middleware); } },
-        gatewayConfig({ groupAllow, requireMention }), actualManager, logger, sender, directRouter);
+        gatewayConfig({ groupAllow, requireMention }), actualManager, logger, sender, directRouter, service);
     return { directRouter, layers, manager: actualManager };
 }
 
@@ -410,6 +412,92 @@ test('mention gating precedes direct routing and sanitized /new cancels the acti
         'the real /new slash handler removes the current group session after cancellation');
     assert.ok(newReply.some(({ source, text }) => source === 'bot' && text === '已开启新会话 ✓'),
         'the native SDK sends the /new handler result through bot.sendText');
+});
+
+test('native @bot log commands use the current SDK sender through direct and model routes', async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), 'qqbot-native-log-'));
+    const calls = [];
+    const sent = [];
+    const json = (value) => new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json' } });
+    const service = registerOnebotCommandTool({ get() { return { register() {} }; } }, {
+        appId,
+        config: {
+            enabled: true, logEnabled: true, hiddenEnabled: false, backendIds: ['sealdice'], masterUsers: [],
+            url: new URL('http://native-log.test/mcp'), mcpToken: 'test-mcp', internalToken: 'test-internal',
+        },
+        fetchImpl: async () => json({ backends: [{ id: 'sealdice', ready: true, version: 1,
+            capabilities: ['log-capture-v1', 'group-role-v1'] }] }),
+        logCaptureOptions: { filePath: join(directory, 'queue.json'), fetchImpl: async () => json({ accepted: true }) },
+        session: {
+            async listTools() { return [{ name: 'call_ws' }]; },
+            async callWs(args, signal, beforeDispatch) {
+                assert.equal(signal.aborted, false);
+                assert.equal(await beforeDispatch(), true);
+                calls.push(args);
+                return { content: [{ type: 'text', text: JSON.stringify({
+                    request_id: args.request_id, backend_id: args.backend_id, audience: 'group', status: 'ok',
+                    outputs: [{ action: 'send_group_msg', audience: 'group', target_id: 8_000_000_000_000_017,
+                        message: 'recording enabled' }],
+                }) }] };
+            },
+        },
+        refreshIntervalMs: 60_000,
+    });
+    const routers = [];
+    t.after(async () => {
+        for (const router of routers) await router.stop();
+        await service.stop();
+        await rm(directory, { recursive: true, force: true });
+    });
+    await service.ready;
+    const sender = { async sendMarkdown(target, text) { sent.push({ target, text }); } };
+    for (const [index, mode] of [
+        { direct: true, quoted: false, role: 'owner', text: '.log on', mentioned: true, allowed: true },
+        { direct: false, quoted: true, role: 'owner', text: '.log on', mentioned: true, allowed: true },
+        { direct: false, quoted: true, role: 'member', text: '.log on', mentioned: true, allowed: false },
+        { direct: false, quoted: true, role: 'owner', text: '解释这条引用', mentioned: true, allowed: false },
+        { direct: true, quoted: false, role: 'owner', text: '.log on', mentioned: false, allowed: false },
+    ].entries()) {
+        const chain = assembleProductionChain({ service, sender, requireMention: true,
+            env: { QQBOT_ONEBOT_DIRECT_ENABLED: String(mode.direct) } });
+        routers.push(chain.directRouter);
+        const messageId = `native-log-${index}`;
+        const wireText = `${mode.mentioned ? `<@!${appId}> ` : ''}${mode.text}`;
+        const ctx = makeContext({ messageId, content: wireText,
+            rawEventType: mode.mentioned ? 'GROUP_AT_MESSAGE_CREATE' : 'GROUP_MESSAGE_CREATE',
+            state: mode.quoted ? { quote: { text: '.log on', attachments: [] } } : {},
+        });
+        ctx.message.raw = {
+            id: messageId, timestamp: ctx.message.timestamp, content: wireText, group_openid: 'direct-group',
+            author: { member_openid: 'member-direct', member_role: mode.role },
+            ...(mode.quoted ? { message_reference: { message_id: 'quoted-log-message' } } : {}),
+        };
+        let modelCalls = 0;
+        let toolResult;
+        const before = calls.length;
+        await runChain(chain.layers, ctx, async () => {
+            modelCalls++;
+            const agent = {};
+            const scope = beginOnebotTurn(agent, getMergedGenerationRequests(ctx), { appId });
+            try {
+                const exec = { agent, signal: ctx.signal };
+                bindOnebotExecution(exec);
+                toolResult = await service.execute({ requestId: onebotRequestMetadata(scope)[0].requestId,
+                    backend: 'sealdice', command: '.log on' }, exec);
+            }
+            finally { await endOnebotTurn(agent, scope); }
+        });
+        assert.equal(calls.length - before, mode.allowed ? 1 : 0);
+        if (!mode.mentioned) assert.equal(modelCalls, 0, 'unmentioned commands retain the mention gate');
+        else if (mode.direct && mode.allowed) assert.equal(modelCalls, 0, 'the direct bot route avoids the model');
+        else assert.equal(toolResult.status, mode.allowed ? 'ok' : 'failed');
+        if (mode.allowed) {
+            assert.equal(calls.at(-1).payload, '.log on');
+            assert.equal(calls.at(-1).user_key, `${appId}:member-direct`);
+            assert.equal(calls.at(-1).group_key, `${appId}:direct-group`);
+            assert.equal(calls.at(-1).group_role, 'owner');
+        }
+    }
 });
 
 test('bootstrap executes with stubs and passes the registered service and sender to real middleware setup', async () => {

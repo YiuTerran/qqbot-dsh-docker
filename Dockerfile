@@ -97,6 +97,7 @@ COPY defaults/cordis.safety.patch.yml /opt/qqbot-defaults/cordis.safety.patch.ym
 COPY defaults/qqbot-chat-policy.mjs /opt/qqbot-defaults/qqbot-chat-policy.mjs
 COPY defaults/qqbot-onebot.mjs /opt/qqbot-defaults/qqbot-onebot.mjs
 COPY defaults/qqbot-onebot-log.mjs /opt/qqbot-defaults/qqbot-onebot-log.mjs
+COPY defaults/qqbot-log-text.mjs /opt/qqbot-defaults/qqbot-log-text.mjs
 COPY defaults/qqbot-onebot-scope.mjs /opt/qqbot-defaults/qqbot-onebot-scope.mjs
 COPY defaults/qqbot-onebot-direct.mjs /opt/qqbot-defaults/qqbot-onebot-direct.mjs
 COPY defaults/qqbot-sealdice-policy.mjs /opt/qqbot-defaults/qqbot-sealdice-policy.mjs

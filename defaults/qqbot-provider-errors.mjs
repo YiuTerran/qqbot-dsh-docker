@@ -28,6 +28,8 @@ const LOG_CODES = new Set([
     'EHOSTUNREACH', 'ENETUNREACH', 'EPIPE', 'ERR_TLS_CERT_ALTNAME_INVALID',
     'group_state_private', 'group_role_unknown', 'group_role_denied', 'group_role_unsupported',
     'group_state_source_mismatch',
+    'log_disabled', 'log_capability_unsupported', 'log_group_only', 'log_exact_source_required',
+    'log_role_denied', 'log_role_unknown', 'log_role_unsupported', 'log_capture_order_unavailable',
     'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_SOCKET', 'UND_ERR_HEADERS_TIMEOUT',
 ]);
 const LOG_ERROR_TYPES = new Set([

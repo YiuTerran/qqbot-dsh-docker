@@ -9,6 +9,9 @@ const { createOnebotLogCapture, createOnebotLogCaptureMiddleware, attachOnebotDe
 const { createMergeConcurrencyGuard } = await import(new URL('qqbot-concurrency.mjs',
     `file://${moduleRoot.replace(/\/$/u, '')}/`).href);
 
+const { normalizeOnebotLogText } = await import(new URL('qqbot-log-text.mjs',
+    `file://${moduleRoot.replace(/\/$/u, '')}/`).href);
+
 const backendId = 'sealdice';
 const appId = '123456';
 const currentMessageTimestamp = new Date().toISOString();
@@ -36,6 +39,7 @@ function message(options = {}) {
         groupOpenid: group,
         senderId: user,
         messageId: id,
+        replyTarget: { scope: 'group', targetId: group, msgId: id },
         timestamp,
         content: 'SDK-rendered content must not be used',
         raw: {
@@ -548,7 +552,9 @@ for (const action of ['on', 'off']) {
             service.setBackends(groupBackend);
             const middleware = createOnebotLogCaptureMiddleware({ runtime: { logCapture: service } });
             const source = message({ id: `control-${action}`, content: `.log ${action}` });
-            const sourceCtx = { message: source, state: {} };
+            source.raw.quote = { content: '.log del other-session' };
+            source.refMsgIdx = 'quoted-message';
+            const sourceCtx = { message: source, state: { quote: { text: '.log del other-session' } } };
             let sourceAccepted = false;
             const sourceRun = middleware(sourceCtx, async () => {
                 sourceAccepted = await service.barrier({ backendId, groupKey: `${appId}:group-a`,
@@ -775,4 +781,85 @@ test('SDK send observer records one final group ACK across markdown, direct even
     assert.equal(bot.send, original);
     await bot.sendMarkdown(target, 'after shutdown');
     assert.equal(deliveries.length, 5);
+});
+
+
+const faceTag = (bytes) => `<faceType=1,faceId="123",ext="${Buffer.from(bytes).toString('base64')}">`;
+const namedFace = (text, extra = {}) => faceTag(JSON.stringify({ text, ...extra }));
+
+test('log face normalization is bounded, readable and preserves ordinary text', () => {
+    const body = '普通 Unicode 🌏\n**Markdown** <b>HTML</b>';
+    assert.equal(normalizeOnebotLogText(body), body);
+    assert.equal(normalizeOnebotLogText(`前${namedFace('微笑', { ignored: 'OPAQUE_EXTRA' })}后`), '前[表情: 微笑]后');
+    assert.equal(normalizeOnebotLogText('[<face,id=14/>] [<face,id=14>] [<face,id=99999/>]'),
+        '[表情: 微笑] [表情: 微笑] [表情]');
+    assert.equal(normalizeOnebotLogText(`前<faceType=1,faceId="1",ext="${'A'.repeat(64 * 1024)}">后`), '前[表情]后');
+    for (const tag of [
+        '<faceType=1,faceId="1",ext="invalid!">',
+        '<faceType=1,faceId="1",ext="invalid>OPAQUE_AFTER_GREATER_THAN">',
+        '<faceType=1,faceId="1",ext="AB==">', // Noncanonical padding bits.
+        faceTag(Buffer.from([0xff])),
+        faceTag('{invalid json'),
+        faceTag(JSON.stringify({ text: 'valid', extra: 'x'.repeat(4096) })),
+        namedFace('字'.repeat(81)), namedFace('🌏'.repeat(80)), namedFace(7), namedFace(null),
+        namedFace(''), namedFace('line\nbreak'), namedFace('a\u0000b'), namedFace('line\u2028break'),
+        '<faceType=1,faceId="1",ext="unterminated OPAQUE_PAYLOAD',
+        '[<face,id=not-a-number/>]', '[<face,id=14/>',
+    ]) {
+        assert.equal(normalizeOnebotLogText(tag), '[表情]', tag.slice(0, 80));
+    }
+    assert.equal(normalizeOnebotLogText(namedFace('a'.repeat(80))), `[表情: ${'a'.repeat(80)}]`);
+    assert.equal(normalizeOnebotLogText(namedFace('🌏'.repeat(64))), `[表情: ${'🌏'.repeat(64)}]`);
+    const many = Array.from({ length: 33 }, (_, index) => namedFace(`face-${index}`)).join('');
+    const normalized = normalizeOnebotLogText(many);
+    assert.ok(normalized.includes('[表情: face-31]'));
+    assert.ok(normalized.endsWith('[表情]'));
+    assert.equal(normalized.includes('face-32'), false);
+    assert.equal(normalizeOnebotLogText('x'.repeat(1024 * 1024 + 1)), undefined);
+    assert.equal(normalizeOnebotLogText('中'.repeat(350_000)), undefined, 'raw cap is measured in UTF-8 bytes');
+    assert.equal(normalizeOnebotLogText(`<faceType=${'A'.repeat(128 * 1024)}`), '[表情]');
+});
+
+test('raw face payloads never enter durable capture or posted events, and bot output uses the same normalization', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'qqbot-log-face-'));
+    const posted = [];
+    const { service, filePath } = await makeService(directory, async (_url, init) => {
+        posted.push(JSON.parse(init.body));
+        return accepted();
+    });
+    const largeTag = `<faceType=1,faceId="1",ext="${'A'.repeat(64 * 1024)}">`;
+    try {
+        service.setBackends([{ ...groupBackend[0], ready: false }]);
+        const current = message({ id: 'face-current', content: `before ${largeTag} ${namedFace('微笑', { ignored: 'OPAQUE_EXTRA' })} after\n[<face,id=14/>]` });
+        current.content = 'SDK_POLLUTED_HISTORY';
+        current.raw.quote = { content: 'RAW_QUOTE_SENTINEL' };
+        await createOnebotLogCaptureMiddleware({ runtime: { logCapture: service } })({
+            message: current, state: { quote: { text: 'QUOTED_HISTORY_SENTINEL' }, history: ['HISTORY_SENTINEL'] },
+        }, async () => {});
+        await waitFor(() => service.diagnostics().pending === 1);
+        const stored = await readFile(filePath, 'utf8');
+        assert.ok(Buffer.byteLength(stored, 'utf8') < 8192, '64 KiB face data becomes a short durable record');
+        for (const forbidden of [largeTag, 'faceType=', 'OPAQUE_EXTRA', 'SDK_POLLUTED_HISTORY',
+            'RAW_QUOTE_SENTINEL', 'QUOTED_HISTORY_SENTINEL', 'HISTORY_SENTINEL']) {
+            assert.equal(stored.includes(forbidden), false, forbidden.slice(0, 60));
+        }
+        service.setBackends(groupBackend);
+        await waitFor(() => posted.length === 1);
+        assert.equal(posted[0].text, 'before [表情] [表情: 微笑] after\n[表情: 微笑]');
+        assert.equal(await service.recordBotDelivery({ target: { scope: 'group', targetId: 'group-a' },
+            status: 'sent', messageId: 'face-bot', text: `bot ${largeTag} ${namedFace('赞')}` }), true);
+        await waitFor(() => posted.length === 2);
+        assert.equal(posted[1].text, 'bot [表情] [表情: 赞]');
+        assert.equal(JSON.stringify(posted).includes('ext='), false);
+        assert.equal(await service.captureRaw({ message: message({ id: 'raw-over-limit',
+            content: `<faceType=${'x'.repeat(1024 * 1024)}` }) }), false);
+        assert.equal(await service.captureRaw({ message: message({ id: 'normalized-over-limit',
+            content: 'x'.repeat(8193) + largeTag }) }), false);
+        assert.equal(await service.recordBotDelivery({ target: { scope: 'group', targetId: 'group-a' },
+            status: 'sent', messageId: 'bot-over-limit', text: 'x'.repeat(8193) + largeTag }), false);
+        await service.barrier({ backendId, groupKey: `${appId}:group-a` });
+        assert.equal(posted.filter((event) => event.kind === 'message').length, 2, 'oversized text creates gaps without truncating body');
+        assert.ok(posted.some((event) => event.kind === 'gap'));
+    }
+    finally { await service.stop(); await rm(directory, { recursive: true, force: true }); }
 });

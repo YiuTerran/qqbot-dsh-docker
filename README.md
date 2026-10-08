@@ -11,7 +11,7 @@
 | dsh | `@deepseek-ai/dsh@0.1.7-rc.2` |
 | QQ 插件 | `@tencent-connect/dsh-qqbot@0.5.0` |
 
-当前镜像标签为 `tryao/qqbot-dsh:v0.12.2`。可选 TRPG 组件独立发布：Gensokyo-MCP `v0.3.0`、海豹骰 `v1.6.2-bridge.6`。Dockerfile 固定基础镜像摘要及软件包版本；不发布 `latest` 标签。
+当前镜像标签为 `tryao/qqbot-dsh:v0.12.3`。可选 TRPG 组件独立发布：Gensokyo-MCP `v0.3.0`、海豹骰 `v1.6.2-bridge.6`。Dockerfile 固定基础镜像摘要及软件包版本；不发布 `latest` 标签。
 
 ## 快速部署
 

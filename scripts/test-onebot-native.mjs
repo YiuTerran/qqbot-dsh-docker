@@ -43,6 +43,7 @@ const {
     renderOnebotRequestMetadata,
 } = scopeModule;
 
+const { captureCurrentLogSource, isCurrentLogSource } = await import(pathToFileURL(join(defaultsRoot, 'qqbot-sealdice-policy.mjs')).href);
 const appId = '123456789';
 const config = (hiddenEnabled = false, masterUsers = [], logEnabled = false) => ({
     enabled: true,
@@ -60,6 +61,15 @@ const groupOriginal = (ownerId = 'member-a', groupId = 'group-a', groupRole = 'u
     replyTarget: { scope: 'group', targetId: groupId, msgId: 'group-message-id' },
     text: '请掷一个骰子',
 });
+function logOriginal(text, role = 'owner', ownerId = 'member-a', groupId = 'group-a', extra = {}) {
+    const original = { ...groupOriginal(ownerId, groupId, role), text, ...extra };
+    const message = { kind: 'group', senderId: ownerId, groupOpenid: groupId,
+        messageId: original.replyTarget.msgId, replyTarget: original.replyTarget,
+        raw: { id: original.replyTarget.msgId, group_openid: groupId,
+            author: { member_openid: ownerId }, content: `<@!${appId}> ${text}` } };
+    original.currentLogSource = captureCurrentLogSource(message, message.replyTarget, appId);
+    return original;
+}
 const privateOriginal = (ownerId = 'member-a') => ({
     ownerId,
     replyTarget: { scope: 'c2c', targetId: ownerId },
@@ -210,9 +220,7 @@ test('native log export claims and sends one validated artifact, then reuses the
             return { sent: true };
         },
     });
-    const { agent, scope, exec, metadata } = boundExec([{
-        ...groupOriginal('member-a', 'group-a', 'owner'), text: '.log export',
-    }]);
+    const { agent, scope, exec, metadata } = boundExec([logOriginal('.log export')]);
     try {
         await service.service.ready;
         const args = { requestId: metadata[0].requestId, backend: 'sealdice', command: '.log export' };
@@ -247,9 +255,7 @@ test('native log commands require the same case-sensitive original command, not 
             ['.log get Alpha', '.log get alpha'],
             ['请解释.log get Alpha', '.log get Alpha'],
         ]) {
-            const { agent, scope, exec, metadata } = boundExec([{
-                ...groupOriginal('member-a', 'group-a', 'member'), text: original,
-            }]);
+            const { agent, scope, exec, metadata } = boundExec([logOriginal(original, 'member')]);
             try {
                 const result = await service.descriptor.execute({
                     requestId: metadata[0].requestId, backend: 'sealdice', command,
@@ -896,4 +902,69 @@ test('a failed hidden private send blocks a queued different command in the same
     assert.equal(JSON.stringify(hiddenResult).includes('PRIVATE_SENTINEL'), false);
     await endOnebotTurn(agent, scope);
     await service.service.stop();
+});
+
+
+test('log source is current raw text, identity bound and immutable', () => {
+    const target = { scope: 'group', targetId: 'group-a', msgId: 'current-id' };
+    const fresh = (content = `<@!${appId}> .log on`) => ({ kind: 'group', senderId: 'owner-a',
+        groupOpenid: 'group-a', messageId: 'current-id', replyTarget: target,
+        content: '.log on', raw: { id: 'current-id', group_openid: 'group-a',
+            author: { member_openid: 'owner-a' }, content } });
+    assert.equal(captureCurrentLogSource(fresh(`<@!${appId}>\n.log on`), target, appId).command, '.log on');
+    const message = fresh();
+    message.raw.quote = { content: '.log off' };
+    message.raw.attachments = [{ content_type: 'image/png' }];
+    const source = captureCurrentLogSource(message, target, appId);
+    const binding = { appId, ownerId: 'owner-a', groupId: 'group-a', messageId: 'current-id' };
+    assert.equal(source.command, '.log on');
+    assert.equal(Object.isFrozen(source), true);
+    message.raw.content = '.log off';
+    assert.equal(source.command, '.log on');
+    assert.equal(isCurrentLogSource(source, binding), true);
+    assert.equal(isCurrentLogSource({ ...source }, binding), false);
+    for (const changed of [{ ownerId: 'member-b' }, { groupId: 'group-b' },
+        { messageId: 'other-id' }, { appId: '999' }]) {
+        assert.equal(isCurrentLogSource(source, { ...binding, ...changed }), false);
+    }
+    for (const content of ['请开启记录', '请解释 .log on', '', `<@!999> .log on`,
+        '.log on\n.log off', '.log on' + ' '.repeat(4000)]) {
+        assert.equal(captureCurrentLogSource(fresh(content), target, appId), undefined, content.slice(0, 50));
+    }
+    for (const changed of [{ messageId: 'other-id' }, { senderId: 'member-b' }, { groupOpenid: 'group-b' },
+        { raw: undefined }, { kind: 'c2c' }]) {
+        assert.equal(captureCurrentLogSource({ ...fresh(), ...changed }, target, appId), undefined);
+    }
+});
+
+test('native log accepts full current command with quote context and prevents merged source borrowing', async () => {
+    const service = setup({ logEnabled: true, backendCapabilities: ['log-capture-v1', 'group-role-v1'],
+        logCapture: { enabled: true, setBackends() {}, setUnavailable() {}, stop() {}, async barrier() { return true; } } });
+    await service.service.ready;
+    const run = async (originals, index, command) => {
+        const { agent, scope, exec, metadata } = boundExec(originals);
+        try { return await service.descriptor.execute({ requestId: metadata[index].requestId,
+            backend: 'sealdice', command }, exec); }
+        finally { await endOnebotTurn(agent, scope); }
+    };
+    try {
+        const original = logOriginal('.log on', 'owner', 'owner-a');
+        const metadataScope = beginOnebotTurn({}, [original], { appId });
+        assert.equal(onebotRequestMetadata(metadataScope)[0].currentLogCommand, '.log on');
+        await endOnebotTurn(metadataScope.agent, metadataScope);
+        assert.equal((await run([logOriginal('.log on', 'owner', 'owner-a', 'group-a', {
+            hasQuote: true, hasAttachments: true, text: 'rendered envelope containing quote text',
+        })], 0, '.log on')).status, 'ok');
+        const member = logOriginal('.log on', 'member', 'member-b');
+        assert.equal((await run([member], 0, '.log on')).failureReason, 'log_role_denied');
+        const ownerProse = { ...groupOriginal('owner-a', 'group-a', 'owner'), text: '请开启记录' };
+        assert.equal((await run([ownerProse, member], 0, '.log on')).failureReason, 'log_exact_source_required');
+        assert.equal((await run([ownerProse, member], 1, '.log on')).failureReason, 'log_role_denied');
+        const stolen = { ...ownerProse, currentLogSource: member.currentLogSource };
+        assert.equal((await run([stolen], 0, '.log on')).failureReason, 'log_exact_source_required');
+        assert.equal((await run([{ ...ownerProse, text: '.log on', hasQuote: true }], 0, '.log on')).failureReason,
+            'log_exact_source_required', 'a rendered or quoted command cannot substitute for a raw current command');
+        assert.equal(service.calls, 1);
+    }
+    finally { await service.service.stop(); }
 });

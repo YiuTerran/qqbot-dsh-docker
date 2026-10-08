@@ -31,6 +31,7 @@ previous_stock_agents_v0_10_3_fixture="${repo_root}/scripts/fixtures/agents-v0.1
 previous_stock_agents_v0_11_fixture="${repo_root}/scripts/fixtures/agents-v0.11.0-stock.md"
 previous_stock_agents_v0_11_1_fixture="${repo_root}/scripts/fixtures/agents-v0.11.1-stock.md"
 previous_stock_agents_v0_11_2_fixture="${repo_root}/scripts/fixtures/agents-v0.11.2-stock.md"
+previous_stock_agents_v0_12_2_fixture="${repo_root}/scripts/fixtures/agents-v0.12.2-stock.md"
 persistent_reset_probe="${repo_root}/scripts/test-persistent-reset.mjs"
 suffix="$(date +%s)-$$"
 data_volume="dsh-qqbot-test-data-${suffix}"
@@ -406,6 +407,18 @@ docker run --rm \
 log "Checking exact stock AGENTS.md migration and read-only preservation"
 docker run --rm --entrypoint sh \
     --volume "${stock_agents_v0_10_data_volume}:/data" \
+    --mount "type=bind,src=${previous_stock_agents_v0_12_2_fixture},dst=/tmp/agents-stock.md,readonly" \
+    "$IMAGE" -ec 'cp /tmp/agents-stock.md /data/AGENTS.md; chmod 0644 /data/AGENTS.md'
+docker run --rm \
+    --volume "${stock_agents_v0_10_data_volume}:/data" \
+    "$IMAGE" sh -ec 'cmp /data/AGENTS.md /opt/qqbot-defaults/AGENTS.md'
+docker run --rm \
+    --volume "${readonly_stock_agents_v0_10_data_volume}:/data" \
+    --mount "type=bind,src=${previous_stock_agents_v0_12_2_fixture},dst=/data/AGENTS.md,readonly" \
+    --mount "type=bind,src=${previous_stock_agents_v0_12_2_fixture},dst=/tmp/agents-stock.md,readonly" \
+    "$IMAGE" sh -ec 'cmp /data/AGENTS.md /tmp/agents-stock.md'
+docker run --rm --entrypoint sh \
+    --volume "${stock_agents_v0_10_data_volume}:/data" \
     --mount "type=bind,src=${previous_stock_agents_v0_11_2_fixture},dst=/tmp/agents-stock.md,readonly" \
     "$IMAGE" -ec 'cp /tmp/agents-stock.md /data/AGENTS.md; chmod 0644 /data/AGENTS.md'
 docker run --rm \
@@ -574,6 +587,7 @@ docker create \
         node --check /opt/qqbot-defaults/qqbot-generation-scope.mjs
         node --check /opt/qqbot-defaults/qqbot-generation-quotas.mjs
         node --check /opt/qqbot-defaults/qqbot-onebot-log.mjs
+        node --check /opt/qqbot-defaults/qqbot-log-text.mjs
         node --check /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/transport/inbound.js
         node --check /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/transport/outbound.js
         node --check /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/model/prefs-store.js

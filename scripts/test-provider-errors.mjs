@@ -50,6 +50,22 @@ test('tool failure diagnostics keep HTTP and transport evidence without raw secr
     finally { console.warn = originalWarn; }
 });
 
+test('log authorization diagnostics retain fixed refusal codes without current or quoted content', () => {
+    const lines = [];
+    const originalWarn = console.warn;
+    console.warn = (line) => lines.push(line);
+    try {
+        for (const code of ['log_exact_source_required', 'log_role_denied', 'log_capture_order_unavailable']) {
+            logToolFailure('qqbot_onebot_command', 'authorize', { kind: 'failed', code, message: sensitive });
+            const record = JSON.parse(lines.at(-1).slice('[qqbot-tool-error] '.length));
+            assert.equal(record.code, code);
+            assert.equal(record.stage, 'authorize');
+            assert.doesNotMatch(lines.at(-1), /sk-test-secret|request-secret-id|private\.example|rejected-private-prompt/u);
+        }
+    }
+    finally { console.warn = originalWarn; }
+});
+
 test('native stable codes receive category-specific fixed notices without raw error details', () => {
     const codes = {
         QUOTA: 'quota', ACCOUNT_QUOTA: 'quota',

@@ -1032,7 +1032,7 @@ const LOG_FAILURE_NOTICES = Object.freeze({
     log_disabled: '聊天记录功能当前未启用，本次命令未执行。',
     log_capability_unsupported: '当前海豹骰后端不支持群聊记录控制，本次命令未执行。',
     log_group_only: '聊天记录命令只能在群聊中使用。',
-    log_exact_source_required: '聊天记录命令必须由当前群成员在自己的原始消息中完整发送。',
+    log_exact_source_required: '请在群内 @机器人并完整发送 .log 命令，通过机器人转发。',
     log_role_denied: '只有当前群的群主或管理员可以修改聊天记录状态。',
     log_role_unknown: '无法确认当前群的身份权限，聊天记录状态未修改。',
     log_role_unsupported: '当前 OneBot 后端尚不支持群角色校验，聊天记录状态未修改。',
@@ -1052,18 +1052,13 @@ function logCommandFailure(policy, source, backend, runtime, scope) {
     if (policy?.kind !== 'log') return undefined;
     if (!runtime.config.logEnabled) return 'log_disabled';
     if (source.audience !== 'group') return 'log_group_only';
-    const originalPolicy = source.originalTextLength <= 4000 && !source.hasAttachments && !source.hasQuote
-        ? inspectSeaDiceCommand(source.text, { direct: true }) : undefined;
-    if (!originalPolicy?.allowed || originalPolicy.kind !== 'log'
-        || originalPolicy.command !== policy.command) return 'log_exact_source_required';
+    if (source.currentLogSource?.command !== policy.command) return 'log_exact_source_required';
     if (!runtime.logCaptureBackends.has(backend)) return 'log_capability_unsupported';
     if (policy.logMutation) {
         if (source.groupRole === 'member') return 'log_role_denied';
         if (source.groupRole !== 'owner' && source.groupRole !== 'admin') return 'log_role_unknown';
         if (!runtime.groupRoleBackends.has(backend)) return 'log_role_unsupported';
     }
-    if (scope?.originalRequestCount !== 1 && (source.originalTextLength > 4000 || !originalPolicy
-        || originalPolicy.command !== policy.command)) return 'log_exact_source_required';
     return undefined;
 }
 

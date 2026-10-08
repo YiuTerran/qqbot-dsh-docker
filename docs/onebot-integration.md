@@ -6,7 +6,7 @@ qq-bot 使用专用工具调用 Gensokyo-MCP；桥将请求变成虚拟 OneBot v
 
 两个 fork 固定为子模块：`third_party/gensokyo-mcp`、`third_party/sealdice-core`。初始化使用 `git submodule update --init --recursive`。海豹嵌套资源按其自己的 gitlink 检出，不改变 UI。
 
-镜像分别为 `tryao/qqbot-dsh:v0.12.2`、`tryao/gensokyo-mcp:v0.3.0`、`tryao/sealdice-core:v1.6.2-bridge.6`，只使用版本标签，没有 latest。主镜像不包含两个 Go 项目源码或运行程序。
+镜像分别为 `tryao/qqbot-dsh:v0.12.3`、`tryao/gensokyo-mcp:v0.3.0`、`tryao/sealdice-core:v1.6.2-bridge.6`，只使用版本标签，没有 latest。主镜像不包含两个 Go 项目源码或运行程序。
 
 v0.11.0 新增 Markdown 投递回执、扩展命令和连接级 Master ACL；三项镜像版本须一同升级，旧后端未协商 ACL 时仍可处理普通命令。
 
@@ -17,7 +17,7 @@ v0.11.1 增加群主／管理员的整群规则修改权限，以及单条自然
 可以直接使用仓库的 `docker-compose.qnap.yml`，或将下方完整 YAML 保存为 `docker-compose.yml`。在同一目录创建 `.env`；QQ 和聊天凭据按实际账号填写，三份 OneBot 服务密钥使用不同的随机值，不复用 QQ/LLM 密钥。已有配置可保留聊天、视觉和生图路由，只更新三个镜像版本及 OneBot 配置。
 
 ```dotenv
-IMAGE_TAG=v0.12.2
+IMAGE_TAG=v0.12.3
 QQBOT_APPID=
 QQBOT_SECRET=
 # 官方聊天模式填此项；不要同时配置 LLM_API_KEY。
@@ -242,6 +242,10 @@ qq-bot 容器日志中的 `[qqbot-onebot] ready backends=1 available=true` 表�
 默认导出染色 Markdown，使用内嵌 HTML 标签显示人物颜色；阅读器需要允许内联样式。屏蔽样式时仍可读取姓名、时间和正文。颜色按稳定内部身份确定，昵称或角色名只用于展示。用户正文进行 HTML 转义，文件无脚本、远程图片、外部样式或统计代码；默认不自动过滤命令和场外发言。`--format=txt` 可导出原始文本。
 
 单份导出上限 10 MiB，超限明确拒绝而非截断。文件直接走内部领取及 QQ 附件投递链路，日志全文不进入 LLM。只有最终 QQ 发送确认才表示发送成功；失败、超时及确认未知会准确反馈，确认未知不自动重复发送或把全文改成群内正文。临时产物确认投递后清理，十分钟过期；源日志保留到显式删除。请随海豹数据卷一起备份。
+
+v0.12.3 起，`.log` 转发授权使用本条 QQ 原始事件中身份绑定的完整命令，只清理本机器人的 @ 标记。引用或附件的存在不会自行否决完整的当前命令，但它们也不能补足或授权命令；模型读取只读 `currentLogCommand`，仍需通过 bot 转发，群角色要求不变。
+
+捕获层将 QQ 表情传输标记转为可读标签，损坏或超限标记显示为 `[表情]`，不保存 base64 `ext`。规范化仍只读取当前原始正文，保留普通文字和换行；已确认机器人回复使用同一规则。原始正文上限 1 MiB，规范化后上限 8192 字符，超限明确记录缺口，不截断正文。
 
 海豹命令执行仍限时 30 秒。日志请求另外为领取和 QQ 文件发送预留时间，直通总等待最多 145 秒，模型工具总限时 150 秒；普通骰子直通限时不变。每次日志命令只交付一份 MD 或 TXT 文件。
 

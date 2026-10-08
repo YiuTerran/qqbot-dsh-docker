@@ -1,6 +1,6 @@
 import { isRecentImageSnapshot } from './qqbot-pending-images.mjs';
 import { getOnebotDirectFallback } from './qqbot-onebot-scope.mjs';
-import { captureOnebotGroupRole } from './qqbot-sealdice-policy.mjs';
+import { captureOnebotGroupRole, captureCurrentLogSource } from './qqbot-sealdice-policy.mjs';
 import { transferOnebotLogHolds } from './qqbot-onebot-log.mjs';
 
 const DEFAULT_MAX_QUEUE = 20;
@@ -36,6 +36,7 @@ function snapshotGenerationRequest(ctx) {
         ownerId: message.senderId,
         groupRole: captureOnebotGroupRole(message, message.replyTarget ?? ctx?.replyTarget) ?? 'unknown',
         replyTarget,
+        currentLogSource: captureCurrentLogSource(message, message.replyTarget ?? ctx?.replyTarget, ctx?.bot?.appId),
         text: typeof message.content === 'string' ? message.content.slice(0, 4000) : '',
         originalTextLength: typeof message.content === 'string' ? message.content.length : 0,
         hasAttachments: (Array.isArray(message.attachments) && message.attachments.length > 0)

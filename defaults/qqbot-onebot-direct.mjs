@@ -5,7 +5,7 @@ import {
     beginOnebotTurn,
     onebotRequestMetadata,
 } from './qqbot-onebot-scope.mjs';
-import { captureOnebotGroupRole, inspectSeaDiceCommand } from './qqbot-sealdice-policy.mjs';
+import { captureOnebotGroupRole, captureCurrentLogSource, inspectSeaDiceCommand } from './qqbot-sealdice-policy.mjs';
 
 const EVENT_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_EVENT_CACHE = 50_000;
@@ -60,7 +60,7 @@ const FAILURE_TEXT = Object.freeze({
     log_disabled: '聊天记录功能当前未启用，本次命令未执行。',
     log_capability_unsupported: '当前海豹骰后端不支持群聊记录控制，本次命令未执行。',
     log_group_only: '聊天记录命令只能在群聊中使用。',
-    log_exact_source_required: '聊天记录命令必须由当前群成员在自己的原始消息中完整发送。',
+    log_exact_source_required: '请在群内 @机器人并完整发送 .log 命令，通过机器人转发。',
     log_role_denied: '只有当前群的群主或管理员可以修改聊天记录状态。',
     log_role_unknown: '无法确认当前群的身份权限，聊天记录状态未修改。',
     log_role_unsupported: '当前 OneBot 后端尚不支持群角色校验，聊天记录状态未修改。',
@@ -98,7 +98,7 @@ export function matchOnebotDirectCommand(content) {
     return onebotCommandCandidate(content);
 }
 
-function snapshotMessage(ctx) {
+function snapshotMessage(ctx, appId) {
     const message = ctx?.message;
     const target = message?.replyTarget ?? ctx?.replyTarget;
     if (!message || typeof message.content !== 'string' || typeof message.senderId !== 'string'
@@ -112,6 +112,7 @@ function snapshotMessage(ctx) {
     });
     return Object.freeze({
         text: message.content,
+        currentLogSource: captureCurrentLogSource(message, message.replyTarget ?? ctx?.replyTarget, appId),
         originalTextLength: message.content.length,
         hasQuote: Boolean(ctx?.state?.quote || message.refMsgIdx || message.raw?.message_reference || message.raw?.quote),
         groupRole: captureOnebotGroupRole(message, message.replyTarget ?? ctx?.replyTarget) ?? 'unknown',
@@ -453,7 +454,7 @@ export function createOnebotDirectRouter({
 
     async function middleware(ctx, next) {
         const startedAt = Date.now();
-        const source = snapshotMessage(ctx);
+        const source = snapshotMessage(ctx, appId);
         if (!source) return await next?.();
         if (hasAttachments(source)) return await next?.();
         if (env.QQBOT_ONEBOT_DIRECT_ENABLED === 'false') return await next?.();
@@ -532,6 +533,7 @@ export function createOnebotDirectRouter({
             groupRole: source.groupRole,
             replyTarget: source.replyTarget,
             text: source.text,
+            currentLogSource: source.currentLogSource,
         }], {
             appId,
             direct: true,
@@ -624,7 +626,7 @@ export function createOnebotDirectRouter({
     }
 
     function cancelConversation(ctx) {
-        const source = snapshotMessage(ctx);
+        const source = snapshotMessage(ctx, appId);
         if (!source || !APP_ID_PATTERN.test(appId ?? '')) return 0;
         const key = conversationKey(appId, source);
         const entries = [...(activeConversations.get(key) ?? [])];
