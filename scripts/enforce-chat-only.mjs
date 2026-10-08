@@ -228,6 +228,53 @@ await patch('gateway/bootstrap.js', '// Chat-only native OneBot direct router v1
         '            await directRouter.stop();\n            detachOnebotDeliveryObserver();\n            await onebotService.stop();', file);
 });
 
+// The direct-router v1 marker also exists in v0.11.2 persisted profiles. Its
+// original transform must remain idempotent, so delivery integration has its
+// own migration marker and recognizes only the complete released layout.
+await patch('gateway/bootstrap.js', '// Chat-only native OneBot delivery integration v1.', (content, file) => {
+    const directMarker = '    // Chat-only native OneBot direct router v1.';
+    const legacyRegistration = [
+        '    // Chat-only native OneBot command v1.',
+        '    const onebotService = registerOnebotCommandTool(ctx, {',
+        '        appId: config.appId,',
+        '        bot,',
+        '        messagePath,',
+        '        logger,',
+        '        onAvailability: setOnebotToolAvailable,',
+        '    });',
+        directMarker,
+    ].join('\n');
+    const currentRegistration = [
+        '    // Chat-only native OneBot command v1.',
+        '    onebotService = registerOnebotCommandTool(ctx, {',
+        '        appId: config.appId,',
+        '        bot,',
+        '        messagePath,',
+        '        sendArtifactFile: (...args) => generationSender?.sendArtifactFile?.(...args),',
+        '        logger,',
+        '        onAvailability: setOnebotToolAvailable,',
+        '    });',
+        '    detachOnebotDeliveryObserver = attachOnebotDeliveryObserver(bot, onebotService);',
+        directMarker,
+    ].join('\n');
+    const legacySetup = '    setupMiddlewares(bot, config, manager, logger, sender, directRouter);';
+    const currentSetup = '    setupMiddlewares(bot, config, manager, logger, sender, directRouter, onebotService);';
+    const legacyShutdown = '            await directRouter.stop();\n            await onebotService.stop();';
+    const currentShutdown = '            await directRouter.stop();\n            detachOnebotDeliveryObserver();\n            await onebotService.stop();';
+    if (content.includes(legacyRegistration)) {
+        content = replaceOne(content, legacyRegistration, currentRegistration, file);
+        content = replaceOne(content, legacySetup, currentSetup, file);
+        content = replaceOne(content, legacyShutdown, currentShutdown, file);
+    }
+    else if (content.split(currentRegistration).length !== 2
+        || content.split(currentSetup).length !== 2
+        || content.split(currentShutdown).length !== 2) {
+        throw new Error(`Chat-only patch: native OneBot delivery integration layout is incomplete in ${file}`);
+    }
+    return replaceOne(content, directMarker,
+        `    // Chat-only native OneBot delivery integration v1.\n${directMarker}`, file);
+});
+
 await patch('gateway/middleware-setup.js', '// Chat-only serialized merge guard v1.', (content, file) => {
     const helperImport = `import { createMergeConcurrencyGuard, sendMergeQueueFullNotice } from '${concurrencyPolicy}';`;
     if (!content.includes(helperImport)) content = `${helperImport}\n${content}`;
@@ -2277,6 +2324,12 @@ const finalBootstrap = await finalText('gateway/bootstrap.js');
 assertOnce(finalBootstrap, '// Chat-only merge batch reply adapter v1.', 'early merge sender adapter');
 assertOnce(finalBootstrap, 'setupMiddlewares(bot, config, manager, logger, sender, directRouter, onebotService);', 'merge sender, direct router, and log capture injection');
 assertOnce(finalBootstrap, '// Chat-only QQ delivery logging v1.', 'native QQ delivery logging hook');
+assertOnce(finalBootstrap, '// Chat-only native OneBot delivery integration v1.', 'native OneBot delivery integration migration');
+assertOnce(finalBootstrap, '    let onebotService;', 'shared OneBot service declaration');
+assertOnce(finalBootstrap, '    let generationSender;', 'shared generation sender declaration');
+assertOnce(finalBootstrap, '    let detachOnebotDeliveryObserver;', 'delivery observer disposal declaration');
+if (finalBootstrap.includes('const onebotService = registerOnebotCommandTool(ctx, {'))
+    throw new Error('Chat-only patch: obsolete OneBot service declaration conflicts with delivery integration');
 assertOnce(finalBootstrap, `import { attachOnebotDeliveryObserver } from '${onebotLogPolicy}';`, 'QQ send observer import');
 assertOnce(finalBootstrap, 'detachOnebotDeliveryObserver = attachOnebotDeliveryObserver(bot, onebotService);', 'QQ send observer registration');
 assertOnce(finalBootstrap, 'detachOnebotDeliveryObserver();', 'QQ send observer shutdown');

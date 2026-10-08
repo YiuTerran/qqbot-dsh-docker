@@ -49,6 +49,10 @@ async function assertCurrentPatch(root) {
     const expected = {
         'gateway/bootstrap.js': [
             '// Chat-only merge batch reply adapter v1.',
+            '// Chat-only native OneBot delivery integration v1.',
+            '    let onebotService;',
+            '    let generationSender;',
+            '    let detachOnebotDeliveryObserver;',
             'setupMiddlewares(bot, config, manager, logger, sender, directRouter, onebotService);',
             "import { attachOnebotDeliveryObserver } from '/opt/qqbot-defaults/qqbot-onebot-log.mjs';",
             'detachOnebotDeliveryObserver = attachOnebotDeliveryObserver(bot, onebotService);',
@@ -188,12 +192,20 @@ async function assertCurrentPatch(root) {
     }
 }
 
-for (const version of ['pre-thinking', 'pre-concurrency', 'pre-recovery', 'recovery-v1', 'onebot-v10.2']) {
+for (const version of ['pre-thinking', 'pre-concurrency', 'pre-recovery', 'recovery-v1', 'onebot-v10.2', 'onebot-v11.2']) {
     integration(`${version} adapter upgrades completely and a second patch pass changes no file hashes`, async (t) => {
         const root = await isolatedAdapter(t);
         if (version === 'pre-thinking') await run(concurrencyFixture, [root, 'thinking-only']);
         else if (version === 'pre-concurrency') await run(concurrencyFixture, [root]);
         else if (version === 'onebot-v10.2') await run(concurrencyFixture, [root, 'direct-only']);
+        else if (version === 'onebot-v11.2') {
+            await run(concurrencyFixture, [root, 'log-only']);
+            const bootstrap = await readFile(join(root, 'gateway/bootstrap.js'), 'utf8');
+            assert.equal(bootstrap.split('// Chat-only native OneBot direct router v1.').length, 2,
+                'the released v0.11.2 direct-router marker survives the fixture');
+            assert.equal(bootstrap.includes('const onebotService = registerOnebotCommandTool(ctx, {'), true,
+                'the released service declaration is retained before upgrading');
+        }
         else await run(fixture, [root, ...(version === 'recovery-v1' ? ['recovery-v1'] : [])]);
         const before = await hashes(root);
         await run(enforcer, [root]);
@@ -204,6 +216,23 @@ for (const version of ['pre-thinking', 'pre-concurrency', 'pre-recovery', 'recov
         assert.deepEqual(await hashes(root), upgraded, 'the full dist is byte-for-byte unchanged on repeat startup');
     });
 }
+
+integration('a partial released direct-router delivery upgrade fails before any adapter write', async (t) => {
+    const root = await isolatedAdapter(t);
+    await run(concurrencyFixture, [root, 'log-only']);
+    const bootstrapPath = join(root, 'gateway/bootstrap.js');
+    const bootstrap = await readFile(bootstrapPath, 'utf8');
+    const registration = '    const onebotService = registerOnebotCommandTool(ctx, {';
+    assert.equal(bootstrap.split(registration).length, 2, 'fixture has the released service declaration');
+    await writeFile(bootstrapPath, bootstrap.replace(registration, '    const onebotService = alteredOnebotCommandTool(ctx, {'));
+    const before = await hashes(root);
+    await assert.rejects(run(enforcer, [root]), (error) => {
+        assert.notEqual(error.code, 0);
+        assert.match(error.stderr, /native OneBot delivery integration layout is incomplete/u);
+        return true;
+    });
+    assert.deepEqual(await hashes(root), before, 'legacy layout rejection performs zero adapter writes');
+});
 
 integration('a partial committed callback fails strict validation without changing any dist file', async (t) => {
     const root = await isolatedAdapter(t);

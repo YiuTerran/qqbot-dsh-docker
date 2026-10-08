@@ -11,6 +11,7 @@ const { createMergeConcurrencyGuard } = await import(new URL('qqbot-concurrency.
 
 const backendId = 'sealdice';
 const appId = '123456';
+const currentMessageTimestamp = new Date().toISOString();
 const groupBackend = [{ id: backendId, ready: true, capabilities: ['log-capture-v1', 'artifact-v1'] }];
 
 function config() {
@@ -28,7 +29,7 @@ function message(options = {}) {
     const user = options.user ?? 'user-a';
     const id = options.id ?? 'source-id-001';
     const content = Object.hasOwn(options, 'content') ? options.content : 'hello';
-    const timestamp = options.timestamp ?? '2026-10-06T00:00:00.000Z';
+    const timestamp = options.timestamp ?? currentMessageTimestamp;
     const attachments = options.attachments;
     return {
         kind: 'group',

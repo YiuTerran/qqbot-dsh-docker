@@ -2,6 +2,12 @@
 
 本文记录部署后常用的能力限制、排障方法和维护注意事项。首次部署请先看[项目首页](../README.md)；OneBot/TRPG 配置请看[集成说明](onebot-integration.md)。
 
+## 启动与升级
+
+v0.12.2 修复了从 v0.11.2 等已启用直通路由的旧数据卷升级时，日志集成迁移被跳过而导致启动失败的问题。升级镜像后重建 qqbot 容器即可，保留原有 `/data` 和 `/workspace` 卷。
+
+入口日志会依次显示初始化、应用运行策略和启动运行程序。容器状态为 `restarting` 且退出码非零时，进程已经退出，不能仅凭 `Running=true` 判断服务正常。Container Station 未显示日志时，可查看容器退出状态及日志配置，或通过 SSH 执行 `docker logs --tail 150 dsh-qqbot`。
+
 ## 图片与附件
 
 当前消息附带的图片、明确引用的图片和公共 HTTPS 图片 URL 可用于受限视觉分析。图片最多 10 MB；URL 必须为 HTTPS，不得带凭据或重定向，并须通过公网地址、MIME 和图片字节检查。引用图片缓存最多保留 500 条消息的文字和附件元数据，并按群/私聊目标隔离。重启或缓存淘汰后，若引用没有结构化附件或完整图片记录，或原图链接失效，请重新附图。
@@ -87,7 +93,7 @@ mkdir -p /tmp/qqbot-image-probe
 docker run --rm --entrypoint node --env-file .env \
   --mount "type=bind,src=$PWD/scripts/verify-image-route.mjs,dst=/tmp/verify-image-route.mjs,readonly" \
   --mount type=bind,src=/tmp/qqbot-image-probe,dst=/probe-output \
-  tryao/qqbot-dsh:v0.12.1 /tmp/verify-image-route.mjs /probe-output
+  tryao/qqbot-dsh:v0.12.2 /tmp/verify-image-route.mjs /probe-output
 ```
 
 探测会发起真实图片服务请求并消耗服务额度；不会发送真实 QQ 消息或修改生产额度。真实 QQ 图片和文件投递仍需用机器人账号验证。

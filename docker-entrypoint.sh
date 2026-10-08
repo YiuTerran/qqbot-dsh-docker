@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 
+echo "[entrypoint] Starting qqbot initialization"
+
 : "${DSH_HOME:=/data}"
 export DSH_HOME
 export HOME=/home/node
@@ -120,6 +122,7 @@ ln -sfn /data "$HOME/.dsh"
 chown -h node:node "$HOME/.dsh"
 
 if [ ! -e /data/.initialized ]; then
+    echo "[entrypoint] Initializing profile data"
     cp -a /opt/dsh-seed/. /data/
     : > /data/.initialized
     # /opt/dsh-seed is already node-owned.  Do not recursively chown /data:
@@ -179,7 +182,9 @@ if [ ! -d "$qqbot_dist" ]; then
     echo "[entrypoint] Pinned QQ plugin is missing; refusing to start without the qqbot runtime policy" >&2
     exit 78
 fi
+echo "[entrypoint] Applying qqbot runtime policy"
 node /usr/local/lib/enforce-chat-only.mjs "$qqbot_dist"
+echo "[entrypoint] qqbot runtime policy ready"
 if ! node /usr/local/lib/instrument-qqbot-startup.mjs "$qqbot_dist"; then
     echo "[entrypoint] QQ startup diagnostics were not applied; continuing with the installed plugin" >&2
 fi
@@ -280,4 +285,5 @@ if [ "$#" -ge 3 ] && [ "$1" = "dsh" ] && [ "$2" = "--profile" ] && [ "$3" = "qqb
     set -- dsh --profile qqbot "$@" --patch /opt/qqbot-defaults/cordis.safety.patch.yml
 fi
 
+echo "[entrypoint] Launching runtime"
 exec setpriv --reuid=node --regid=node --init-groups -- "$@"

@@ -6,6 +6,7 @@ if (!root) throw new Error('usage: prepare-pre-concurrency-fixture.mjs <dsh-qqbo
 const helper = '/opt/qqbot-defaults/qqbot-concurrency.mjs';
 const thinkingOnly = process.argv[3] === 'thinking-only';
 const directOnly = process.argv[3] === 'direct-only';
+const logOnly = process.argv[3] === 'log-only';
 
 function replaceOnce(source, before, after, label) {
     const parts = source.split(before);
@@ -18,20 +19,23 @@ async function edit(file, operation) {
     await writeFile(path, operation(await readFile(path, 'utf8')));
 }
 
-await edit('transport/inbound.js', (source) => {
-    if (!source.includes('// Chat-only OneBot direct fallback v1.')) return source;
-    source = replaceOnce(source, "import { renderOnebotDirectFallbackMetadata } from '/opt/qqbot-defaults/qqbot-onebot-scope.mjs';\n", '', 'direct fallback import');
-    source = replaceOnce(source, '        // Chat-only OneBot direct fallback v1.\n        const onebotFallbackMetadata = renderOnebotDirectFallbackMetadata(getMergedGenerationRequests(ctx));\n', '', 'direct fallback binding');
-    return replaceOnce(source, 'generationMetadata, onebotMetadata, onebotFallbackMetadata]', 'generationMetadata, onebotMetadata]', 'direct fallback body');
-});
-await edit('middleware/question-answer.js', (source) => {
-    if (!source.includes('// Chat-only OneBot fallback question bypass v1.')) return source;
-    source = replaceOnce(source, "import { getOnebotDirectFallback } from '/opt/qqbot-defaults/qqbot-onebot-scope.mjs';\n", '', 'direct fallback question import');
-    return replaceOnce(source, '        // Chat-only OneBot fallback question bypass v1.\n        if (getOnebotDirectFallback(ctx)) return await next();\n', '', 'direct fallback question guard');
-});
+if (!logOnly) {
+    await edit('transport/inbound.js', (source) => {
+        if (!source.includes('// Chat-only OneBot direct fallback v1.')) return source;
+        source = replaceOnce(source, "import { renderOnebotDirectFallbackMetadata } from '/opt/qqbot-defaults/qqbot-onebot-scope.mjs';\n", '', 'direct fallback import');
+        source = replaceOnce(source, '        // Chat-only OneBot direct fallback v1.\n        const onebotFallbackMetadata = renderOnebotDirectFallbackMetadata(getMergedGenerationRequests(ctx));\n', '', 'direct fallback binding');
+        return replaceOnce(source, 'generationMetadata, onebotMetadata, onebotFallbackMetadata]', 'generationMetadata, onebotMetadata]', 'direct fallback body');
+    });
+    await edit('middleware/question-answer.js', (source) => {
+        if (!source.includes('// Chat-only OneBot fallback question bypass v1.')) return source;
+        source = replaceOnce(source, "import { getOnebotDirectFallback } from '/opt/qqbot-defaults/qqbot-onebot-scope.mjs';\n", '', 'direct fallback question import');
+        return replaceOnce(source, '        // Chat-only OneBot fallback question bypass v1.\n        if (getOnebotDirectFallback(ctx)) return await next();\n', '', 'direct fallback question guard');
+    });
+}
 
 if (!thinkingOnly) {
     await edit('gateway/bootstrap.js', (source) => {
+        source = source.replace('    // Chat-only native OneBot delivery integration v1.\n', '');
         source = replaceOnce(source,
             "import { attachOnebotDeliveryObserver } from '/opt/qqbot-defaults/qqbot-onebot-log.mjs';\n",
             '', 'log delivery observer import');
@@ -88,6 +92,11 @@ if (!thinkingOnly) {
             '    // Chat-only OneBot log capture after access policy v1.\n    bot.use(createOnebotLogCaptureMiddleware(onebotService));\n',
             '', 'log capture middleware');
     });
+}
+
+if (logOnly) {
+    console.log('Prepared released pre-delivery integration layout with direct-router markers retained.');
+    process.exit(0);
 }
 
 if (!thinkingOnly) {
