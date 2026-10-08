@@ -22,15 +22,19 @@ catch (error) {
 
 const adapterRoot = resolve(process.env.QQBOT_ADAPTER_DIST
     ?? '/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist');
+const sdkRoot = resolve(process.env.QQBOT_SDK_ROOT
+    ?? '/data/profiles/qqbot/node_modules/@tencent-connect/qqbot-nodejs/dist');
 const directModulePath = process.env.QQBOT_ONEBOT_DIRECT_MODULE
     ?? '/opt/qqbot-defaults/qqbot-onebot-direct.mjs';
 const defaultsRoot = process.env.QQBOT_NATIVE_DEFAULTS_ROOT ?? '/opt/qqbot-defaults';
 const { setupMiddlewares } = await import(pathToFileURL(join(adapterRoot, 'gateway/middleware-setup.js')).href);
+const { QQBot } = await import(pathToFileURL(join(sdkRoot, 'QQBot.js')).href);
+const { dispatchEvent } = await import(pathToFileURL(join(sdkRoot, 'protocol/gateway/event-dispatcher.js')).href);
 const { createOnebotDirectRouter } = await import(pathToFileURL(directModulePath).href);
 const { attachOnebotDeliveryObserver } = await import(new URL('./qqbot-onebot-log.mjs', pathToFileURL(directModulePath)).href);
 const { registerOnebotCommandTool } = await import(new URL('./qqbot-onebot.mjs', pathToFileURL(directModulePath)).href);
 const { getMergedGenerationRequests } = await import(new URL('./qqbot-concurrency.mjs', pathToFileURL(directModulePath)).href);
-const { beginOnebotTurn, endOnebotTurn, onebotRequestMetadata, bindOnebotExecution, getBoundOnebotExecution, getBoundOnebotRequest, getOnebotDirectFallback, renderOnebotDirectFallbackMetadata } = await import(new URL('./qqbot-onebot-scope.mjs', pathToFileURL(directModulePath)).href);
+const { beginOnebotTurn, endOnebotTurn, onebotRequestMetadata, bindOnebotExecution, getBoundOnebotExecution, getBoundOnebotRequest, getOnebotDirectFallback, renderOnebotDirectFallbackMetadata, renderCurrentLogSourceDiagnostics } = await import(new URL('./qqbot-onebot-scope.mjs', pathToFileURL(directModulePath)).href);
 
 function deferred() {
     let resolvePromise;
@@ -70,18 +74,18 @@ function makeService(execute) {
     };
 }
 
-function assembleProductionChain({ service, groupAllow, requireMention = false, sender, manager, env = {} } = {}) {
+function assembleProductionChain({ service, groupAllow, requireMention = false, sender, manager, env = {}, logger: testLogger = logger } = {}) {
     const directRouter = createOnebotDirectRouter({
         service,
         appId,
         sender,
         env,
-        logger,
+        logger: testLogger,
     });
     const layers = [];
     const actualManager = manager ?? { questionChannel: { tryAnswer() { return false; } }, async remove() {} };
     setupMiddlewares({ use(middleware) { layers.push(middleware); } },
-        gatewayConfig({ groupAllow, requireMention }), actualManager, logger, sender, directRouter, service);
+        gatewayConfig({ groupAllow, requireMention }), actualManager, testLogger, sender, directRouter, service);
     return { directRouter, layers, manager: actualManager };
 }
 
@@ -185,7 +189,89 @@ test('native fallback reaches model once with original provenance and sanitized 
     assert.equal(answers, 0, 'a pending tool answer cannot swallow trusted fallback diagnostics');
     const inbound = await readFile(join(adapterRoot, 'transport/inbound.js'), 'utf8');
     assert.ok(inbound.includes('const onebotFallbackMetadata = renderOnebotDirectFallbackMetadata(getMergedGenerationRequests(ctx));'));
-    assert.ok(inbound.includes('generationMetadata, onebotMetadata, onebotFallbackMetadata]'));
+});
+
+test('native QQ middleware preserves a current .log capability in the no-quote/no-attachment app-bound snapshot', async (t) => {
+    const sender = { async sendMarkdown() {} };
+    const service = makeService(async () => assert.fail('direct routing is disabled for this capture-path test'));
+    const authLogs = [];
+    const testLogger = { info(value) { authLogs.push(value); }, warn(value) { authLogs.push(value); }, debug(value) { authLogs.push(value); } };
+    const { layers, directRouter } = assembleProductionChain({ service, sender, logger: testLogger, env: { QQBOT_ONEBOT_DIRECT_ENABLED: 'false' } });
+    t.after(() => directRouter.stop());
+    const ctx = makeContext({ messageId: 'native-log-current', content: '.log on', raw: {
+        id: 'native-log-current', group_openid: 'direct-group',
+        author: { member_openid: 'member-direct', member_role: 'owner' },
+        content: `<@!${appId}> .log on`,
+    } });
+    let captured;
+    await runChain(layers, ctx, async (modelContext) => { captured = getMergedGenerationRequests(modelContext); });
+    assert.equal(ctx.message.replyTarget.targetId, 'direct-group');
+    assert.equal(captured.length, 1);
+    assert.equal(captured[0].replyTarget.msgId, 'native-log-current');
+    assert.equal(captured[0].hasQuote, false);
+    assert.equal(captured[0].hasAttachments, false);
+    const agent = {};
+    const scope = beginOnebotTurn(agent, captured, { appId });
+    try {
+        const request = onebotRequestMetadata(scope)[0];
+        assert.equal(request.currentLogCommand, '.log on');
+        assert.deepEqual(request.currentLogSourceStatus,
+            { status: 'ready', reason: 'ready', credentialPresent: true });
+        const diagnostics = renderCurrentLogSourceDiagnostics(captured, { appId, toolAvailable: false });
+        assert.match(diagnostics, /"status":"ready"/u);
+        assert.match(diagnostics, /"onebotToolAvailable":false/u);
+        assert.match(diagnostics, /"directRouteReason":"direct_disabled"/u);
+        assert.ok(authLogs.some((entry) => entry.includes('[qqbot-onebot-auth]')
+            && entry.includes('"stage":"route"') && entry.includes('"reason":"direct_disabled"')));
+        assert.ok(authLogs.every((entry) => !entry.includes('native-log-current') && !entry.includes('member-direct')));
+    }
+    finally { await endOnebotTurn(agent, scope); }
+});
+
+test('pinned SDK dispatchEvent and QQBot inbound handler preserve current .log diagnostics', async (t) => {
+    const authLogs = [];
+    const testLogger = { info(value) { authLogs.push(value); }, warn(value) { authLogs.push(value); }, debug(value) { authLogs.push(value); }, error(value) { authLogs.push(value); } };
+    const sender = { async sendMarkdown() {}, async sendText() {} };
+    const service = makeService(async () => assert.fail('direct routing is disabled for the SDK dispatch probe'));
+    const bot = new QQBot({ appId, appSecret: 'fixture-only-secret', logger: testLogger });
+    const directRouter = createOnebotDirectRouter({ service, appId, sender, env: { QQBOT_ONEBOT_DIRECT_ENABLED: 'false' }, logger: testLogger });
+    t.after(() => directRouter.stop());
+    const manager = { questionChannel: { tryAnswer() { return false; } }, async remove() {} };
+    setupMiddlewares(bot, gatewayConfig({ groupAllow: ['direct-group'] }), manager, testLogger, sender, directRouter, service);
+    let captured;
+    bot.on('message', async (ctx) => { captured = getMergedGenerationRequests(ctx); });
+    const rawEvent = {
+        id: 'sdk-dispatch-log',
+        timestamp: new Date().toISOString(),
+        group_openid: 'direct-group',
+        author: { member_openid: 'member-direct', username: 'SDK fixture', bot: false, member_role: 'owner' },
+        content: `<@!${appId}>.log on`,
+        attachments: [],
+    };
+    const dispatch = dispatchEvent('GROUP_AT_MESSAGE_CREATE', rawEvent, appId, testLogger);
+    assert.equal(dispatch.action, 'message');
+    assert.equal(dispatch.msg.raw, rawEvent);
+    await bot.handleInboundMessage(dispatch.msg);
+    assert.equal(captured.length, 1);
+    assert.deepEqual(captured[0].replyTarget, { scope: 'group', targetId: 'direct-group', msgId: 'sdk-dispatch-log' });
+    assert.equal(captured[0].hasQuote, false);
+    assert.equal(captured[0].hasAttachments, false);
+    const agent = {};
+    const scope = beginOnebotTurn(agent, captured, { appId });
+    try {
+        const request = onebotRequestMetadata(scope)[0];
+        assert.equal(request.currentLogCommand, '.log on');
+        assert.deepEqual(request.currentLogSourceStatus,
+            { status: 'ready', reason: 'ready', credentialPresent: true });
+        const diagnostic = renderCurrentLogSourceDiagnostics(captured, { appId, toolAvailable: false });
+        assert.match(diagnostic, /"directRouteReason":"direct_disabled"/u);
+        assert.match(diagnostic, /"onebotToolAvailable":false/u);
+    }
+    finally { await endOnebotTurn(agent, scope); }
+    const safeRoute = authLogs.find((entry) => entry.includes('[qqbot-onebot-auth]') && entry.includes('"stage":"route"'));
+    assert.match(safeRoute, /"reason":"direct_disabled"/u);
+    assert.equal(authLogs.some((entry) => entry.includes('sdk-dispatch-log') || entry.includes('member-direct')
+        || entry.includes('fixture-only-secret')), false);
 });
 
 test('native unavailable-backend fallback still renders diagnostics without an available tool', async (t) => {

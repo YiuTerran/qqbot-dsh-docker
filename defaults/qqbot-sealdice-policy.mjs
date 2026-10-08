@@ -7,27 +7,114 @@ const COMMANDS = new Set(['r', 'ra', 'rc', 'st', 'pc', 'sc', 'en', 'set', 'ww', 
     'jrrp', 'gugu', 'ping', 'master', 'ban', 'log', ...HIDDEN, ...Object.keys(ALIASES)]);
 const ORDERED = [...COMMANDS].sort((a, b) => b.length - a.length);
 const currentLogSources = new WeakSet();
+const currentLogDiagnostics = new WeakSet();
+const currentLogDiagnosticBindings = new WeakMap();
 const SOURCE_KEY = /^[A-Za-z0-9_-]{1,128}$/u;
+
+const LOG_CAPTURE_REASONS = new Set([
+    'invalid_app_id', 'not_group_message', 'reply_target_not_group', 'invalid_sender_id',
+    'invalid_group_id', 'raw_group_mismatch', 'reply_group_mismatch', 'raw_sender_mismatch',
+    'invalid_message_id', 'message_id_mismatch', 'raw_content_invalid', 'raw_content_unavailable',
+    'not_exact_log_command',
+]);
+
+function isLogCandidate(value, appId) {
+    if (typeof value !== 'string' || value.length > 4000) return false;
+    const stripped = typeof appId === 'string' && /^[0-9]{1,20}$/u.test(appId)
+        ? value.replace(new RegExp(`<@!?${appId}>\\s*`, 'gu'), '')
+        : value;
+    return /(?:^|\s)\.log(?:\s|$)/iu.test(stripped) || /(?:^|\s)\.log(?:\s|$)/iu.test(value);
+}
+
+function captureFailure(message, replyTarget, appId) {
+    const raw = message?.raw;
+    const rawCandidate = isLogCandidate(raw?.content, appId);
+    const sdkCandidate = isLogCandidate(message?.content, appId);
+    if (!rawCandidate && !sdkCandidate) return undefined;
+    if (typeof appId !== 'string' || !/^[0-9]{1,20}$/u.test(appId)) return 'invalid_app_id';
+    if (message?.kind !== 'group') return 'not_group_message';
+    if (replyTarget?.scope !== 'group') return 'reply_target_not_group';
+    if (typeof message.senderId !== 'string' || !SOURCE_KEY.test(message.senderId)) return 'invalid_sender_id';
+    if (typeof message.groupOpenid !== 'string' || !SOURCE_KEY.test(message.groupOpenid)) return 'invalid_group_id';
+    if (raw?.group_openid !== message.groupOpenid) return 'raw_group_mismatch';
+    if (replyTarget.targetId !== message.groupOpenid) return 'reply_group_mismatch';
+    if (raw?.author?.member_openid !== message.senderId) return 'raw_sender_mismatch';
+    if (typeof raw?.id !== 'string' || !raw.id || raw.id.length > 256) return 'invalid_message_id';
+    if (raw.id !== message.messageId || raw.id !== replyTarget.msgId) return 'message_id_mismatch';
+    if (typeof raw.content !== 'string' || raw.content.length > 4000) {
+        return typeof raw.content === 'string' ? 'raw_content_invalid' : 'raw_content_unavailable';
+    }
+    const text = raw.content.replace(new RegExp(`<@!?${appId}>\\s*`, 'gu'), '').trim();
+    const policy = inspectSeaDiceCommand(text, { direct: true });
+    return policy?.allowed && policy.kind === 'log' ? undefined : 'not_exact_log_command';
+}
+
+/** Pure, bounded inspection for diagnostics; it never creates authorization. */
+export function inspectCurrentLogSource(message, replyTarget, appId) {
+    const reason = captureFailure(message, replyTarget, appId);
+    if (reason !== undefined) return Object.freeze({ candidate: true, reason });
+    if (isLogCandidate(message?.raw?.content, appId) || isLogCandidate(message?.content, appId)) {
+        return Object.freeze({ candidate: true, reason: 'ready' });
+    }
+    return undefined;
+}
+
+/** Capture the source capability and its fixed diagnostic before merge. */
+export function captureCurrentLogSourceSnapshot(message, replyTarget, appId) {
+    const inspection = inspectCurrentLogSource(message, replyTarget, appId);
+    if (!inspection) {
+        return Object.freeze({});
+    }
+    const raw = message?.raw;
+    let source;
+    if (inspection.reason === 'ready') {
+        const text = raw.content.replace(new RegExp(`<@!?${appId}>\\s*`, 'gu'), '').trim();
+        const policy = inspectSeaDiceCommand(text, { direct: true });
+        source = Object.freeze({ appId, ownerId: message.senderId, groupId: message.groupOpenid,
+            messageId: raw.id, command: policy.command });
+        currentLogSources.add(source);
+    }
+    const diagnostic = Object.freeze({
+        candidate: true,
+        status: source ? 'ready' : 'capture_failed',
+        reason: source ? 'ready' : inspection.reason,
+        credentialPresent: Boolean(source),
+    });
+    currentLogDiagnostics.add(diagnostic);
+    currentLogDiagnosticBindings.set(diagnostic, Object.freeze({
+        appId,
+        ownerId: message?.senderId,
+        groupId: replyTarget?.targetId,
+        messageId: replyTarget?.msgId,
+        targetId: replyTarget?.targetId,
+        targetScope: replyTarget?.scope,
+    }));
+    return Object.freeze({ source, diagnostic });
+}
+
+/** Read only fixed fields from a diagnostic created by this module. */
+export function readCurrentLogCaptureDiagnostic(value) {
+    if (!value || typeof value !== 'object' || !currentLogDiagnostics.has(value)) return undefined;
+    return Object.freeze({ candidate: true, status: value.status, reason: value.reason,
+        credentialPresent: value.credentialPresent });
+}
+
+/** Validate a captured diagnostic against the exact immutable original snapshot. */
+export function isCurrentLogCaptureDiagnosticBound(value, { appId, ownerId, groupId, messageId, targetId, targetScope } = {}) {
+    if (!value || typeof value !== 'object' || !currentLogDiagnostics.has(value)) return false;
+    const binding = currentLogDiagnosticBindings.get(value);
+    return Boolean(binding && binding.appId === appId && binding.ownerId === ownerId
+        && binding.groupId === groupId && binding.messageId === messageId
+        && binding.targetId === targetId && binding.targetScope === targetScope);
+}
+
+export function logCaptureDiagnosticReason(reason) {
+    return LOG_CAPTURE_REASONS.has(reason) ? reason : 'provenance_lost';
+}
 
 /** Read only the identity-bound current QQ event, never its quote or envelope. */
 export function captureCurrentLogSource(message, replyTarget, appId) {
-    const raw = message?.raw;
-    if (typeof appId !== 'string' || !/^[0-9]{1,20}$/u.test(appId)
-        || message?.kind !== 'group' || replyTarget?.scope !== 'group'
-        || typeof message.senderId !== 'string' || !SOURCE_KEY.test(message.senderId)
-        || typeof message.groupOpenid !== 'string' || !SOURCE_KEY.test(message.groupOpenid)
-        || raw?.group_openid !== message.groupOpenid || replyTarget.targetId !== message.groupOpenid
-        || raw?.author?.member_openid !== message.senderId
-        || typeof raw?.id !== 'string' || !raw.id || raw.id.length > 256
-        || raw.id !== message.messageId || raw.id !== replyTarget.msgId
-        || typeof raw.content !== 'string' || raw.content.length > 4000) return undefined;
-    const text = raw.content.replace(new RegExp(`<@!?${appId}>\\s*`, 'gu'), '').trim();
-    const policy = inspectSeaDiceCommand(text, { direct: true });
-    if (!policy?.allowed || policy.kind !== 'log') return undefined;
-    const source = Object.freeze({ appId, ownerId: message.senderId, groupId: message.groupOpenid,
-        messageId: raw.id, command: policy.command });
-    currentLogSources.add(source);
-    return source;
+    return captureCurrentLogSourceSnapshot(message, replyTarget, appId).source;
 }
 
 /** Only snapshots captured from a current event can authorize its exact command. */

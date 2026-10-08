@@ -21,6 +21,22 @@ async function edit(file, operation) {
 
 if (!logOnly) {
     await edit('transport/inbound.js', (source) => {
+        if (source.includes('// Chat-only OneBot auth diagnostics v1.')) {
+            source = replaceOnce(source,
+                "import { renderCurrentLogSourceDiagnostics } from '/opt/qqbot-defaults/qqbot-onebot-scope.mjs';\n",
+                '', 'current log diagnostics import');
+            source = replaceOnce(source,
+                '        const currentLogDiagnosticMetadata = renderCurrentLogSourceDiagnostics(getMergedGenerationRequests(ctx), { appId: config.appId, logger, toolAvailable: onebotToolAvailable });\n        // Chat-only OneBot auth diagnostics v1.\n',
+                '', 'current log diagnostics binding');
+            source = replaceOnce(source,
+                "const requestBody = [documentBody, deferredImagePromptMetadata, generationMetadata, onebotMetadata, currentLogDiagnosticMetadata, onebotFallbackMetadata].filter(Boolean).join('\\n\\n');",
+                "const requestBody = [documentBody, deferredImagePromptMetadata, generationMetadata, onebotMetadata, onebotFallbackMetadata].filter(Boolean).join('\\n\\n');",
+                'current log diagnostics request body');
+            source = replaceOnce(source,
+                '        const onebotToolAvailable = isOnebotToolAvailable();\n        if (onebotToolAvailable) onebotTurn = beginOnebotTurn(',
+                '        if (isOnebotToolAvailable()) onebotTurn = beginOnebotTurn(',
+                'OneBot availability snapshot');
+        }
         if (!source.includes('// Chat-only OneBot direct fallback v1.')) return source;
         source = replaceOnce(source, "import { renderOnebotDirectFallbackMetadata } from '/opt/qqbot-defaults/qqbot-onebot-scope.mjs';\n", '', 'direct fallback import');
         source = replaceOnce(source, '        // Chat-only OneBot direct fallback v1.\n        const onebotFallbackMetadata = renderOnebotDirectFallbackMetadata(getMergedGenerationRequests(ctx));\n', '', 'direct fallback binding');

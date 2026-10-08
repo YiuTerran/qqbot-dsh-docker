@@ -962,7 +962,8 @@ await patch('transport/inbound.js', '// Chat-only OneBot provenance v1.', (conte
     const onebotBinding = [
         generationBinding,
         `        // Chat-only OneBot provenance v1.`,
-        '        if (isOnebotToolAvailable()) onebotTurn = beginOnebotTurn(',
+        '        const onebotToolAvailable = isOnebotToolAvailable();',
+        '        if (onebotToolAvailable) onebotTurn = beginOnebotTurn(',
         '            chatOnlyAgent,',
         '            getMergedGenerationRequests(ctx),',
         '            { appId: config.appId, signal: ctx.signal, isCurrentRecord, record, documentScope: documentTurn },',
@@ -1000,6 +1001,32 @@ await patch('transport/inbound.js', '// Chat-only OneBot direct fallback v1.', (
     const newBody = "        const requestBody = [documentBody, deferredImagePromptMetadata, generationMetadata, onebotMetadata, onebotFallbackMetadata].filter(Boolean).join('\\n\\n');";
     return replaceOne(content, oldBody,
         '        // Chat-only OneBot direct fallback v1.\n        const onebotFallbackMetadata = renderOnebotDirectFallbackMetadata(getMergedGenerationRequests(ctx));\n' + newBody, file);
+});
+
+await patch('transport/inbound.js', '// Chat-only OneBot auth diagnostics v1.', (content, file) => {
+    const diagnosticImport = `import { renderCurrentLogSourceDiagnostics } from '${onebotScopePolicy}';`;
+    if (!content.includes(diagnosticImport)) content = `${diagnosticImport}\n${content}`;
+    const marker = '// Chat-only OneBot auth diagnostics v1.';
+    const oldAvailabilityGate = '        if (isOnebotToolAvailable()) onebotTurn = beginOnebotTurn(';
+    const availabilityBinding = [
+        '        const onebotToolAvailable = isOnebotToolAvailable();',
+        '        if (onebotToolAvailable) onebotTurn = beginOnebotTurn(',
+    ].join('\n');
+    if (!content.includes('const onebotToolAvailable = isOnebotToolAvailable();')) {
+        if (!content.includes(oldAvailabilityGate)) throw new Error(`Chat-only patch: missing OneBot availability gate in ${file}`);
+        content = replaceOne(content, oldAvailabilityGate, availabilityBinding, file);
+    }
+    const onebotLine = "        const onebotMetadata = onebotTurn ? renderOnebotRequestMetadata(onebotTurn) : '';";
+    const diagnosticLine = '        const currentLogDiagnosticMetadata = renderCurrentLogSourceDiagnostics(getMergedGenerationRequests(ctx), { appId: config.appId, logger, toolAvailable: onebotToolAvailable });';
+    if (!content.includes(marker)) {
+        if (!content.includes(onebotLine)) throw new Error(`Chat-only patch: missing OneBot metadata in ${file}`);
+        content = replaceOne(content, onebotLine, `${onebotLine}\n        ${diagnosticLine}\n        ${marker}`, file);
+    }
+    const oldBody = "const requestBody = [documentBody, deferredImagePromptMetadata, generationMetadata, onebotMetadata, onebotFallbackMetadata].filter(Boolean).join('\\n\\n');";
+    const newBody = "const requestBody = [documentBody, deferredImagePromptMetadata, generationMetadata, onebotMetadata, currentLogDiagnosticMetadata, onebotFallbackMetadata].filter(Boolean).join('\\n\\n');";
+    if (content.includes(oldBody)) content = replaceOne(content, oldBody, newBody, file);
+    else if (!content.includes(newBody)) throw new Error(`Chat-only patch: current log diagnostics are not bound to the model input in ${file}`);
+    return content;
 });
 
 await patch('transport/inbound.js', '// Chat-only lazy quoted image grants v1.', (content, file) => {
@@ -2287,9 +2314,13 @@ assertOnce(finalInbound, 'await finishContentRiskRecovery(documentTurn);', 'inbo
 assertOnce(finalInbound, `import { beginOnebotTurn, endOnebotTurn, renderOnebotRequestMetadata } from '${onebotScopePolicy}';`, 'OneBot scope import');
 assertOnce(finalInbound, `import { setCurrentImages, clearCurrentImages, isOnebotToolAvailable } from '${policy}';`, 'OneBot availability import');
 assertOnce(finalInbound, '// Chat-only OneBot provenance v1.', 'OneBot provenance marker');
-assertOnce(finalInbound, 'if (isOnebotToolAvailable()) onebotTurn = beginOnebotTurn(', 'OneBot availability-gated turn binding');
+assertOnce(finalInbound, 'const onebotToolAvailable = isOnebotToolAvailable();', 'single OneBot tool availability snapshot');
+assertOnce(finalInbound, 'if (onebotToolAvailable) onebotTurn = beginOnebotTurn(', 'OneBot availability-gated turn binding');
 assertOnce(finalInbound, "const onebotMetadata = onebotTurn ? renderOnebotRequestMetadata(onebotTurn) : '';", 'OneBot request metadata');
-assertOnce(finalInbound, "const requestBody = [documentBody, deferredImagePromptMetadata, generationMetadata, onebotMetadata, onebotFallbackMetadata].filter(Boolean).join('\\n\\n');", 'OneBot model input with independent fallback diagnostics');
+assertOnce(finalInbound, `import { renderCurrentLogSourceDiagnostics } from '${onebotScopePolicy}';`, 'current log diagnostic import');
+assertOnce(finalInbound, 'const currentLogDiagnosticMetadata = renderCurrentLogSourceDiagnostics(getMergedGenerationRequests(ctx), { appId: config.appId, logger, toolAvailable: onebotToolAvailable });', 'current log diagnostics with shared availability snapshot');
+assertOnce(finalInbound, '// Chat-only OneBot auth diagnostics v1.', 'current log diagnostics marker');
+assertOnce(finalInbound, "const requestBody = [documentBody, deferredImagePromptMetadata, generationMetadata, onebotMetadata, currentLogDiagnosticMetadata, onebotFallbackMetadata].filter(Boolean).join('\\n\\n');", 'OneBot model input with independent diagnostics');
 assertOnce(finalInbound, `import { renderOnebotDirectFallbackMetadata } from '${onebotScopePolicy}';`, 'OneBot independent fallback import');
 assertOnce(finalInbound, 'const onebotFallbackMetadata = renderOnebotDirectFallbackMetadata(getMergedGenerationRequests(ctx));', 'OneBot fallback even without tool availability');
 const finalQuestionAnswer = await finalText('middleware/question-answer.js');

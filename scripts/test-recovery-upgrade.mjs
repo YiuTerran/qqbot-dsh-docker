@@ -98,12 +98,14 @@ async function assertCurrentPatch(root) {
             "import { beginOnebotTurn, endOnebotTurn, renderOnebotRequestMetadata } from '/opt/qqbot-defaults/qqbot-onebot-scope.mjs';",
             "import { setCurrentImages, clearCurrentImages, isOnebotToolAvailable } from '/opt/qqbot-defaults/qqbot-chat-policy.mjs';",
             '// Chat-only OneBot provenance v1.',
-            'if (isOnebotToolAvailable()) onebotTurn = beginOnebotTurn(',
+            'const onebotToolAvailable = isOnebotToolAvailable();',
+            'if (onebotToolAvailable) onebotTurn = beginOnebotTurn(',
             "const onebotMetadata = onebotTurn ? renderOnebotRequestMetadata(onebotTurn) : '';",
+            "const currentLogDiagnosticMetadata = renderCurrentLogSourceDiagnostics(getMergedGenerationRequests(ctx), { appId: config.appId, logger, toolAvailable: onebotToolAvailable });",
             'const deferredImagePromptMetadata = renderDeferredImagePromptMetadata(getMergedGenerationRequests(ctx));',
             'generationTurn = beginGenerationTurn(',
             'const generationMetadata = renderGenerationRequestMetadata(generationTurn);',
-            "const requestBody = [documentBody, deferredImagePromptMetadata, generationMetadata, onebotMetadata, onebotFallbackMetadata].filter(Boolean).join('\\n\\n');",
+            "const requestBody = [documentBody, deferredImagePromptMetadata, generationMetadata, onebotMetadata, currentLogDiagnosticMetadata, onebotFallbackMetadata].filter(Boolean).join('\\n\\n');",
             '// Chat-only OneBot direct fallback v1.',
             'renderOnebotDirectFallbackMetadata(getMergedGenerationRequests(ctx))',
             'if (generationTurn) await endGenerationTurn(chatOnlyAgent, generationTurn);',
@@ -165,7 +167,7 @@ async function assertCurrentPatch(root) {
     }
     assert.equal(inbound.split("const requestBody = [documentBody, generationMetadata].filter(Boolean).join('\\n\\n');").length - 1, 0,
         'obsolete request body without OneBot provenance is absent');
-    assert.equal(inbound.split("const requestBody = [documentBody, deferredImagePromptMetadata, generationMetadata, onebotMetadata, onebotFallbackMetadata].filter(Boolean).join('\\n\\n');").length - 1, 1,
+    assert.equal(inbound.split("const requestBody = [documentBody, deferredImagePromptMetadata, generationMetadata, onebotMetadata, currentLogDiagnosticMetadata, onebotFallbackMetadata].filter(Boolean).join('\\n\\n');").length - 1, 1,
         'the availability-gated request body includes OneBot provenance exactly once');
     const servicePosition = bootstrap.indexOf('onebotService = registerOnebotCommandTool(ctx, {');
     const senderPosition = bootstrap.indexOf('const sender = {');

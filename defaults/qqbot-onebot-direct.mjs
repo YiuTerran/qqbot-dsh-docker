@@ -2,10 +2,11 @@ import { createHash } from 'node:crypto';
 import {
     abortOnebotTurn,
     attachOnebotDirectFallback,
+    recordCurrentLogSourceRoute,
     beginOnebotTurn,
     onebotRequestMetadata,
 } from './qqbot-onebot-scope.mjs';
-import { captureOnebotGroupRole, captureCurrentLogSource, inspectSeaDiceCommand } from './qqbot-sealdice-policy.mjs';
+import { captureOnebotGroupRole, captureCurrentLogSourceSnapshot, inspectCurrentLogSource, inspectSeaDiceCommand } from './qqbot-sealdice-policy.mjs';
 
 const EVENT_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_EVENT_CACHE = 50_000;
@@ -18,6 +19,30 @@ const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
 const BACKEND_PATTERN = /^[A-Za-z0-9_-]{1,128}$/u;
 const APP_ID_PATTERN = /^[0-9]{1,20}$/u;
 const ROUTER_EVENT_BACKEND = '__router__';
+const CURRENT_LOG_ROUTE_REASONS = new Set([
+    'snapshot_unavailable', 'attachments_present', 'direct_disabled', 'router_stopped',
+    'service_disabled', 'direct_unmatched', 'direct_routed',
+]);
+
+function logCurrentLogRoute(logger, candidate, reason, credentialPresent = false, ctx, appId) {
+    if (!candidate || !CURRENT_LOG_ROUTE_REASONS.has(reason)) return;
+    try {
+        const message = ctx?.message;
+        const target = message?.replyTarget ?? ctx?.replyTarget;
+        recordCurrentLogSourceRoute(ctx, {
+            appId,
+            ownerId: message?.senderId,
+            groupId: target?.targetId ?? message?.groupOpenid,
+            messageId: target?.msgId ?? message?.messageId,
+            targetScope: target?.scope,
+            targetId: target?.targetId,
+        }, reason);
+        const line = `[qqbot-onebot-auth] ${JSON.stringify({ stage: 'route', reason, credentialPresent: credentialPresent === true })}`;
+        if (typeof logger?.info === 'function') logger.info(line);
+        else if (typeof logger?.debug === 'function') logger.debug(line);
+    }
+    catch { /* Diagnostics must never affect request handling. */ }
+}
 
 const SEA_DICE_POLICY = Object.freeze({ family: 'sealdice', match: matchOnebotDirectCommand });
 
@@ -110,9 +135,11 @@ function snapshotMessage(ctx, appId) {
         targetId: target.targetId,
         ...(typeof target.msgId === 'string' && target.msgId.length > 0 && target.msgId.length <= 512 ? { msgId: target.msgId } : {}),
     });
+    const logCapture = captureCurrentLogSourceSnapshot(message, message.replyTarget ?? ctx?.replyTarget, appId);
     return Object.freeze({
         text: message.content,
-        currentLogSource: captureCurrentLogSource(message, message.replyTarget ?? ctx?.replyTarget, appId),
+        ...(logCapture.source ? { currentLogSource: logCapture.source } : {}),
+        ...(logCapture.diagnostic ? { currentLogCaptureDiagnostic: logCapture.diagnostic } : {}),
         originalTextLength: message.content.length,
         hasQuote: Boolean(ctx?.state?.quote || message.refMsgIdx || message.raw?.message_reference || message.raw?.quote),
         groupRole: captureOnebotGroupRole(message, message.replyTarget ?? ctx?.replyTarget) ?? 'unknown',
@@ -454,23 +481,46 @@ export function createOnebotDirectRouter({
 
     async function middleware(ctx, next) {
         const startedAt = Date.now();
+        const currentMessage = ctx?.message;
+        const currentTarget = currentMessage?.replyTarget ?? ctx?.replyTarget;
+        const logCandidate = inspectCurrentLogSource(currentMessage, currentTarget, appId);
         const source = snapshotMessage(ctx, appId);
-        if (!source) return await next?.();
-        if (hasAttachments(source)) return await next?.();
-        if (env.QQBOT_ONEBOT_DIRECT_ENABLED === 'false') return await next?.();
+        const recordRoute = (reason, credentialPresent = Boolean(source?.currentLogSource)) =>
+            logCurrentLogRoute(logger, logCandidate, reason, credentialPresent, ctx, appId);
+        if (!source) {
+            recordRoute('snapshot_unavailable', false);
+            return await next?.();
+        }
+        const credentialPresent = Boolean(source.currentLogSource);
+        if (hasAttachments(source)) {
+            recordRoute('attachments_present', credentialPresent);
+            return await next?.();
+        }
+        if (env.QQBOT_ONEBOT_DIRECT_ENABLED === 'false') {
+            recordRoute('direct_disabled', credentialPresent);
+            return await next?.();
+        }
         if (stopped) {
             const knownDirect = configuredPolicies().some((policy) => {
                 try { return Boolean(policy.match(source.text)); }
                 catch { return false; }
             });
             if (knownDirect) logStage(logger, 'route', 'stopped', startedAt);
+            if (!knownDirect) recordRoute('router_stopped', credentialPresent);
             return knownDirect ? undefined : await next?.();
         }
 
         const serviceState = inspectDirectService(service, env);
-        if (serviceState.disabled) return await next?.();
+        if (serviceState.disabled) {
+            recordRoute('service_disabled', credentialPresent);
+            return await next?.();
+        }
         const backendChoice = matchConfiguredBackend(serviceState, source.text, policies, logger, startedAt);
-        if (!backendChoice) return await next?.();
+        if (!backendChoice) {
+            recordRoute('direct_unmatched', credentialPresent);
+            return await next?.();
+        }
+        recordRoute('direct_routed', credentialPresent);
         const backend = backendChoice.backend;
         const match = backendChoice.match ?? backendChoice.matches?.[0]?.match;
 
@@ -534,6 +584,7 @@ export function createOnebotDirectRouter({
             replyTarget: source.replyTarget,
             text: source.text,
             currentLogSource: source.currentLogSource,
+            currentLogCaptureDiagnostic: source.currentLogCaptureDiagnostic,
         }], {
             appId,
             direct: true,

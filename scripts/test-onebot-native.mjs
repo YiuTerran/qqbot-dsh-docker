@@ -282,8 +282,11 @@ test('disabled registration makes no requests and produces no request metadata',
     assert.equal(requests, 0);
     assert.equal(registrations, 0);
     const inboundPatch = await readFile(patcherSource, 'utf8');
-    assert.match(inboundPatch, /if \(isOnebotToolAvailable\(\)\) onebotTurn = beginOnebotTurn\(/u);
+    assert.match(inboundPatch, /const onebotToolAvailable = isOnebotToolAvailable\(\);/u);
+    assert.match(inboundPatch, /if \(onebotToolAvailable\) onebotTurn = beginOnebotTurn\(/u);
     assert.match(inboundPatch, /const onebotMetadata = onebotTurn \? renderOnebotRequestMetadata\(onebotTurn\) : '';/u);
+    assert.match(inboundPatch, /renderCurrentLogSourceDiagnostics\(getMergedGenerationRequests\(ctx\), \{ appId: config\.appId, logger, toolAvailable: onebotToolAvailable \}\)/u);
+    assert.match(inboundPatch, /generationMetadata, onebotMetadata, currentLogDiagnosticMetadata, onebotFallbackMetadata/u);
 });
 
 test('tool parser accepts bounded native commands and rejects generic/admin input', () => {

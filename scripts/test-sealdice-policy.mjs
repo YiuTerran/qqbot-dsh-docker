@@ -3,10 +3,10 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 const root = process.env.QQBOT_ONEBOT_MODULE_ROOT ? pathToFileURL(`${process.env.QQBOT_ONEBOT_MODULE_ROOT}/`) : new URL('../defaults/', import.meta.url);
-const { captureOnebotGroupRole, inspectSeaDiceCommand, readOnebotMasterUsers } = await import(new URL('qqbot-sealdice-policy.mjs', root));
+const { captureOnebotGroupRole, captureCurrentLogSourceSnapshot, inspectCurrentLogSource, inspectSeaDiceCommand, readOnebotMasterUsers } = await import(new URL('qqbot-sealdice-policy.mjs', root));
 const { validateOnebotCommand, registerOnebotCommandTool, readOnebotConfig } = await import(new URL('qqbot-onebot.mjs', root));
 const { matchOnebotDirectCommand } = await import(new URL('qqbot-onebot-direct.mjs', root));
-const { beginOnebotTurn, onebotRequestMetadata, renderOnebotRequestMetadata, endOnebotTurn } = await import(new URL('qqbot-onebot-scope.mjs', root));
+const { beginOnebotTurn, onebotRequestMetadata, renderOnebotRequestMetadata, endOnebotTurn, renderCurrentLogSourceDiagnostics } = await import(new URL('qqbot-onebot-scope.mjs', root));
 
 const fixture = process.env.QQBOT_SEALDICE_POLICY_FIXTURE ?? new URL('../third_party/sealdice-core/dice/testdata/onebot-bridge-policy.json', import.meta.url);
 const { allowed, denied } = JSON.parse(readFileSync(fixture, 'utf8'));
@@ -51,6 +51,107 @@ test('shared SeaDice policy accepts only exact group log commands and protects l
         '解释 .log export']) {
         assert.equal(validateOnebotCommand(command), false, command);
     }
+});
+
+test('current log inspection reports each fixed capture predicate without exposing source data', () => {
+    const appId = '123456789';
+    const makeMessage = () => ({
+        kind: 'group', senderId: 'member-openid', groupOpenid: 'group-openid', messageId: 'msg-1', content: '.log on',
+        raw: { id: 'msg-1', group_openid: 'group-openid', author: { member_openid: 'member-openid' }, content: `.log on secret-sentinel` },
+    });
+    const cases = [
+        ['invalid_app_id', (message, target) => ({ message, target, appId: 'bad' })],
+        ['not_group_message', (message, target) => { message.kind = 'c2c'; return { message, target, appId }; }],
+        ['reply_target_not_group', (message) => ({ message, target: { scope: 'c2c', targetId: 'group-openid', msgId: 'msg-1' }, appId })],
+        ['invalid_sender_id', (message, target) => { message.senderId = '!'; return { message, target, appId }; }],
+        ['invalid_group_id', (message, target) => { message.groupOpenid = '!'; return { message, target, appId }; }],
+        ['raw_group_mismatch', (message, target) => { message.raw.group_openid = 'other'; return { message, target, appId }; }],
+        ['reply_group_mismatch', (message) => ({ message, target: { scope: 'group', targetId: 'other', msgId: 'msg-1' }, appId })],
+        ['raw_sender_mismatch', (message, target) => { message.raw.author.member_openid = 'other'; return { message, target, appId }; }],
+        ['invalid_message_id', (message, target) => { message.raw.id = ''; return { message, target, appId }; }],
+        ['message_id_mismatch', (message, target) => { message.raw.id = 'other'; return { message, target, appId }; }],
+        ['raw_content_invalid', (message, target) => { message.raw.content = 'x'.repeat(4001); return { message, target, appId }; }],
+        ['raw_content_unavailable', (message, target) => { delete message.raw.content; return { message, target, appId }; }],
+        ['not_exact_log_command', (message, target) => { message.raw.content = '.log new two words'; return { message, target, appId }; }],
+    ];
+    const target = { scope: 'group', targetId: 'group-openid', msgId: 'msg-1' };
+    for (const [expected, prepare] of cases) {
+        const input = prepare(makeMessage(), target);
+        assert.deepEqual(inspectCurrentLogSource(input.message, input.target, input.appId), { candidate: true, reason: expected }, expected);
+        const captured = captureCurrentLogSourceSnapshot(input.message, input.target, input.appId);
+        assert.equal(captured.source, undefined, expected);
+        assert.equal(captured.diagnostic.status, 'capture_failed', expected);
+        assert.equal(captured.diagnostic.reason, expected, expected);
+    }
+    const ready = makeMessage();
+    ready.raw.content = `<@!${appId}> .log on`;
+    const captured = captureCurrentLogSourceSnapshot(ready, target, appId);
+    assert.equal(captured.source.command, '.log on');
+    assert.equal(captured.diagnostic.status, 'ready');
+    const compactMention = makeMessage();
+    compactMention.raw.content = `<@!${appId}>.log on`;
+    compactMention.content = compactMention.raw.content;
+    const compactCapture = captureCurrentLogSourceSnapshot(compactMention, target, appId);
+    assert.equal(compactCapture.source.command, '.log on', 'pre-sanitizer mention removal remains compatible without whitespace');
+    for (const content of ['@nickname .log on', '请帮我 .log on', `<@!999> .log on`]) {
+        const candidate = makeMessage();
+        candidate.raw.content = content;
+        candidate.content = content;
+        const inspected = inspectCurrentLogSource(candidate, target, appId);
+        assert.deepEqual(inspected, { candidate: true, reason: 'not_exact_log_command' });
+        assert.equal(captureCurrentLogSourceSnapshot(candidate, target, appId).source, undefined,
+            'diagnostic candidate detection must never authorize a command');
+    }
+    assert.equal(inspectCurrentLogSource({ content: 'ordinary chat' }, target, appId), undefined);
+    assert.equal(JSON.stringify(captured.diagnostic).includes('secret-sentinel'), false);
+});
+
+test('current log diagnostics are branded, identity bound, safe to log, and never authorize', () => {
+    const appId = '123456789';
+    const target = { scope: 'group', targetId: 'group-openid', msgId: 'msg-1' };
+    const message = {
+        kind: 'group', senderId: 'member-openid', groupOpenid: 'group-openid', messageId: 'msg-1', content: '.log on SECRET_BODY extra',
+        raw: { id: 'msg-1', group_openid: 'group-openid', author: { member_openid: 'member-openid' }, content: '.log on SECRET_BODY extra' },
+    };
+    const captured = captureCurrentLogSourceSnapshot(message, target, appId);
+    assert.equal(captured.source, undefined);
+    const original = { ownerId: 'member-openid', replyTarget: target, text: '.log on SECRET_BODY extra',
+        currentLogCaptureDiagnostic: captured.diagnostic };
+    const logs = [];
+    const rendered = renderCurrentLogSourceDiagnostics([original], { appId, toolAvailable: false,
+        logger: { info(value) { logs.push(value); } } });
+    assert.match(rendered, /"status":"capture_failed"/u);
+    assert.match(rendered, /"onebotToolAvailable":false/u);
+    for (const forbidden of ['SECRET_BODY', 'member-openid', 'group-openid', 'msg-1']) {
+        assert.equal(rendered.includes(forbidden), false, forbidden);
+        assert.equal(logs.join('\n').includes(forbidden), false, forbidden);
+    }
+    assert.deepEqual(JSON.parse(logs[0].slice('[qqbot-onebot-auth] '.length)), {
+        stage: 'bound', reason: 'not_exact_log_command', credentialPresent: false, toolAvailable: false, originalCount: 1,
+    });
+
+    const forged = { ...original, currentLogCaptureDiagnostic: { candidate: true, status: 'ready',
+        reason: 'ready', credentialPresent: true }, currentLogSourceStatus: { status: 'ready', credentialPresent: true } };
+    const lost = renderCurrentLogSourceDiagnostics([forged], { appId, toolAvailable: true });
+    assert.match(lost, /"status":"provenance_lost"/u);
+    assert.doesNotMatch(lost, /"status":"ready"/u);
+    for (const changed of [
+        { ownerId: 'other-owner' },
+        { replyTarget: { ...target, targetId: 'other-group' } },
+        { replyTarget: { ...target, msgId: 'other-message' } },
+        { replyTarget: { ...target, scope: 'c2c' } },
+    ]) {
+        const transplanted = renderCurrentLogSourceDiagnostics([{ ...original, ...changed }], { appId, toolAvailable: true });
+        assert.match(transplanted, /"status":"provenance_lost"/u);
+    }
+
+    const readyMessage = { ...message, content: '.log on', raw: { ...message.raw, content: '.log on' } };
+    const ready = captureCurrentLogSourceSnapshot(readyMessage, target, appId);
+    const withoutDiagnostic = { ownerId: 'member-openid', replyTarget: target, text: '.log on', currentLogSource: ready.source };
+    const readyMetadata = renderCurrentLogSourceDiagnostics([withoutDiagnostic], { appId, toolAvailable: false });
+    assert.match(readyMetadata, /"status":"ready"/u);
+    assert.match(readyMetadata, /"credentialPresent":true/u);
+    assert.match(readyMetadata, /"onebotToolAvailable":false/u);
 });
 
 test('group role capture requires an exact SDK role bound to this sender and group', () => {

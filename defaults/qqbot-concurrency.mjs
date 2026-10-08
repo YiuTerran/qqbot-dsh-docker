@@ -1,6 +1,6 @@
 import { isRecentImageSnapshot } from './qqbot-pending-images.mjs';
-import { getOnebotDirectFallback } from './qqbot-onebot-scope.mjs';
-import { captureOnebotGroupRole, captureCurrentLogSource } from './qqbot-sealdice-policy.mjs';
+import { bindCurrentLogRouteSnapshot, getOnebotDirectFallback } from './qqbot-onebot-scope.mjs';
+import { captureOnebotGroupRole, captureCurrentLogSourceSnapshot } from './qqbot-sealdice-policy.mjs';
 import { transferOnebotLogHolds } from './qqbot-onebot-log.mjs';
 
 const DEFAULT_MAX_QUEUE = 20;
@@ -30,13 +30,25 @@ function snapshotGenerationRequest(ctx) {
     const message = ctx?.message;
     const replyTarget = snapshotReplyTarget(message?.replyTarget ?? ctx?.replyTarget);
     if (!message || !replyTarget) return undefined;
+    const logCapture = captureCurrentLogSourceSnapshot(message, message.replyTarget ?? ctx?.replyTarget, ctx?.bot?.appId);
+    if (logCapture.diagnostic) {
+        try {
+            const diagnostic = { stage: 'capture', reason: logCapture.diagnostic.reason,
+                credentialPresent: logCapture.diagnostic.credentialPresent };
+            const line = `[qqbot-onebot-auth] ${JSON.stringify(diagnostic)}`;
+            if (typeof ctx?.log?.info === 'function') ctx.log.info(line);
+            else if (typeof ctx?.log?.debug === 'function') ctx.log.debug(line);
+        }
+        catch { /* Diagnostics must never affect request handling. */ }
+    }
     const recentImageSnapshot = ctx?.state?.qqbotRecentImages;
     const directFallback = getOnebotDirectFallback(ctx);
-    return Object.freeze({
+    const snapshot = Object.freeze({
         ownerId: message.senderId,
         groupRole: captureOnebotGroupRole(message, message.replyTarget ?? ctx?.replyTarget) ?? 'unknown',
         replyTarget,
-        currentLogSource: captureCurrentLogSource(message, message.replyTarget ?? ctx?.replyTarget, ctx?.bot?.appId),
+        ...(logCapture.source ? { currentLogSource: logCapture.source } : {}),
+        ...(logCapture.diagnostic ? { currentLogCaptureDiagnostic: logCapture.diagnostic } : {}),
         text: typeof message.content === 'string' ? message.content.slice(0, 4000) : '',
         originalTextLength: typeof message.content === 'string' ? message.content.length : 0,
         hasAttachments: (Array.isArray(message.attachments) && message.attachments.length > 0)
@@ -49,6 +61,15 @@ function snapshotGenerationRequest(ctx) {
             .map(snapshotGenerationAttachment).filter(Boolean)),
         ...(isRecentImageSnapshot(recentImageSnapshot) ? { recentImageSnapshot } : {}),
     });
+    bindCurrentLogRouteSnapshot(snapshot, ctx, {
+        appId: ctx?.bot?.appId,
+        ownerId: message.senderId,
+        groupId: replyTarget.targetId,
+        messageId: replyTarget.msgId,
+        targetScope: replyTarget.scope,
+        targetId: replyTarget.targetId,
+    });
+    return snapshot;
 }
 
 function captureGenerationRequests(entries, mergedCtx) {
