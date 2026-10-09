@@ -44,6 +44,12 @@ model tools. Bot outputs are observed only after the final QQ ACK; unknown
 delivery is a gap. A virtual command and its backend reply are not independently
 logged at the native execution hook.
 
+MD and TXT exports omit structured `kind: gap` diagnostic rows, including
+restart and queue markers. These rows remain stored and counted by `.log stat`.
+They are also excluded from the export's speaker/alias index so system metadata
+cannot alter names or bot identity. Actual message text is never filtered by
+gap-related words or speaker names.
+
 ## Optional log display metadata
 
 `log-display-v1` is a display-only extension. `/internal/backends` advertises

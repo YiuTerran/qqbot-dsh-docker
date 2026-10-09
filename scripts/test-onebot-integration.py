@@ -429,7 +429,10 @@ def main():
         md = claim_artifact(exported)
         assert "&lt;script&gt;" in md and "<script>" not in md, "Markdown did not escape message HTML"
         assert "style=" in md and md.count("唯一正文") == 1 and "公开机器人回复" in md
-        assert "另一个群的内容" not in md and "缺口" in md
+        assert "另一个群的内容" not in md
+        assert "SeaDice记录系统" not in md and "采集中断，部分记录未确认。" not in md and "[log gap:" not in md, "system gap diagnostics leaked into Markdown"
+        gap_stat = text(log_command(".log stat story"))
+        assert re.search(r"已记录缺口：([1-9][0-9]*)", gap_stat), "hidden export markers were removed from diagnostic tracking"
         assert "群组虚拟ID" not in md and not re.search(r"<code>8[0-9]{15}</code>", md)
         assert "@事件昵称" in md and "@SDK昵称" in md and "@机器人" in md
         assert "@测试玩家" in md and "@成员1" in md and "@成员2" in md
@@ -448,6 +451,7 @@ def main():
         assert payload in txt and "暂停后不应记录" not in txt
         assert display_event["text"] in txt and "旧事件 <@fixtureLogOwner> <@legacyUnknown>" in txt
         assert multiline_reply in txt, "Markdown compatibility changed original TXT body"
+        assert "SeaDice记录系统" not in txt and "采集中断，部分记录未确认。" not in txt and "[log gap:" not in txt, "system gap diagnostics leaked into TXT"
         assert "群组虚拟ID" not in txt and "virtual:" not in txt
         assert log_command(".log on story", role="admin")["status"] == "ok"
         docker("restart", "-t", "30", sea)
