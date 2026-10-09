@@ -510,12 +510,25 @@ await edit('transport/outbound.js', (source) => {
         source = replaceOnce(source, `enqueueMergeBatchSend(originRecord, () => ${send})`,
             `trackMergeBatchSend(originRecord, ${send})`, 'generation outbound send ' + send);
     }
-    return replaceOnce(source, [
+    const canonicalGate = [
         '        // Chat-only generation outbound v1.',
         "        if (call.name === 'qqbot_generate_image' || call.name === 'qqbot_create_markdown') return;",
         '        if (!this.config.showToolResults)',
         '            return;',
-    ].join('\n'), '        if (!this.config.showToolResults)\n            return;', 'generation tool-result gate');
+    ].join('\n');
+    const assetGate = [
+        '        // Chat-only generation outbound v1.',
+        "        if (call.name === 'qqbot_generate_image' || call.name === 'qqbot_create_markdown') return;",
+        '        // Chat-only original asset outbound v1.',
+        "        if (call.name === 'qqbot_send_asset_image') return;",
+        '        if (!this.config.showToolResults)',
+        '            return;',
+    ].join('\n');
+    if (source.includes('// Chat-only original asset outbound v1.')) {
+        source = replaceOnce(source, assetGate, '        if (!this.config.showToolResults)\n            return;', 'original asset tool-result gate');
+        return source;
+    }
+    return replaceOnce(source, canonicalGate, '        if (!this.config.showToolResults)\n            return;', 'generation tool-result gate');
 });
 
 await edit('middleware/attachment.js', (source) => {

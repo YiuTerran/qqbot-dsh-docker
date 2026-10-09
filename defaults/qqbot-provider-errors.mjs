@@ -12,12 +12,13 @@ const STABLE_CATEGORIES = new Map([
 const LOG_TOOLS = new Set([
     'qqbot_describe_image', 'qqbot_read_document', 'qqbot_generate_image',
     'qqbot_create_markdown', 'qqbot_onebot_command', 'web_fetch', 'web_search',
+    'qqbot_send_asset_image',
 ]);
 const LOG_STAGES = new Set([
     'execute', 'execute-result', 'execute-throw', 'quota-acquire', 'quota-reserve',
     'download', 'normalize-image', 'provider', 'qq-delivery', 'markdown-delivery',
     'registration', 'probe', 'call', 'authorize', 'private-delivery', 'send-notice', 'send-image',
-    'send-markdown',
+    'send-markdown', 'asset-read', 'asset-delivery',
 ]);
 const LOG_CODES = new Set([
     ...STABLE_CATEGORIES.keys(),
@@ -41,6 +42,7 @@ const LOG_RESULT_REASONS = new Map([
     ['failed', 'generic'], ['unknown', 'generic'], ['busy', 'busy'], ['state', 'config'],
     ['quota', 'quota'], ['too-large', 'too-large'], ['image-type', 'invalid'],
     ['expired', 'generic'], ['invalid', 'invalid'],
+    ['timeout', 'timeout'],
 ]);
 const NETWORK_CODES = new Set([
     'ENOTFOUND', 'EAI_AGAIN', 'ECONNRESET', 'ECONNREFUSED', 'EHOSTUNREACH',

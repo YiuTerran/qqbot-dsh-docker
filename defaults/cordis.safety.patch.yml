@@ -146,6 +146,22 @@
       validated public HTML or plain text without running scripts or saving files.
       Use qqbot_read_document only with an opaque attachmentId for a current or
       explicitly quoted plain-text attachment; never supply a path or URL.
+      When the user asks to see or receive an existing Dayu appearance image,
+      call qqbot_send_asset_image with the current requestId and the exact
+      `image` path: use `/opt/qqbot-assets/dayu/portrait.png` for a plain
+      portrait/original-image request, and
+      `/opt/qqbot-assets/dayu/character-standard.png` when they ask for the
+      full setting or six-view sheet. This sends the original PNG bytes and
+      filename as a QQ attachment without calling the image API or requiring
+      an image-generation key; it remains allowed in document-protection mode
+      because it sends only this fixed public asset, never document contents.
+      Its success notice must credit YunYueSama, identify the pinned source
+      commit and link the complete LICENSE so the user can read the terms.
+      Do not watermark or generate another image just to add attribution.
+      This dedicated sender is the only local-file sending exception. Do not
+      generate a billed redraw when an existing source image satisfies the
+      request. Use qqbot_generate_image only for an explicitly requested new
+      pose, scene or artwork, or an authorized edit, subject to its rules below.
       Call qqbot_generate_image only when the user explicitly asks to create an
       image or edit one image attached to, explicitly quoted in this turn, or
       explicitly selected from recentImages, or create the bot's own portrait
@@ -277,6 +293,18 @@
       in this turn, or explicitly selected from recentImages; a request to
       create the bot's own portrait may use the bundled Dayu portrait
       reference. Use only the current opaque requestId supplied for this turn.
+      For a request to see or receive an existing Dayu image, call
+      qqbot_send_asset_image with the current requestId and its exact bundled
+      `image` path: `portrait.png` for a plain portrait/original request, or
+      `character-standard.png` for the full setting/six-view sheet. It sends
+      the original PNG file and does not call the image API or require its key;
+      this fixed public asset may be sent in document-protection mode without
+      sending document content. Do not create a billed redraw if the original
+      asset satisfies the request. New poses/scenes/artwork and authorized
+      edits use qqbot_generate_image when available. This is not permission to
+      read or send arbitrary files. The success notice must credit YunYueSama,
+      identify the pinned source commit and link the full LICENSE; do not add
+      a watermark or create a second image solely for attribution.
       For QQ images, use the matching imageAttachmentId from images or
       recentImages; never pass imageRef to the generation tool;
       never invent IDs or pass paths or URLs for QQ images. The sole local

@@ -1435,6 +1435,24 @@ await patch('transport/outbound.js', '// Chat-only generation outbound v1.', (co
     return content;
 });
 
+await patch('transport/outbound.js', '// Chat-only original asset outbound v1.', (content, file) => {
+    const oldGate = [
+        '        // Chat-only generation outbound v1.',
+        "        if (call.name === 'qqbot_generate_image' || call.name === 'qqbot_create_markdown') return;",
+        '        if (!this.config.showToolResults)',
+        '            return;',
+    ].join('\n');
+    const newGate = [
+        '        // Chat-only generation outbound v1.',
+        "        if (call.name === 'qqbot_generate_image' || call.name === 'qqbot_create_markdown') return;",
+        '        // Chat-only original asset outbound v1.',
+        "        if (call.name === 'qqbot_send_asset_image') return;",
+        '        if (!this.config.showToolResults)',
+        '            return;',
+    ].join('\n');
+    return replaceOne(content, oldGate, newGate, file);
+});
+
 await patch('transport/outbound.js', '// Chat-only deferred tool failures v1.', (content, file) => {
     content = replaceOne(content,
         '    toolCalls = new Map();',
@@ -2527,6 +2545,8 @@ const turnFailureTracking = [
 if (!turnFailureTracking.some((value) => finalOutbound.split(value).length === 2))
     throw new Error('Chat-only patch: safe turn failure notice is missing or duplicated');
 assertOnce(finalOutbound, "block?.type === 'tool-result' && block.isError === true", 'block-only tool failure check');
+assertOnce(finalOutbound, '// Chat-only original asset outbound v1.', 'original asset tool-result marker');
+assertOnce(finalOutbound, "if (call.name === 'qqbot_send_asset_image') return;", 'original asset tool-result suppression');
 assertOnce(finalOutbound, 'this.logger.error(`im-qqbot: ${tag} failed to send reply`);', 'safe QQ send error log');
 if (finalOutbound.includes('${failure.code}') || finalOutbound.includes('${failure.message}')
     || finalOutbound.includes('event.error === undefined && !this.config.showToolResults')) {

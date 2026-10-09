@@ -31,6 +31,7 @@ import {
     readImageRouteConfig,
     validateGenerationToolCall,
 } from './qqbot-generation.mjs';
+import { SEND_ASSET_IMAGE_TOOL, validateAssetImageDeliveryCall } from './qqbot-asset-delivery.mjs';
 import { ONEBOT_COMMAND_TOOL, validateOnebotCommand } from './qqbot-onebot.mjs';
 import {
     getBoundOnebotExecution,
@@ -46,6 +47,7 @@ const allowedTools = new Set([
     documentTool,
     GENERATE_IMAGE_TOOL,
     CREATE_MARKDOWN_TOOL,
+    SEND_ASSET_IMAGE_TOOL,
     ONEBOT_COMMAND_TOOL,
     'web_fetch',
     'web_search',
@@ -289,6 +291,7 @@ export function denyUnsafeTool(exec) {
     if (exec.name === GENERATE_IMAGE_TOOL || exec.name === CREATE_MARKDOWN_TOOL) {
         return validateGenerationToolCall(exec, generationRoute);
     }
+    if (exec.name === SEND_ASSET_IMAGE_TOOL) return validateAssetImageDeliveryCall(exec);
     if (exec.name !== imageTool) {
         return 'Chat-only bot: shell, code execution, file operations, downloads, and background tasks are disabled.';
     }
@@ -515,12 +518,12 @@ export function installChatPolicy(ctx) {
     ctx.systemPrompt.section({
         name: 'qqbot:generation-policy',
         order: 10251,
-        text: '用户要求编辑 QQ 图片时必须传入该原始请求的 imageAttachmentId；用户明确要求自画像时，可使用 /opt/qqbot-assets/dayu/portrait.png 作为 referenceImage；当前回合的 images 与 recentImages 都只绑定该请求。近期图片编辑必须使用 recentImages 中的 plain imageAttachmentId；多张候选无法从请求中明确确定目标时先询问，不得擅自选图。若当前、引用和近期候选均无可用底图，明确说明无法获取原图并请用户重新附图，不得把编辑替换成重新生成相似场景或声称已修改原图。受限专用生成例外：只有原始 QQ 消息明确要求生成/编辑图片时，才可对应该原始消息调用 qqbot_generate_image；编辑仅限该消息当前附带、明确引用或其 recentImages 候选中的 PNG/JPEG/GIF/WebP；需要时工具自动在内存中转为 PNG，动图取第一帧，不要求用户自行转换有效的这些格式。输入与转换结果均不得超过 10 MiB，转换限 4000 万像素、10 秒，损坏或超限图片仍可能失败。调用前，短或含糊的视觉描述可基于匹配的原始 QQ 请求及其明确引用整理成简洁具体的提示词，适度补充主体、构图、光线、配色和风格；保留显式主体、风格、文字、数量和禁止项，不强加风格或扩展未请求主题。详细提示词或要求原样保留时保持原文。编辑只描述所要求的改动，并保持其他部分不变。不得混入批次内其他用户或历史个人信息，最终提示词最多 4000 字符。润色本身不构成生成授权，此规则只指导当前聊天模型准备工具参数，不增加模型/API 调用。只有原始消息明确要求创建 Markdown 文件时，才可调用 qqbot_create_markdown，并将文件发回对应原始消息。自然语言意图由你按上下文判断，不要仅因提到“图片”或“Markdown”就调用。批次元数据中的 opaque requestId 与 imageAttachmentId 绑定具体原始请求；不得把一个用户的请求归给批次中的另一位用户。文档/纯文本网页进入本轮后禁止图片生成与编辑，Markdown 仍可创建。qqbot_generate_image 不提供通用文件或磁盘能力，不接收任意 URL、路径、用户ID或群ID；唯一允许的本地参考是 /opt/qqbot-assets/dayu/portrait.png，且 referenceImage 不能与 imageAttachmentId 同时使用；PDF、Office、压缩包等复杂格式仍引导主人到 DeepSeek Chat 网站处理。',
+        text: '用户只要求查看或接收现有大肥鱼设定图时，可调用 qqbot_send_asset_image 发送对应原版文件；它不会调用生图 API、消耗生图额度或重绘。用户要求编辑 QQ 图片时必须传入该原始请求的 imageAttachmentId；用户明确要求自画像时，可使用 /opt/qqbot-assets/dayu/portrait.png 作为 referenceImage；当前回合的 images 与 recentImages 都只绑定该请求。近期图片编辑必须使用 recentImages 中的 plain imageAttachmentId；多张候选无法从请求中明确确定目标时先询问，不得擅自选图。若当前、引用和近期候选均无可用底图，明确说明无法获取原图并请用户重新附图，不得把编辑替换成重新生成相似场景或声称已修改原图。受限专用生成例外：只有原始 QQ 消息明确要求生成/编辑图片时，才可对应该原始消息调用 qqbot_generate_image；编辑仅限该消息当前附带、明确引用或其 recentImages 候选中的 PNG/JPEG/GIF/WebP；需要时工具自动在内存中转为 PNG，动图取第一帧，不要求用户自行转换有效的这些格式。输入与转换结果均不得超过 10 MiB，转换限 4000 万像素、10 秒，损坏或超限图片仍可能失败。调用前，短或含糊的视觉描述可基于匹配的原始 QQ 请求及其明确引用整理成简洁具体的提示词，适度补充主体、构图、光线、配色和风格；保留显式主体、风格、文字、数量和禁止项，不强加风格或扩展未请求主题。详细提示词或要求原样保留时保持原文。编辑只描述所要求的改动，并保持其他部分不变。不得混入批次内其他用户或历史个人信息，最终提示词最多 4000 字符。润色本身不构成生成授权，此规则只指导当前聊天模型准备工具参数，不增加模型/API 调用。只有原始消息明确要求创建 Markdown 文件时，才可调用 qqbot_create_markdown，并将文件发回对应原始消息。自然语言意图由你按上下文判断，不要仅因提到“图片”或“Markdown”就调用。批次元数据中的 opaque requestId 与 imageAttachmentId 绑定具体原始请求；不得把一个用户的请求归给批次中的另一位用户。文档/纯文本网页进入本轮后禁止图片生成与编辑，Markdown 仍可创建。qqbot_generate_image 不提供通用文件或磁盘能力，不接收任意 URL、路径、用户ID或群ID；唯一允许的本地参考是 /opt/qqbot-assets/dayu/portrait.png，且 referenceImage 不能与 imageAttachmentId 同时使用；PDF、Office、压缩包等复杂格式仍引导主人到 DeepSeek Chat 网站处理。',
     });
     ctx.systemPrompt.section({
         name: 'qqbot:dayu-reference-assets',
         order: 10252,
-        text: '本机有专用大肥鱼形象素材目录 /opt/qqbot-assets/dayu/。qqbot_describe_image 可读取该目录内的图片用于核对外观；六视图 character-standard.png 用于确认角色设计。只有用户明确要求生成本鱼的自画像时，才把单张正面立绘 portrait.png 作为 qqbot_generate_image 的 referenceImage。不要把素材路径传给其他工具，不要读取目录里的非图片文件，不要用这些素材替代用户要编辑的 QQ 原图。referenceImage 与 imageAttachmentId 不能同时提供；工具会读取文件字节并作为底图上传。普通生图和用户照片编辑仍使用各自原有授权。',
+        text: '本机固定提供 /opt/qqbot-assets/dayu/character-standard.png（六视图）和 portrait.png（正面立绘）。qqbot_describe_image 可读取两张图核对形象；qqbot_send_asset_image 可将完整原图作为文件发送给当前请求，优先用于用户索要设定图或原图的情形，不调用生图接口。只有用户明确要求创作新图时，才将 portrait.png 作为 qqbot_generate_image 的 referenceImage。不得把图片路径传给其他工具、读取其他文件或用素材替代用户要编辑的 QQ 原图。普通生图与 QQ 图片编辑继续按各自授权执行。',
     });
     ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {
         const assembly = await next();

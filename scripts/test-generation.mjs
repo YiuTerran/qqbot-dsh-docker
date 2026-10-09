@@ -101,7 +101,11 @@ async function nativeGenerationRuntime(t, options) {
         return validateGenerationToolCall(exec, options.route);
     });
     ctx.on('tools/execute', (exec, next) => runInDocumentExecution(exec, next));
-    const registration = registerGenerationTools(ctx, options);
+    const sender = Object.assign(Object.create(options.sender), {
+        sendAssetImageFile: options.sender.sendAssetImageFile
+            ?? (async () => ({ sent: false, reason: 'failed' })),
+    });
+    const registration = registerGenerationTools(ctx, { ...options, sender });
     return { ctx, registration };
 }
 
@@ -124,6 +128,7 @@ function assertRenderedImageReceipt(output) {
 function makeSdkHarness({
     tokenManager = { async getAccessToken() { return 'fixture-access-token'; } },
     fetchImpl,
+    sdk,
     limit = true,
     afterUpload,
     ordinaryQueue,
@@ -198,7 +203,7 @@ function makeSdkHarness({
     const sender = createGenerationSender({
         bot: { tokenManager },
         replyLimiter,
-        sdk: { MediaApi, MessageApi },
+        sdk: sdk ?? { MediaApi, MessageApi },
         credentials: { appId: 'fixture-app-id', clientSecret: 'fixture-app-secret' },
         fetchImpl: async (url, options) => {
             requests.push({ url: String(url), ...options });
@@ -702,6 +707,77 @@ test('QQ sender accepts safe Unicode Markdown filenames and sends file type 4 wi
     assert.equal(harness.requests[0].url, 'https://api.sgroup.qq.com/v2/groups/group-original/files');
 });
 
+test('QQ sender uploads the unchanged bundled PNG as a file attachment with its original filename', async () => {
+    const deliveries = [];
+    const harness = makeSdkHarness({ onDelivery: (event) => deliveries.push(event) });
+    const originalBytes = await readFile(join(DAYU_ASSET_ROOT, 'portrait.png'));
+    const result = await harness.sender.sendAssetImageFile(
+        harness.request, originalBytes, 'portrait.png', new AbortController().signal,
+    );
+    assert.deepEqual(result, { sent: true });
+    const upload = JSON.parse(harness.requests[0].body);
+    assert.deepEqual(Object.keys(upload).sort(), ['file_data', 'file_name', 'file_type', 'srv_send_msg']);
+    assert.equal(upload.file_type, 4);
+    assert.equal(upload.file_name, 'portrait.png');
+    assert.equal(upload.srv_send_msg, false);
+    assert.deepEqual(Buffer.from(upload.file_data, 'base64'), originalBytes,
+        'file attachment bytes are the original source with no image API or conversion');
+    assert.deepEqual(deliveries, [{
+        target: { scope: 'group', targetId: 'group-original' },
+        status: 'sent', messageId: 'fixture-ack-id', mediaType: 'file',
+    }]);
+    const beforeInvalid = harness.requests.length;
+    assert.deepEqual(await harness.sender.sendAssetImageFile(
+        harness.request, png, '../portrait.png', new AbortController().signal,
+    ), { sent: false, reason: 'failed' });
+    assert.deepEqual(await harness.sender.sendAssetImageFile(
+        harness.request, Buffer.from('not an image'), 'portrait.png', new AbortController().signal,
+    ), { sent: false, reason: 'failed' });
+    assert.deepEqual(await harness.sender.sendAssetImageFile(
+        harness.request, Buffer.alloc(10 * 1024 * 1024 + 1), 'portrait.png', new AbortController().signal,
+    ), { sent: false, reason: 'failed' });
+    assert.equal(harness.requests.length, beforeInvalid, 'unsafe filenames are rejected before any QQ request');
+});
+
+test('pinned qqbot-nodejs MediaApi uploads original PNG assets with file_type 4', async () => {
+    const sdkRoot = '/data/profiles/qqbot/node_modules/@tencent-connect/qqbot-nodejs/dist/protocol/api';
+    const [{ MediaApi }, { MessageApi }] = await Promise.all([
+        import(pathToFileURL(join(sdkRoot, 'media.js')).href),
+        import(pathToFileURL(join(sdkRoot, 'messages.js')).href),
+    ]);
+    assert.equal(typeof MediaApi, 'function', 'this check uses the real pinned QQ SDK MediaApi');
+    assert.equal(typeof MessageApi, 'function', 'this check uses the real pinned QQ SDK MessageApi');
+    const deliveries = [];
+    const harness = makeSdkHarness({ sdk: { MediaApi, MessageApi }, onDelivery: (event) => deliveries.push(event) });
+    const originalBytes = await readFile(join(DAYU_ASSET_ROOT, 'portrait.png'));
+    assert.deepEqual(await harness.sender.sendAssetImageFile(
+        harness.request, originalBytes, 'portrait.png', new AbortController().signal,
+    ), { sent: true });
+    assert.equal(harness.requests.length, 2, 'the actual SDK performs one upload and one file-message request');
+    const [uploadRequest, messageRequest] = harness.requests;
+    assert.equal(uploadRequest.url, 'https://api.sgroup.qq.com/v2/groups/group-original/files');
+    const upload = JSON.parse(uploadRequest.body);
+    assert.equal(upload.file_type, 4);
+    assert.equal(upload.file_name, 'portrait.png');
+    assert.equal(upload.srv_send_msg, false);
+    assert.deepEqual(Buffer.from(upload.file_data, 'base64'), originalBytes,
+        'the pinned SDK receives the original PNG bytes without conversion');
+    assert.equal(messageRequest.url, 'https://api.sgroup.qq.com/v2/groups/group-original/messages');
+    const fileMessage = JSON.parse(messageRequest.body);
+    assert.ok(Number.isSafeInteger(fileMessage.msg_seq) && fileMessage.msg_seq > 0,
+        'the pinned SDK supplies its required positive message sequence');
+    delete fileMessage.msg_seq;
+    assert.deepEqual(fileMessage, {
+        msg_type: 7,
+        media: { file_info: 'fixture-file-info' },
+        msg_id: 'msg-original',
+    });
+    assert.deepEqual(deliveries, [{
+        target: { scope: 'group', targetId: 'group-original' },
+        status: 'sent', messageId: 'fixture-ack-id', mediaType: 'file',
+    }]);
+});
+
 test('QQ artifact sender validates UTF-8 and type, then reports only the final message ACK', async () => {
     const deliveries = [];
     const harness = makeSdkHarness({ onDelivery: (event) => deliveries.push(event) });
@@ -895,7 +971,7 @@ test('registered native image tool uses same-source attachment bytes, user quota
     assert.equal(registration.imageEnabled, true);
     assert.equal(registration.markdownEnabled, true);
     const visibleTools = (await ctx.systemPrompt.assemble()).tools.map(({ name }) => name).sort();
-    assert.deepEqual(visibleTools, [CREATE_MARKDOWN_TOOL, GENERATE_IMAGE_TOOL]);
+    assert.deepEqual(visibleTools, [CREATE_MARKDOWN_TOOL, GENERATE_IMAGE_TOOL, 'qqbot_send_asset_image'].sort());
     const imageTool = (await ctx.systemPrompt.assemble()).tools.find(({ name }) => name === GENERATE_IMAGE_TOOL);
     const modelFacingSchema = JSON.stringify(imageTool);
     assert.match(modelFacingSchema, /matched original QQ request/u, 'the model-facing image tool explains request-scoped prompt optimization');
@@ -962,6 +1038,328 @@ test('registered native image tool uses same-source attachment bytes, user quota
     assert.equal(notices.length, 0);
     await endGenerationTurn(agent, scope);
     endDocumentTurn(agent, documentScope);
+});
+
+test('original setting images send without image API credentials, generation quota, or document-mode denial', async (t) => {
+    const assets = [];
+    const quota = makeQuota({ acquire: { ok: false, reason: 'busy' }, reserve: { ok: false, reason: 'quota' } });
+    const sender = {
+        async sendNotice() { assert.fail('original asset delivery has no fallback notice'); },
+        async sendImage() { assert.fail('original asset delivery must not send a generated image'); },
+        async sendMarkdownFile() { assert.fail('original asset delivery is not Markdown'); },
+        async sendMarkdownFallback() { assert.fail('original asset delivery has no text fallback'); },
+        async sendAssetImageFile(request, bytes, filename) {
+            assets.push({ request, bytes: Buffer.from(bytes), filename });
+            return { sent: true };
+        },
+    };
+    const { ctx, registration } = await nativeGenerationRuntime(t, {
+        route: null, sender, quota, markdownEnabled: false,
+    });
+    assert.equal(registration.imageEnabled, false);
+    const visible = (await ctx.systemPrompt.assemble()).tools.map(({ name }) => name);
+    assert.deepEqual(visible, ['qqbot_send_asset_image'], 'the source-file tool remains available without image API configuration');
+
+    const agent = {};
+    beginDocumentTurn(agent, { content: '' });
+    const documentScope = getDocumentTurn(agent);
+    const firstRequest = makeGenerationRequest('asset-owner-a', 'group-asset-a', 'message-asset-a');
+    const secondRequest = {
+        ...makeGenerationRequest('asset-owner-b', 'group-asset-b', 'message-asset-b'),
+        quotedAttachments: [{ url: 'https://docs.example.test/report.txt', filename: 'report.txt', content_type: 'text/plain' }],
+    };
+    const scope = beginGenerationTurn(agent, [firstRequest, secondRequest], [], { documentScope });
+    const [firstId, secondId] = [...scope.requests.keys()];
+    assert.equal(documentScope.documentMode, true, 'the merged turn is in protected document mode');
+    const path = join(DAYU_ASSET_ROOT, 'portrait.png');
+    const source = await readFile(path);
+    const args = { requestId: secondId, image: path };
+
+    const delivered = await nativeCall(ctx, 'qqbot_send_asset_image', args, agent, 'asset-send-original');
+    assert.equal(delivered.isError, false, JSON.stringify(delivered));
+    assert.deepEqual(delivered.value, {
+        status: 'sent',
+        notice: '主人，原版形象设定图已经作为文件发出啦；这次没有调用生图服务。素材作者：YunYueSama；项目来源：https://github.com/YunYueSama/codex-deepseek-pet；许可证：https://github.com/YunYueSama/codex-deepseek-pet/blob/7661c8b304c5400701f91da01b1a643a207331de/LICENSE',
+        filename: 'portrait.png',
+        bytes: source.length,
+        delivery: 'attachment',
+    });
+    assert.deepEqual(delivered.content, [{ type: 'text', text: JSON.stringify(delivered.value) }]);
+    assert.equal(assets.length, 1);
+    assert.deepEqual(assets[0].bytes, source, 'the sent bytes match the checked-in original PNG');
+    assert.equal(assets[0].filename, 'portrait.png');
+    assert.equal(assets[0].request.ownerId, 'asset-owner-b');
+    assert.deepEqual(assets[0].request.replyTarget, secondRequest.replyTarget,
+        'the source image is delivered only to the message that supplied its requestId');
+    assert.deepEqual(quota.events, [], 'asset delivery never checks or reserves generation quota');
+
+    const duplicate = await nativeCall(ctx, 'qqbot_send_asset_image', args, agent, 'asset-send-original-duplicate-call');
+    assert.deepEqual(duplicate.value, delivered.value);
+    assert.equal(assets.length, 1, 'different call ids for the same path in one original request return the cached receipt');
+    const changedCallId = await nativeCall(ctx, 'qqbot_send_asset_image', {
+        requestId: secondId, image: join(DAYU_ASSET_ROOT, 'character-standard.png'),
+    }, agent, 'asset-send-original');
+    assert.equal(changedCallId.isError, true, 'a call id cannot be reused for another source image');
+
+    const bothImages = await nativeCall(ctx, 'qqbot_send_asset_image', {
+        requestId: secondId, image: join(DAYU_ASSET_ROOT, 'character-standard.png'),
+    }, agent, 'asset-send-character-sheet');
+    assert.equal(bothImages.value.status, 'sent', 'the same request may send the second source image once');
+    assert.equal(assets.length, 2);
+    assert.equal(assets[1].filename, 'character-standard.png');
+
+    const forgedRequest = await nativeCall(ctx, 'qqbot_send_asset_image', {
+        requestId: `${firstId}-forged`, image: path,
+    }, agent, 'asset-send-forged-request');
+    assert.equal(forgedRequest.isError, true, 'unknown request ids do not authorize asset delivery');
+    const arbitraryPath = await nativeCall(ctx, 'qqbot_send_asset_image', {
+        requestId: secondId, image: '/tmp/portrait.png',
+    }, agent, 'asset-send-arbitrary-path');
+    assert.equal(arbitraryPath.isError, true, 'paths outside the two bundled source files are rejected');
+    assert.equal(assets.length, 2, 'invalid paths and request ids never reach the sender');
+    assert.deepEqual(quota.events, [], 'rejections and successful original-file sends do not touch image quota');
+
+    await endGenerationTurn(agent, scope);
+    endDocumentTurn(agent, documentScope);
+    const expired = await nativeCall(ctx, 'qqbot_send_asset_image', args, agent, 'asset-send-expired');
+    assert.equal(expired.isError, true, 'an ended original request cannot authorize a later file send');
+    assert.equal(assets.length, 2);
+});
+
+test('native asset delivery returns and caches timeout without retry or image generation', async (t) => {
+    let attempts = 0;
+    const quota = makeQuota();
+    const sender = {
+        async sendNotice() { assert.fail('asset timeout does not send a fallback notice'); },
+        async sendImage() { assert.fail('asset timeout does not call the image sender'); },
+        async sendMarkdownFile() { assert.fail('asset timeout does not send Markdown'); },
+        async sendMarkdownFallback() { assert.fail('asset timeout does not send text'); },
+        async sendAssetImageFile(_request, _bytes, _filename, signal) {
+            attempts++;
+            await new Promise((resolve, reject) => {
+                if (signal.aborted) reject(signal.reason);
+                else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+            });
+            return { sent: true };
+        },
+    };
+    const { ctx } = await nativeGenerationRuntime(t, {
+        route: null, sender, quota, markdownEnabled: false, assetOperationTimeoutMs: 20,
+    });
+    const agent = {};
+    beginDocumentTurn(agent, { content: 'Send the existing setting sheet.' });
+    const documentScope = getDocumentTurn(agent);
+    const scope = beginGenerationTurn(agent,
+        [makeGenerationRequest('asset-timeout-owner', 'asset-timeout-group', 'asset-timeout-msg')], [], { documentScope });
+    const [requestId] = [...scope.requests.keys()];
+    const args = { requestId, image: join(DAYU_ASSET_ROOT, 'character-standard.png') };
+    const result = await nativeCall(ctx, 'qqbot_send_asset_image', args, agent, 'asset-timeout-call');
+    assert.equal(result.isError, false);
+    assert.equal(result.value.status, 'timeout');
+    assert.equal(result.value.delivery, 'none');
+    assert.deepEqual(result.content, [{ type: 'text', text: JSON.stringify(result.value) }]);
+    const duplicate = await nativeCall(ctx, 'qqbot_send_asset_image', args, agent, 'asset-timeout-call-again');
+    assert.equal(duplicate.value.status, 'timeout', 'a later call id for the same source gets the cached timeout receipt');
+    assert.equal(attempts, 1, 'the same original request never retries an uncertain or timed-out source send');
+    assert.deepEqual(quota.events, [], 'timeouts do not consult or reserve image generation quota');
+    await endGenerationTurn(agent, scope);
+    endDocumentTurn(agent, documentScope);
+});
+
+test('native asset delivery caches both failed and unknown outcomes across new tool-call ids', async (t) => {
+    for (const reason of ['failed', 'unknown']) {
+        await t.test(reason, async (t) => {
+            let attempts = 0;
+            const sender = {
+                async sendNotice() { assert.fail('asset delivery does not send a fallback notice'); },
+                async sendImage() { assert.fail('asset delivery does not generate a replacement image'); },
+                async sendMarkdownFile() { assert.fail('asset delivery does not send Markdown'); },
+                async sendMarkdownFallback() { assert.fail('asset delivery does not send text'); },
+                async sendAssetImageFile() {
+                    attempts++;
+                    return { sent: false, reason };
+                },
+            };
+            const { ctx } = await nativeGenerationRuntime(t, {
+                route: null, sender, quota: makeQuota(), markdownEnabled: false,
+            });
+            const agent = {};
+            beginDocumentTurn(agent, { content: `Send the source image; simulated ${reason} outcome.` });
+            const documentScope = getDocumentTurn(agent);
+            const scope = beginGenerationTurn(agent,
+                [makeGenerationRequest(`asset-${reason}-owner`, `asset-${reason}-group`, `asset-${reason}-msg`)], [], { documentScope });
+            const [requestId] = [...scope.requests.keys()];
+            const args = { requestId, image: join(DAYU_ASSET_ROOT, 'portrait.png') };
+            const first = await nativeCall(ctx, 'qqbot_send_asset_image', args, agent, `asset-${reason}-first`);
+            const expectedStatus = reason === 'unknown' ? 'unknown' : 'failed';
+            assert.equal(first.value.status, expectedStatus);
+            const laterCallId = await nativeCall(ctx, 'qqbot_send_asset_image', args, agent, `asset-${reason}-different-call-id`);
+            assert.deepEqual(laterCallId.value, first.value,
+                'later tool calls for the same original request receive the cached terminal receipt');
+            assert.equal(attempts, 1, `${reason} is terminal and must never trigger a second QQ send`);
+            await endGenerationTurn(agent, scope);
+            endDocumentTurn(agent, documentScope);
+        });
+    }
+});
+
+test('concurrent calls for the same original asset path share one QQ delivery', async (t) => {
+    const started = deferred();
+    const finish = deferred();
+    let attempts = 0;
+    const sender = {
+        async sendNotice() { assert.fail('asset delivery does not send a fallback notice'); },
+        async sendImage() { assert.fail('asset delivery does not generate a replacement image'); },
+        async sendMarkdownFile() { assert.fail('asset delivery does not send Markdown'); },
+        async sendMarkdownFallback() { assert.fail('asset delivery does not send text'); },
+        async sendAssetImageFile() {
+            attempts++;
+            started.resolve();
+            await finish.promise;
+            return { sent: true };
+        },
+    };
+    const { ctx } = await nativeGenerationRuntime(t, {
+        route: null, sender, quota: makeQuota(), markdownEnabled: false,
+    });
+    const agent = {};
+    beginDocumentTurn(agent, { content: 'Send me the portrait file.' });
+    const documentScope = getDocumentTurn(agent);
+    const scope = beginGenerationTurn(agent,
+        [makeGenerationRequest('asset-duplicate-owner', 'asset-duplicate-group', 'asset-duplicate-msg')], [], { documentScope });
+    const [requestId] = [...scope.requests.keys()];
+    const args = { requestId, image: join(DAYU_ASSET_ROOT, 'portrait.png') };
+    const first = nativeCall(ctx, 'qqbot_send_asset_image', args, agent, 'asset-duplicate-call-1');
+    await started.promise;
+    const duplicate = nativeCall(ctx, 'qqbot_send_asset_image', args, agent, 'asset-duplicate-call-2');
+    assert.equal(attempts, 1, 'the second in-flight call joins the original path promise');
+    finish.resolve();
+    const [firstResult, duplicateResult] = await Promise.all([first, duplicate]);
+    assert.equal(firstResult.value.status, 'sent');
+    assert.deepEqual(duplicateResult.value, firstResult.value);
+    assert.equal(attempts, 1, 'concurrent call ids cannot cause duplicate delivery of one source file');
+    await endGenerationTurn(agent, scope);
+    endDocumentTurn(agent, documentScope);
+});
+
+test('original asset send caches unknown delivery and never retries the QQ message POST', async () => {
+    const deliveries = [];
+    const harness = makeSdkHarness({
+        onDelivery: (event) => deliveries.push(event),
+        fetchImpl: async (url) => {
+            if (new URL(String(url)).pathname.endsWith('/files')) {
+                return new Response(JSON.stringify({ file_info: 'fixture-file-info' }), { status: 200 });
+            }
+            throw new Error('message POST outcome unknown');
+        },
+    });
+    const bytes = await readFile(join(DAYU_ASSET_ROOT, 'portrait.png'));
+    const first = await harness.sender.sendAssetImageFile(
+        harness.request, bytes, 'portrait.png', new AbortController().signal,
+    );
+    assert.deepEqual(first, { sent: false, reason: 'unknown' });
+    assert.equal(harness.requests.length, 2, 'an unknown final POST is not retried');
+    assert.deepEqual(deliveries, [{
+        target: { scope: 'group', targetId: 'group-original' }, status: 'unknown', mediaType: 'file',
+    }]);
+});
+
+test('native asset delivery cancellation revokes the original request before a later send', async (t) => {
+    const started = deferred();
+    let attempts = 0;
+    const sender = {
+        async sendNotice() { assert.fail('asset cancellation does not send a fallback notice'); },
+        async sendImage() { assert.fail('asset cancellation does not call the image sender'); },
+        async sendMarkdownFile() { assert.fail('asset cancellation does not send Markdown'); },
+        async sendMarkdownFallback() { assert.fail('asset cancellation does not send text'); },
+        async sendAssetImageFile(_request, _bytes, _filename, signal) {
+            attempts++;
+            started.resolve();
+            await new Promise((resolve, reject) => {
+                if (signal.aborted) reject(signal.reason);
+                else signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+            });
+            return { sent: true };
+        },
+    };
+    const { ctx } = await nativeGenerationRuntime(t, {
+        route: null, sender, quota: makeQuota(), markdownEnabled: false,
+    });
+    const agent = {};
+    beginDocumentTurn(agent, { content: 'Send the original portrait.' });
+    const documentScope = getDocumentTurn(agent);
+    const scope = beginGenerationTurn(agent,
+        [makeGenerationRequest('asset-cancel-owner', 'asset-cancel-group', 'asset-cancel-msg')], [], { documentScope });
+    const [requestId] = [...scope.requests.keys()];
+    const pending = nativeCall(ctx, 'qqbot_send_asset_image', {
+        requestId, image: join(DAYU_ASSET_ROOT, 'portrait.png'),
+    }, agent, 'asset-cancel-call');
+    await started.promise;
+    await endGenerationTurn(agent, scope);
+    const result = await pending;
+    assert.equal(result.isError, false);
+    assert.equal(result.value.status, 'expired');
+    assert.equal(attempts, 1, 'revoking the request drains the send and cannot start another one');
+    endDocumentTurn(agent, documentScope);
+});
+
+test('native asset delivery shares a bounded two-send semaphore across original requests', async (t) => {
+    const firstTwoStarted = deferred();
+    const thirdStarted = deferred();
+    const release = [];
+    let active = 0;
+    let maximum = 0;
+    let startedCount = 0;
+    const sender = {
+        async sendNotice() { assert.fail('asset concurrency does not need a notice'); },
+        async sendImage() { assert.fail('asset concurrency does not generate images'); },
+        async sendMarkdownFile() { assert.fail('asset concurrency does not send Markdown'); },
+        async sendMarkdownFallback() { assert.fail('asset concurrency does not send text'); },
+        async sendAssetImageFile() {
+            active++;
+            startedCount++;
+            maximum = Math.max(maximum, active);
+            if (startedCount === 2) firstTwoStarted.resolve();
+            if (startedCount === 3) thirdStarted.resolve();
+            const gate = deferred();
+            release.push(() => gate.resolve());
+            await gate.promise;
+            active--;
+            return { sent: true };
+        },
+    };
+    const { ctx } = await nativeGenerationRuntime(t, {
+        route: null, sender, quota: makeQuota(), markdownEnabled: false,
+    });
+    const turns = [];
+    const calls = [];
+    for (let index = 0; index < 3; index += 1) {
+        const agent = {};
+        beginDocumentTurn(agent, { content: `Send source image ${index}.` });
+        const documentScope = getDocumentTurn(agent);
+        const scope = beginGenerationTurn(agent,
+            [makeGenerationRequest(`asset-concurrent-owner-${index}`, `asset-concurrent-group-${index}`, `asset-concurrent-msg-${index}`)], [], { documentScope });
+        const [requestId] = [...scope.requests.keys()];
+        turns.push({ agent, documentScope, scope });
+        calls.push(nativeCall(ctx, 'qqbot_send_asset_image', {
+            requestId, image: join(DAYU_ASSET_ROOT, index === 1 ? 'character-standard.png' : 'portrait.png'),
+        }, agent, `asset-concurrent-call-${index}`));
+    }
+    await firstTwoStarted.promise;
+    assert.equal(startedCount, 2, 'only two deliveries start while the shared semaphore is full');
+    assert.equal(active, 2);
+    release[0]();
+    await thirdStarted.promise;
+    assert.equal(maximum, 2, 'a queued request starts only after an active send releases a slot');
+    release[1]();
+    release[2]();
+    const results = await Promise.all(calls);
+    assert.ok(results.every((result) => result.value.status === 'sent'));
+    assert.equal(active, 0);
+    for (const turn of turns) {
+        await endGenerationTurn(turn.agent, turn.scope);
+        endDocumentTurn(turn.agent, turn.documentScope);
+    }
 });
 
 test('native self portrait uploads the bundled portrait bytes through the existing image edit route', async (t) => {

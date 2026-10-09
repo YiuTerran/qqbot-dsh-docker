@@ -124,6 +124,7 @@ try {
             return { sent: true };
         },
         async sendMarkdownFallback() { throw new Error('unexpected-markdown-fallback'); },
+        async sendAssetImageFile() { throw new Error('unexpected-original-asset-delivery'); },
     };
 
     phase = 'runtime';

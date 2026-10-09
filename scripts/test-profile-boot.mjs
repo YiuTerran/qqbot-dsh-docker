@@ -244,8 +244,10 @@ try {
   const modelNames = assembly.tools.map((tool) => tool.name).sort();
   assert.equal(registryNames.includes('qqbot_generate_image'), expectedImageEnabled, 'image generation registration does not match the dedicated image route');
   assert.equal(registryNames.includes('qqbot_create_markdown'), expectedMarkdownEnabled, 'Markdown export registration does not match QQBOT_MARKDOWN_ENABLED');
+  assert.ok(registryNames.includes('qqbot_send_asset_image'), 'original setting images must be sendable without image API configuration');
   const expectedTools = [
     'qqbot_describe_image', 'qqbot_read_document',
+    'qqbot_send_asset_image',
     ...(expectedImageEnabled ? ['qqbot_generate_image'] : []),
     ...(expectedMarkdownEnabled ? ['qqbot_create_markdown'] : []),
     'web_fetch',
@@ -271,6 +273,9 @@ try {
     assert.match(imageToolSchema, /opaque requestId/u, 'real Cordis image schema retains request ID constraints');
     assert.match(imageToolSchema, /"maxLength":4000/u, 'real Cordis image schema bounds the prompt field');
   }
+  const assetTool = assembly.tools.find((tool) => tool.name === 'qqbot_send_asset_image');
+  assert.ok(assetTool, 'the original setting image file tool is visible to the model');
+  assert.match(JSON.stringify(assetTool), /does not call the image API/u, 'asset sending is distinguished from paid generation');
 
   let onebotProjection;
   if (onebotProbeEnabled) {

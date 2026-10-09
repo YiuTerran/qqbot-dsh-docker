@@ -117,9 +117,14 @@ async function makeNativeRuntime(t, { imageService, sender }) {
         return validateGenerationToolCall(exec, route);
     });
     ctx.on('tools/execute', (exec, next) => runInDocumentExecution(exec, next));
+    const senderWithAssetStub = Object.assign(Object.create(sender), {
+        async sendAssetImageFile() {
+            throw new Error('unexpected original asset delivery in recent-image generation tests');
+        },
+    });
     const registration = registerGenerationTools(ctx, {
         route,
-        sender,
+        sender: senderWithAssetStub,
         quota: makeQuota(),
         imageService,
         markdownEnabled: false,

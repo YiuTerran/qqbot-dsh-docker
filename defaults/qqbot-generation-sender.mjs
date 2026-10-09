@@ -44,6 +44,21 @@ function validArtifactFilename(value) {
         /^[\p{L}\p{N}._ -][\p{L}\p{N}._ -]{0,115}\.(?:md|txt)$/u.test(value);
 }
 
+function validAssetImageFilename(value) {
+    return typeof value === 'string' && Array.from(value).length <= 120 &&
+        /^[\p{L}\p{N}._ -][\p{L}\p{N}._ -]{0,115}\.(?:png|jpe?g|gif|webp)$/iu.test(value);
+}
+
+function imageMimeMatchesFilename(filename, buffer) {
+    const extension = filename.toLowerCase().split('.').at(-1);
+    const mime = buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10])) ? 'png'
+        : buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff ? 'jpg'
+            : buffer.length >= 6 && ['GIF87a', 'GIF89a'].includes(buffer.toString('ascii', 0, 6)) ? 'gif'
+                : buffer.length >= 12 && buffer.toString('ascii', 0, 4) === 'RIFF'
+                    && buffer.toString('ascii', 8, 12) === 'WEBP' ? 'webp' : undefined;
+    return mime !== undefined && (extension === mime || (mime === 'jpg' && extension === 'jpeg'));
+}
+
 function artifactMimeMatches(filename, mediaType) {
     return (filename.endsWith('.md') && mediaType === 'text/markdown')
         || (filename.endsWith('.txt') && mediaType === 'text/plain');
@@ -81,7 +96,7 @@ function exactKeys(value, required, optional = []) {
         keys.every((key) => required.includes(key) || optional.includes(key));
 }
 
-function validateUploadBody(body, fileType) {
+function validateUploadBody(body, fileType, kind) {
     const required = ['file_type', 'file_data', 'srv_send_msg'];
     const optional = fileType === 4 ? ['file_name'] : [];
     if (!exactKeys(body, required, optional) || body.file_type !== fileType || body.srv_send_msg !== false ||
@@ -89,9 +104,7 @@ function validateUploadBody(body, fileType) {
         return false;
     }
     if (fileType === 1 && Object.hasOwn(body, 'file_name')) return false;
-    if (fileType === 4 && !validArtifactFilename(body.file_name)) {
-        return false;
-    }
+    if (fileType === 4 && !(kind === 'asset' ? validAssetImageFilename(body.file_name) : validArtifactFilename(body.file_name))) return false;
     return /^[A-Za-z0-9+/]*={0,2}$/u.test(body.file_data);
 }
 
@@ -249,7 +262,7 @@ export function createGenerationSender({
     function emitDelivery(target, kind, status, messageId, expectedRawContent) {
         if (typeof onDelivery !== 'function') return;
         const mediaType = expectedRawContent !== undefined ? 'text'
-            : kind === 'image' ? 'image' : kind === 'markdown' || kind === 'artifact' ? 'file' : undefined;
+            : kind === 'image' ? 'image' : kind === 'markdown' || kind === 'artifact' || kind === 'asset' ? 'file' : undefined;
         try {
             Promise.resolve(onDelivery({
                 target: { scope: target.scope, targetId: target.targetId },
@@ -276,7 +289,7 @@ export function createGenerationSender({
 
                 const upload = path === filesPath;
                 const validBody = upload
-                    ? validateUploadBody(body, kind === 'image' ? 1 : 4)
+                    ? validateUploadBody(body, kind === 'image' ? 1 : 4, kind)
                     : expectedRawContent === undefined
                         ? validateMediaMessageBody(body, target.msgId)
                         : validateRawMessageBody(body, target.msgId, expectedRawContent);
@@ -334,7 +347,7 @@ export function createGenerationSender({
                         // A failed message POST may have reached QQ. Never replay
                         // it as text when the transport cannot prove the outcome.
                         throw senderError(upload
-                            ? (kind === 'artifact' && controller.signal.aborted && !signal?.aborted ? 'timeout' : 'failed')
+                            ? ((kind === 'artifact' || kind === 'asset') && controller.signal.aborted && !signal?.aborted ? 'timeout' : 'failed')
                             : 'unknown');
                     }
                     if (!isActive(request, target, kind, signal)) throw senderError(upload ? 'expired' : 'unknown');
@@ -349,7 +362,7 @@ export function createGenerationSender({
                     }
                     catch {
                         throw senderError(upload
-                            ? (kind === 'artifact' && controller.signal.aborted && !signal?.aborted ? 'timeout' : 'failed')
+                            ? ((kind === 'artifact' || kind === 'asset') && controller.signal.aborted && !signal?.aborted ? 'timeout' : 'failed')
                             : 'unknown');
                     }
                     if (!validApiAcknowledgement(path, parsed)) {
@@ -407,7 +420,7 @@ export function createGenerationSender({
                 if (error?.code === 'expired' || error?.code === 'cancelled' || signal?.aborted) {
                     return { sent: false, reason: 'expired' };
                 }
-                if (kind === 'artifact' && (error?.code === 'timeout' || operationTimedOut)) {
+                if ((kind === 'artifact' || kind === 'asset') && (error?.code === 'timeout' || operationTimedOut)) {
                     return { sent: false, reason: 'timeout' };
                 }
                 logDeliveryFailure();
@@ -423,7 +436,7 @@ export function createGenerationSender({
         }
         catch {
             logDeliveryFailure();
-            return { sent: false, reason: signal?.aborted ? 'expired' : kind === 'artifact' && operationTimedOut ? 'timeout' : 'failed' };
+            return { sent: false, reason: signal?.aborted ? 'expired' : (kind === 'artifact' || kind === 'asset') && operationTimedOut ? 'timeout' : 'failed' };
         }
     }
 
@@ -512,6 +525,14 @@ export function createGenerationSender({
             try { new TextDecoder('utf-8', { fatal: true }).decode(buffer); }
             catch { return Promise.resolve({ sent: false, reason: 'failed' }); }
             return sendUpload(request, buffer, filename, 4, 'artifact', signal);
+        },
+
+        sendAssetImageFile(request, buffer, filename, signal) {
+            if (!Buffer.isBuffer(buffer) || buffer.length < 1 || buffer.length > MAX_IMAGE_BYTES
+                || !validAssetImageFilename(filename) || !imageMimeMatchesFilename(filename, buffer)) {
+                return Promise.resolve({ sent: false, reason: 'failed' });
+            }
+            return sendUpload(request, buffer, filename, 4, 'asset', signal);
         },
 
         sendMarkdownFallback(request, content, signal) {

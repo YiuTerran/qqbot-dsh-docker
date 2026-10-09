@@ -13,6 +13,7 @@ import { logDownloadDiagnostics } from './qqbot-image-diagnostics.mjs';
 import { normalizeEditImage } from './qqbot-image-input.mjs';
 import { logToolFailure } from './qqbot-provider-errors.mjs';
 import { isDayuAssetImagePath } from './qqbot-assets.mjs';
+import { registerAssetImageDeliveryTool } from './qqbot-asset-delivery.mjs';
 
 export { createGenerationSender } from './qqbot-generation-sender.mjs';
 
@@ -1072,6 +1073,12 @@ export function registerGenerationTools(ctx, options = {}) {
             fetchImpl: options.fetchImpl,
         })) : undefined,
     };
+    // Original setting images are fixed local files. Their delivery remains
+    // available when image generation has no API credentials or quota.
+    registerAssetImageDeliveryTool(ctx, {
+        sender,
+        operationTimeoutMs: options.assetOperationTimeoutMs,
+    });
     if (route) {
         registerStatusTool(ctx, {
             name: GENERATE_IMAGE_TOOL,
@@ -1094,7 +1101,7 @@ export function registerGenerationTools(ctx, options = {}) {
             timeoutMs: TOOL_TIMEOUT_MS,
         }, true);
     }
-    return Object.freeze({ imageEnabled: Boolean(route), markdownEnabled, context });
+    return Object.freeze({ imageEnabled: Boolean(route), markdownEnabled, assetImagesEnabled: true, context });
 }
 
 export function validateGenerationToolCall(exec, route) {
