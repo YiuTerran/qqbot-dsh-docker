@@ -69,9 +69,23 @@ generated virtual IDs in headings, speaker labels and filenames. Markdown
 resolves recognized QQ mentions using event names, Markdown labels, then recorded
 author aliases from the same log. Unknown targets receive stable `@成员N` labels;
 known bot targets use `@机器人`. Names never affect identity or authorization.
+Trusted bot markers and structurally linked aliases are indexed across the same
+snapshot, so a later captured SDK bot marker can resolve an earlier mention.
+Conflicting human identity claims remain anonymous; names and application IDs
+are never used to infer that an unresolved target is the bot.
 TXT preserves stored message bodies, including their original mention tokens.
 Both formats keep original times and public text. Names and Markdown text remain
 HTML-escaped; no remote lookup or media download is performed.
+Member bodies use a single physical HTML source line with colored spans and
+explicit line breaks. This keeps blank paragraphs inside the same colored body
+in Typora instead of allowing Markdown parsing to escape a multiline `pre`.
+Bot bodies remain uncolored and render Markdown emphasis, lists, tables and
+code as safe HTML. Bot headings retain their identity and bot label. Raw HTML
+is shown as escaped text, images as placeholders; no remote resources load.
+Mention-like text inside bot code examples or literal HTML markup remains
+literal; ordinary QQ mentions are resolved without parsing names as Markdown.
+CRLF, bare CR and LF each become a visual line break in Markdown; TXT retains
+the original line-ending bytes.
 
 The name-index pass and render pass share one database read transaction and
 cutoff. An export accepts at most 10,000 indexed identities and 10 MiB of final

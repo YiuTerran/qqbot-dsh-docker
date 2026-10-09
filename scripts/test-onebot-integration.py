@@ -385,6 +385,9 @@ def main():
                 raise AssertionError("final artifact was claimable twice")
             except urllib.error.HTTPError as error:
                 assert error.code in (404, 409), error.code
+            if expected_format == "md":
+                # Keep the synthetic fixture export for reader-level visual QA.
+                Path(args.evidence).with_suffix(".preview.md").write_bytes(content)
             return content.decode("utf-8")
 
         for role in ("member", "unknown"):
@@ -406,18 +409,20 @@ def main():
                     "nickname": "测试玩家", "text": payload, "kind": "message", "is_bot": False}
         assert client.http("/internal/log/events", captured, token=private_token)["accepted"]
         assert client.http("/internal/log/events", captured, token=private_token)["accepted"]
+        log_event(str(uuid.uuid4()), "历史机器人提及 <@fixtureBot> [@112244](mqqapi://markdown/mention?at_type=1&at_tinyid=112244)")
         display_event = {**captured, "event_id": str(uuid.uuid4()),
                          "text": "提及 <@fixtureLogOwner> <@unknownTarget> <@!unknownTarget> <@fixtureBot> [@显示名](mqqapi://markdown/mention?at_type=1&at_tinyid=112233)",
                          "display": {"author_aliases": ["openid:fixtureLogOwner"], "mentions": [
                              {"target": "openid:fixtureLogOwner", "name": "事件昵称"},
-                             {"target": "openid:fixtureBot", "is_bot": True},
+                             {"target": "openid:fixtureBot", "aliases": ["tinyid:112244"], "is_bot": True},
                              {"target": "tinyid:112233", "name": "SDK昵称"}]}}
         assert client.http("/internal/log/events", display_event, token=private_token)["accepted"]
         assert client.http("/internal/log/events", {**display_event, "display": {
             "author_aliases": ["openid:fixtureLogOwner"], "mentions": [
                 {"target": "openid:fixtureLogOwner", "name": "不应覆盖"}]}}, token=private_token)["accepted"]
         log_event(str(uuid.uuid4()), "旧事件 <@fixtureLogOwner> <@legacyUnknown>")
-        log_event(str(uuid.uuid4()), "公开机器人回复", is_bot=True)
+        multiline_reply = "公开机器人回复\n\n- 第二段 `命令`\n\n**第三段** *强调* <卡名>\n\n```text\n代码第一行\n代码第二行\n```\n"
+        log_event(str(uuid.uuid4()), multiline_reply, is_bot=True)
         log_event(str(uuid.uuid4()), "另一个群的内容", group_key="123456789:fixtureOtherGroup")
         log_event(str(uuid.uuid4()), "采集中断，部分记录未确认。", kind="gap")
         exported = log_command(".log export story")
@@ -429,13 +434,20 @@ def main():
         assert "@事件昵称" in md and "@SDK昵称" in md and "@机器人" in md
         assert "@测试玩家" in md and "@成员1" in md and "@成员2" in md
         assert "fixtureLogOwner" not in md and "unknownTarget" not in md and "mqqapi://" not in md
-        assert "不应覆盖" not in md and md.count("提及 ") == 1
+        assert "不应覆盖" not in md and md.count("提及 @事件昵称") == 1
+        assert "历史机器人提及 @机器人 @机器人" in md, "later trusted bot aliases did not resolve historical mentions"
+        body_lines = [line for line in md.splitlines() if line.startswith("<div>")]
+        bot_body = next((line for line in body_lines if "公开机器人回复" in line), "")
+        assert "<strong>第三段</strong>" in bot_body and "<em>强调</em>" in bot_body and "<code>命令</code>" in bot_body, "bot Markdown lost rich rendering"
+        assert "color:" not in bot_body and "代码第二行" in bot_body, "bot body was colored or lost paragraphs"
+        assert not re.search(r"<pre style=", md), "Typora-incompatible colored pre body remained"
         evidence["checks"].append("display capability, names, stable anonymous mentions and first-snapshot dedup survive real transport")
         assert log_command(".log off", role="admin")["status"] == "ok"
         log_event(str(uuid.uuid4()), "暂停后不应记录")
         txt = claim_artifact(log_command(".log export story --format=txt"), expected_format="txt")
         assert payload in txt and "暂停后不应记录" not in txt
         assert display_event["text"] in txt and "旧事件 <@fixtureLogOwner> <@legacyUnknown>" in txt
+        assert multiline_reply in txt, "Markdown compatibility changed original TXT body"
         assert "群组虚拟ID" not in txt and "virtual:" not in txt
         assert log_command(".log on story", role="admin")["status"] == "ok"
         docker("restart", "-t", "30", sea)
