@@ -57,6 +57,7 @@ legacy_stock_agents_fixtures=(
     "${repo_root}/scripts/fixtures/agents-legacy-v0.7.8-stock.md"
     "${repo_root}/scripts/fixtures/agents-legacy-v0.8.0-stock.md"
     "${repo_root}/scripts/fixtures/agents-v0.12.9-stock.md"
+    "${repo_root}/scripts/fixtures/agents-v0.12.10-stock.md"
 )
 legacy_stock_agents_hashes=(
     c249259a60d4b04c9c9c3df1a92977adf748ba4143a3639c3e85a006ad802ef5
@@ -74,6 +75,7 @@ legacy_stock_agents_hashes=(
     34e4892a0caceff87f54091f358eeabc26bd42fd02a2e98cd371f3264a34bcb4
     a38a9940dee2fe8183f1192a7996e84abf12deccf6b9185e581aa3b1db79da5a
     d8212769d26825832637a4522476c8623a7dd8ceaf7d1bedf05efac0d7bd3e8c
+    ed63c35f9a171136374d81a5e99a3d0b48a5303afcfa4443b09164d8126579df
 )
 persistent_reset_probe="${repo_root}/scripts/test-persistent-reset.mjs"
 suffix="$(date +%s)-$$"

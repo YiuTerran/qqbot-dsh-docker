@@ -164,6 +164,7 @@ f71d8a3a4f3f191f141e759ba7806457444387d1dd7cbbde23486633a982b88e
 34e4892a0caceff87f54091f358eeabc26bd42fd02a2e98cd371f3264a34bcb4
 a38a9940dee2fe8183f1192a7996e84abf12deccf6b9185e581aa3b1db79da5a
 d8212769d26825832637a4522476c8623a7dd8ceaf7d1bedf05efac0d7bd3e8c
+ed63c35f9a171136374d81a5e99a3d0b48a5303afcfa4443b09164d8126579df
 '
 if [ -f /data/AGENTS.md ] && [ ! -L /data/AGENTS.md ] && [ -r /data/AGENTS.md ] && [ -w /data/AGENTS.md ]; then
     current_agents_sha256=$(sha256sum /data/AGENTS.md | cut -d ' ' -f 1)
