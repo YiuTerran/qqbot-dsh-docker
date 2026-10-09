@@ -10,13 +10,14 @@ import dns from 'node:dns';
 import dnsPromises from 'node:dns/promises';
 import { syncBuiltinESMExports } from 'node:module';
 import { performance } from 'node:perf_hooks';
-import { createScopedQuoteRef, installChatPolicy, setCurrentImages, clearCurrentImages, denyUnsafeTool, QQ_MEDIA_ROOT } from '/opt/qqbot-defaults/qqbot-chat-policy.mjs';
+import { createScopedQuoteRef, installChatPolicy, setCurrentImages, clearCurrentImages, denyUnsafeTool, loadChatImageBytes, QQ_MEDIA_ROOT } from '/opt/qqbot-defaults/qqbot-chat-policy.mjs';
 import { WebPageProvider, PublicHttpProvider, downloadCurrentQQImage } from '/opt/qqbot-defaults/qqbot-web-pages.mjs';
 import { beginDocumentTurn, endDocumentTurn, getDocumentTurn, isDocumentTurnActive, isTurnUrlAllowed, runInDocumentExecution, recordSuccessfulSearchSources, authorizeTurnProviderUrl, runWithProviderAuthorization, assertProviderRequestUrl } from '/opt/qqbot-defaults/qqbot-document-scope.mjs';
 import { readChatDocument } from '/opt/qqbot-defaults/qqbot-documents.mjs';
 import { recoverQuotedImageAttachments } from '/opt/qqbot-defaults/qqbot-quote-images.mjs';
 import { beginGenerationTurn, endGenerationTurn, getGenerationTurn, generationRequestMetadata } from '/opt/qqbot-defaults/qqbot-generation-scope.mjs';
 import { resolveTextDocumentType, decodeTextDocumentBytes, isBinaryDocumentBytes } from '/opt/qqbot-defaults/qqbot-text-documents.mjs';
+import { DAYU_ASSET_ROOT, isDayuAssetImagePath, isSafeBundledImagePath, loadDayuAssetImage } from '/opt/qqbot-defaults/qqbot-assets.mjs';
 
 const dshRoot = '/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/';
 // The profile plugin is deliberately installed without its peer dependencies.
@@ -581,11 +582,16 @@ test('current-message image analysis reaches the real vision tool, other paths a
     await symlink(outside, join(dir, 'outside-link.png'));
     let visionCalls = 0;
     let saveCalls = 0;
+    const savedImages = [];
     let imageDefinition;
     const shim = {
         get(name) {
             if (name === 'tools') return { register(definition) { imageDefinition = definition; ctx.tools.register(definition); } };
-            if (name === 'attachments') return { saveImage: async () => { saveCalls++; return { id: 'fixture-image', mediaType: 'image/png' }; } };
+            if (name === 'attachments') return { saveImage: async (imageInput) => {
+                saveCalls++;
+                savedImages.push(imageInput);
+                return { id: 'fixture-image', mediaType: imageInput.mediaType };
+            } };
             if (name === 'llm') return { async *stream(options) {
                 visionCalls++;
                 assert.equal(options.provider, 'test-vision');
@@ -609,8 +615,14 @@ test('current-message image analysis reaches the real vision tool, other paths a
     assert.ok(!result.isError, JSON.stringify(result));
     assert.ok(result.content.some((block) => block.text === '这是测试图片'));
     assert.ok(!((await call(ctx, 'qqbot_describe_image', { image: other }, agent)).isError), 'explicit current-message quote image');
-    assert.equal(visionCalls, 2, 'current attachment and explicit quoted attachment');
-    assert.equal(saveCalls, 2, 'both scoped local images reach attachment storage');
+    const portrait = join(DAYU_ASSET_ROOT, 'portrait.png');
+    const portraitResult = await call(ctx, 'qqbot_describe_image', { image: portrait, prompt: '确认这张图中的角色外观' }, agent);
+    assert.equal(portraitResult.isError, false, JSON.stringify(portraitResult));
+    assert.deepEqual(Buffer.from(savedImages.at(-1).data), await readFile(portrait),
+        'the actual registered vision tool uploads the bundled portrait bytes to attachment storage');
+    assert.equal(savedImages.at(-1).name, 'portrait.png');
+    assert.equal(visionCalls, 3, 'current attachment, quoted attachment, and bundled portrait reach vision');
+    assert.equal(saveCalls, 3, 'all three authorized image sources reach attachment storage');
     const history = join(dir, 'history.png');
     await writeFile(history, png);
     for (const path of [history, '/data/AGENTS.md', 'relative.png', traversal, 'http://127.0.0.1/secret', 'file:///etc/passwd', 'data:image/png;base64,AAAA', 'https://user:pass@example.com/picture.png', join(dir, 'outside-link.png'), directory, sibling]) {
@@ -669,6 +681,65 @@ test('current-message image analysis reaches the real vision tool, other paths a
     assert.equal(ctx.tools.get('qqbot_describe_image').timeoutMs, 120000);
     const assembly = await ctx.systemPrompt.assemble();
     assert.deepEqual(assembly.tools.map((tool) => tool.name).sort(), ['qqbot_describe_image', 'qqbot_read_document']);
+});
+
+test('bundled Dayu references are readable as images only inside the fixed asset directory', async (t) => {
+    const portrait = join(DAYU_ASSET_ROOT, 'portrait.png');
+    assert.equal(isDayuAssetImagePath(portrait), true);
+    assert.equal(isDayuAssetImagePath(`${DAYU_ASSET_ROOT}/../dayu/portrait.png`), false,
+        'noncanonical traversal paths are rejected');
+    assert.equal(isDayuAssetImagePath('/tmp/portrait.png'), false,
+        'arbitrary local paths do not become readable');
+    assert.equal(isDayuAssetImagePath(join(DAYU_ASSET_ROOT, 'LICENSE')), false,
+        'non-image asset files are not exposed to the vision tool');
+
+    const expected = await readFile(portrait);
+    const loaded = await loadDayuAssetImage(portrait, 10 * 1024 * 1024, new AbortController().signal);
+    assert.deepEqual(Buffer.from(loaded), expected, 'the fixed portrait is read byte-for-byte');
+    await assert.rejects(() => loadDayuAssetImage('/tmp/portrait.png', 10 * 1024 * 1024), /allowed bundled/u);
+    await assert.rejects(() => loadDayuAssetImage(portrait, 10, new AbortController().signal), /exceeds/u);
+    const cancelled = new AbortController();
+    cancelled.abort(new Error('fixture cancelled'));
+    await assert.rejects(() => loadDayuAssetImage(portrait, 10 * 1024 * 1024, cancelled.signal), /fixture cancelled/u);
+
+    const agent = {};
+    beginDocumentTurn(agent, { content: 'Please draw a self portrait.' });
+    const documentScope = getDocumentTurn(agent);
+    const exec = { name: 'qqbot_describe_image', arguments: { image: portrait }, agent };
+    assert.equal(runInDocumentExecution(exec, () => denyUnsafeTool(exec)), undefined,
+        'the existing vision tool accepts only this dedicated bundled image path');
+    const imageBytes = await runInDocumentExecution(exec, () => loadChatImageBytes(
+        portrait, 10 * 1024 * 1024, exec, new AbortController().signal));
+    assert.deepEqual(Buffer.from(imageBytes), expected);
+    await endDocumentTurn(agent, documentScope);
+    assert.ok(denyUnsafeTool(exec), 'the bundled path is not usable after the QQ turn ends');
+});
+
+test('bundled image path validation rejects symlinks in files, nested directories, and the root', async (t) => {
+    const fixtureBase = await mkdtemp(join(tmpdir(), 'qqbot-dayu-paths-'));
+    t.after(() => rm(fixtureBase, { recursive: true, force: true }));
+    const assetRoot = join(fixtureBase, 'assets');
+    const nestedRoot = join(assetRoot, 'nested');
+    await mkdir(nestedRoot, { recursive: true });
+    const image = join(assetRoot, 'portrait.png');
+    const nestedImage = join(nestedRoot, 'portrait.png');
+    await writeFile(image, png);
+    await writeFile(nestedImage, png);
+    assert.equal(isSafeBundledImagePath(image, assetRoot), true);
+
+    const linkedFile = join(assetRoot, 'linked.png');
+    await symlink(image, linkedFile);
+    assert.equal(isSafeBundledImagePath(linkedFile, assetRoot), false, 'a symlink image itself is rejected');
+
+    const linkedDirectory = join(assetRoot, 'linked-directory');
+    await symlink(nestedRoot, linkedDirectory, 'dir');
+    assert.equal(isSafeBundledImagePath(join(linkedDirectory, 'portrait.png'), assetRoot), false,
+        'a symlink in a nested path component is rejected');
+
+    const linkedRoot = join(fixtureBase, 'root-link');
+    await symlink(assetRoot, linkedRoot, 'dir');
+    assert.equal(isSafeBundledImagePath(join(linkedRoot, 'portrait.png'), linkedRoot), false,
+        'a symlink at the trusted root is rejected');
 });
 
 test('vision tool accepts only HTTPS image URLs and revalidates them inside execute', async (t) => {

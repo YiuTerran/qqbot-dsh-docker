@@ -12,6 +12,7 @@ import { resolvePublicHttpAddresses } from './qqbot-web-pages.mjs';
 import { logDownloadDiagnostics } from './qqbot-image-diagnostics.mjs';
 import { normalizeEditImage } from './qqbot-image-input.mjs';
 import { logToolFailure } from './qqbot-provider-errors.mjs';
+import { isDayuAssetImagePath } from './qqbot-assets.mjs';
 
 export { createGenerationSender } from './qqbot-generation-sender.mjs';
 
@@ -549,15 +550,16 @@ export function createImageService({ route, transport, resolvePublic, fetchImpl 
     });
 }
 
-function exactArguments(args, names) {
+function exactArguments(args, names, optionalNames = []) {
     if (!args || typeof args !== 'object' || Array.isArray(args)) return false;
     const prototype = Object.getPrototypeOf(args);
     if (prototype !== Object.prototype && prototype !== null) return false;
     const descriptors = Object.getOwnPropertyDescriptors(args);
     const keys = Reflect.ownKeys(descriptors);
-    return keys.every((key) => typeof key === 'string' && names.includes(key)
+    const allowedNames = new Set([...names, ...optionalNames]);
+    return keys.every((key) => typeof key === 'string' && allowedNames.has(key)
         && Object.hasOwn(descriptors[key], 'value') && descriptors[key].enumerable)
-        && names.every((name) => Object.hasOwn(descriptors, name) || name === 'imageAttachmentId');
+        && names.every((name) => Object.hasOwn(descriptors, name) || optionalNames.includes(name));
 }
 
 function validCallId(value) {
@@ -566,7 +568,7 @@ function validCallId(value) {
 
 function fingerprint(type, args) {
     return JSON.stringify(type === 'image'
-        ? [type, args.requestId, args.prompt, args.imageAttachmentId ?? null]
+        ? [type, args.requestId, args.prompt, args.imageAttachmentId ?? null, args.referenceImage ?? null]
         : [type, args.requestId, args.filename, args.content]);
 }
 
@@ -619,8 +621,9 @@ function executionFailure(exec, args, kind, route) {
         ? 'Image generation and editing are disabled after a document or plain-text page enters this turn.'
         : 'This QQ generation tool call belongs to an expired or cancelled message.';
     if (kind === 'image' && !route) return 'Image generation is not configured.';
-    const names = kind === 'image' ? ['requestId', 'prompt', 'imageAttachmentId'] : ['requestId', 'filename', 'content'];
-    if (!exactArguments(args, names) || !exactArguments(exec?.arguments, names)
+    const names = kind === 'image' ? ['requestId', 'prompt'] : ['requestId', 'filename', 'content'];
+    const optionalNames = kind === 'image' ? ['imageAttachmentId', 'referenceImage'] : [];
+    if (!exactArguments(args, names, optionalNames) || !exactArguments(exec?.arguments, names, optionalNames)
         || JSON.stringify(args) !== JSON.stringify(exec.arguments)) {
         return 'Generation tool arguments do not match the allowed schema.';
     }
@@ -630,6 +633,12 @@ function executionFailure(exec, args, kind, route) {
     if (kind === 'image') {
         if (typeof args.prompt !== 'string' || args.prompt.trim().length === 0 || args.prompt.length > MAX_PROMPT_CHARS || !safePromptText(args.prompt)) {
             return 'Image prompts must be non-empty text of at most 4000 characters.';
+        }
+        if (args.imageAttachmentId !== undefined && args.referenceImage !== undefined) {
+            return 'Choose either an authorized QQ imageAttachmentId or one bundled referenceImage, not both.';
+        }
+        if (args.referenceImage !== undefined && !isDayuAssetImagePath(args.referenceImage)) {
+            return 'referenceImage must be an absolute image file inside the bundled Dayu asset directory.';
         }
         if (args.imageAttachmentId !== undefined
             && !getGenerationImageAttachment(scope, args.requestId, args.imageAttachmentId)
@@ -728,10 +737,10 @@ async function performImageTask({ scope, request, args, exec, service, quota, se
         const afterAcquire = await interrupted();
         if (afterAcquire) return afterAcquire;
         let imageBytes;
-        if (imageGrant) {
-            const maxBytes = imageGrant.maxBytes ?? MAX_IMAGE_BYTES;
-            const remote = !imageGrant.localPath;
-            if (imageGrant.size !== null && imageGrant.size > maxBytes) {
+        if (imageGrant || args.referenceImage) {
+            const maxBytes = imageGrant?.maxBytes ?? MAX_IMAGE_BYTES;
+            const remote = Boolean(imageGrant && !imageGrant.localPath);
+            if (imageGrant && imageGrant.size !== null && imageGrant.size > maxBytes) {
                 const notice = notices['too-large'];
                 await sendOperationalNotice(sender, scope, request, notice, 'image', noticeSignal);
                 return result('too-large', notice);
@@ -740,12 +749,12 @@ async function performImageTask({ scope, request, args, exec, service, quota, se
                 const { loadChatImageBytes } = await import('./qqbot-chat-policy.mjs');
                 if (operationSignal.aborted) throw operationSignal.reason ?? new Error('cancelled');
                 if (remote) logDownloadDiagnostics(imageGrant, 'start');
-                // Source URL is taken only from the request-scoped grant. The
-                // downloader validates public HTTPS and image bytes; no file is
-                // written for a quoted base image, even on a failed edit.
-                const source = isRecentImage
+                // QQ sources come only from request-scoped grants. The sole
+                // local-path exception is a bundled Dayu image validated by
+                // qqbot-assets.mjs; its bytes, never its path, reach the API.
+                const source = args.referenceImage ?? (isRecentImage
                     ? `qqbot-image:${args.requestId}:${imageGrant.imageAttachmentId}`
-                    : imageGrant.localPath ?? imageGrant.sourceUrl;
+                    : imageGrant.localPath ?? imageGrant.sourceUrl);
                 imageBytes = Buffer.from(await loadChatImageBytes(source, maxBytes,
                     exec.sourceExecution ?? exec, operationSignal));
                 if (operationSignal.aborted) throw operationSignal.reason ?? new Error('cancelled');
@@ -982,7 +991,8 @@ function imageToolSchema() {
                 maxLength: MAX_PROMPT_CHARS,
                 description: 'Final image prompt (at most 4000 characters). Before calling, use the matched original QQ request and its explicit quote only: clarify short or vague visual descriptions with concise subject, composition, lighting, palette, and style details; preserve every explicit subject, style, text, quantity, and prohibition, add no unrequested theme or style, leave detailed prompts or requests to keep wording unchanged as written, and for edits describe only requested changes while preserving everything else. Prompt polishing alone does not authorize image generation.',
             },
-            imageAttachmentId: { type: 'string', minLength: 1, maxLength: 64, description: 'Required for editing: plain opaque imageAttachmentId from images or recentImages on that same original request. Omit only for a requested new image. If multiple recent images could be the base, ask which one before calling.' },
+            imageAttachmentId: { type: 'string', minLength: 1, maxLength: 64, description: 'For editing a QQ image, use the plain opaque imageAttachmentId from images or recentImages on that same original request. Do not combine with referenceImage. If multiple recent images could be the base, ask which one before calling.' },
+            referenceImage: { type: 'string', minLength: 1, maxLength: 512, description: 'Optional local bundled reference image path. When the user explicitly asks for a self-portrait, use only /opt/qqbot-assets/dayu/portrait.png; the six-view character-standard.png is for checking appearance, not generation input. Do not combine with imageAttachmentId; the server reads and uploads the image bytes.' },
         },
         required: ['requestId', 'prompt'],
         additionalProperties: false,
@@ -1065,7 +1075,7 @@ export function registerGenerationTools(ctx, options = {}) {
     if (route) {
         registerStatusTool(ctx, {
             name: GENERATE_IMAGE_TOOL,
-            description: 'Generate one image from a prompt, or edit one PNG/JPEG/GIF/WebP image explicitly attached to or quoted in the same original QQ request. Unsupported input encodings, including GIF/WebP and PNG/JPEG that need normalization, are converted to PNG automatically; animated inputs use the first frame. Use only when that original user clearly asks for image generation or editing. Before calling, improve short or vague visual descriptions into concise, concrete prompts using only that original request and its explicit QQ quote: add moderate subject, composition, lighting, palette, and style detail while preserving explicit subject, style, text, quantity, and prohibitions; do not impose a style or add an unrequested theme. Keep detailed prompts and requests to preserve wording unchanged as written. For edits, state only the requested changes and preserve everything else. Keep the final prompt at or below 4000 characters. Prompt polishing is not authorization to generate. Pass the matching opaque requestId and, for editing, an imageAttachmentId listed under that same request. Never use another batch member’s or historical personal information, and never pass a URL, path, user id, or group id.',
+            description: 'Generate one image from a prompt, edit one PNG/JPEG/GIF/WebP image explicitly attached to or quoted in the same original QQ request, or use the bundled Dayu portrait image as a reference when the user explicitly asks for a self-portrait. Always pass the matching opaque requestId. For QQ editing, also pass that request’s imageAttachmentId; for a Dayu self-portrait, pass /opt/qqbot-assets/dayu/portrait.png as referenceImage. Never combine these image inputs. Only the dedicated Dayu asset directory accepts a local reference path; the server reads and uploads image bytes. Unsupported input encodings are converted to PNG automatically; animated inputs use the first frame. Use only when that original user clearly asks for image generation or editing. Before calling, improve short or vague visual descriptions into concise, concrete prompts using only that original request and its explicit QQ quote: add moderate subject, composition, lighting, palette, and style detail while preserving explicit subject, style, text, quantity, and prohibitions; do not impose a style or add an unrequested theme. Keep detailed prompts and requests to preserve wording unchanged as written. For edits, state only the requested changes and preserve everything else. Keep the final prompt at or below 4000 characters. Prompt polishing is not authorization to generate. Never use another batch member’s or historical personal information, or pass arbitrary paths, URLs, user ids, or group ids.',
             parameters: imageToolSchema(),
             async execute(args, exec) {
                 return executeGeneration(args, exec, 'image', context);

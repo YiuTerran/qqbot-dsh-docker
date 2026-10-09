@@ -11,7 +11,7 @@
 | dsh | `@deepseek-ai/dsh@0.1.7-rc.2` |
 | QQ 插件 | `@tencent-connect/dsh-qqbot@0.5.0` |
 
-当前镜像标签为 `tryao/qqbot-dsh:v0.12.10`。可选 TRPG 组件独立发布：Gensokyo-MCP `v0.3.1`、海豹骰 `v1.6.2-bridge.8`。Dockerfile 固定基础镜像摘要及软件包版本；不发布 `latest` 标签。
+当前镜像标签为 `tryao/qqbot-dsh:v0.13.0`。可选 TRPG 组件独立发布：Gensokyo-MCP `v0.3.1`、海豹骰 `v1.6.2-bridge.8`。Dockerfile 固定基础镜像摘要及软件包版本；不发布 `latest` 标签。
 
 ## 快速部署
 
@@ -37,7 +37,7 @@ Compose 使用 `dsh-qqbot-data` 和 `dsh-qqbot-workspace` 命名卷。升级或�
 
 基础聊天使用上面选定的聊天服务。官方模式默认启用 DeepSeek 原生网页搜索；第三方模式默认用 `LLM_API_BASE_URL` 搜索，也可用 `LLM_SEARCH_BASE_URL` 覆盖。`LLM_SEARCH_MODEL` 默认 `deepseek-flash`，与聊天模型独立。
 
-视觉模型使用当前聊天凭据模式的服务。可选图片生成/编辑路由使用独立密钥；在 `.env` 中一起设置 `IMAGE_API_KEY`、`IMAGE_API_BASE_URL` 和 `IMAGE_MODEL`，`IMAGE_API_PROTOCOL` 可选 `openai-images`（默认）或 `xai-images`。未配置时不会提供图片生成工具。
+视觉模型使用当前聊天凭据模式的服务。可选图片生成/编辑路由使用独立密钥；在 `.env` 中一起设置 `IMAGE_API_KEY`、`IMAGE_API_BASE_URL` 和 `IMAGE_MODEL`，`IMAGE_API_PROTOCOL` 可选 `openai-images`（默认）或 `xai-images`。未配置时不会提供图片生成工具。镜像随附大肥鱼六视图与正面立绘；启用生图后，机器人可将正面立绘作为自画像参考图。素材署名与许可见 [`assets/dayu`](assets/dayu/README.md)。
 
 可选 OneBot/TRPG 集成默认关闭。启用 `QQBOT_ONEBOT_ENABLED=true` 并启动 `trpg` Compose profile 后，可通过 Gensokyo-MCP 调用海豹骰的掷骰、检定、角色卡和规则查询等能力。完整匹配已开放原生命令的消息直接转发后端；自然语言请求、命令帮助及后端错误解释由 LLM 处理。完整配置、权限和 YAML 实例见 [OneBot 集成说明](docs/onebot-integration.md)。
 

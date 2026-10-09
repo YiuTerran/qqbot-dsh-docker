@@ -26,6 +26,7 @@ const { beginGenerationTurn, endGenerationTurn, getGenerationRequest, getGenerat
 const { beginDocumentTurn, endDocumentTurn, getDocumentTurn, runInDocumentExecution, bindDocumentExecution } = documentScopeModule;
 const { setCurrentImages, clearCurrentImages } = chatPolicyModule;
 const { createGenerationSender } = senderModule;
+const { DAYU_ASSET_ROOT } = await import(pathToFileURL(join(generationDir, 'qqbot-assets.mjs')).href);
 
 const dshRoot = '/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/';
 const profilePeers = '/data/profiles/qqbot/node_modules/@deepseek-ai';
@@ -902,6 +903,8 @@ test('registered native image tool uses same-source attachment bytes, user quota
     assert.match(modelFacingSchema, /4000 characters/u, 'the model-facing image tool states the final prompt limit');
     assert.match(modelFacingSchema, /opaque requestId/u, 'the model-facing image tool preserves the opaque requestId requirement');
     assert.match(modelFacingSchema, /"maxLength":4000/u, 'the real Cordis tool schema bounds the prompt field at 4000 characters');
+    assert.match(modelFacingSchema, /referenceImage/u, 'the image tool exposes the dedicated bundled portrait reference');
+    assert.match(modelFacingSchema, /portrait\.png/u, 'the model-facing instructions select the single front portrait');
 
     const agent = {};
     beginDocumentTurn(agent, { content: 'Edit the attached picture.' });
@@ -959,6 +962,82 @@ test('registered native image tool uses same-source attachment bytes, user quota
     assert.equal(notices.length, 0);
     await endGenerationTurn(agent, scope);
     endDocumentTurn(agent, documentScope);
+});
+
+test('native self portrait uploads the bundled portrait bytes through the existing image edit route', async (t) => {
+    const portraitPath = join(DAYU_ASSET_ROOT, 'portrait.png');
+    const portraitBytes = await readFile(portraitPath);
+    const apiRequests = [];
+    const imageSends = [];
+    const notices = [];
+    const quota = makeQuota();
+    const sender = {
+        async sendNotice(request, text) { notices.push({ request, text }); return { sent: true }; },
+        async sendImage(request, bytes) { imageSends.push({ request, bytes }); return { sent: true }; },
+        async sendMarkdownFile() { return { sent: true }; },
+        async sendMarkdownFallback() { return { sent: true }; },
+    };
+    const service = makeImageService({ onRequest: async (request) => {
+        apiRequests.push(request);
+        return responseImage();
+    } });
+    const { ctx } = await nativeGenerationRuntime(t, {
+        route: route(), sender, quota, imageService: service, markdownEnabled: true,
+    });
+    const agent = {};
+    beginDocumentTurn(agent, { content: 'Draw a portrait of yourself in a moonlit garden.' });
+    const documentScope = getDocumentTurn(agent);
+    const request = makeGenerationRequest('owner-dayu', 'group-dayu', 'message-dayu');
+    const scope = beginGenerationTurn(agent, [request], [], { documentScope });
+    const [requestId] = [...scope.requests.keys()];
+    const args = {
+        requestId,
+        prompt: 'A friendly self portrait of the blue whale mascot in a moonlit garden.',
+        referenceImage: portraitPath,
+    };
+
+    const first = await nativeCall(ctx, GENERATE_IMAGE_TOOL, args, agent, 'dayu-self-portrait');
+    assert.equal(first.isError, false, JSON.stringify(first));
+    assert.equal(first.value.status, 'sent');
+    assertRenderedImageReceipt(first);
+    assert.equal(apiRequests.length, 1);
+    assert.equal(requestUrl(apiRequests[0]), 'https://image-api.example.test/v1/images/edits',
+        'a bundled reference uses the existing image edit endpoint');
+    assert.ok(apiRequests[0].body instanceof FormData);
+    assert.equal(apiRequests[0].body.get('prompt'), args.prompt);
+    assert.equal(apiRequests[0].body.get('model'), 'fixture-image-model');
+    const uploaded = apiRequests[0].body.get('image');
+    assert.ok(uploaded instanceof Blob);
+    assert.deepEqual(Buffer.from(await uploaded.arrayBuffer()), portraitBytes,
+        'the API receives the actual bundled PNG bytes, never a filesystem path');
+    assert.equal(imageSends.length, 1);
+    assert.deepEqual(imageSends[0].request.replyTarget, request.replyTarget);
+
+    const duplicate = await nativeCall(ctx, GENERATE_IMAGE_TOOL, args, agent, 'dayu-self-portrait');
+    assert.equal(duplicate.value.status, 'sent');
+    assert.equal(apiRequests.length, 1, 'same call ID does not upload or generate twice');
+    assert.equal(imageSends.length, 1, 'same call ID does not send a duplicate QQ image');
+
+    const changedReference = await nativeCall(ctx, GENERATE_IMAGE_TOOL,
+        { ...args, referenceImage: join(DAYU_ASSET_ROOT, 'character-standard.png') },
+        agent, 'dayu-self-portrait');
+    assert.equal(changedReference.isError, true, 'reusing a call ID with a different reference path is rejected');
+
+    const arbitraryPath = await nativeCall(ctx, GENERATE_IMAGE_TOOL,
+        { requestId, prompt: args.prompt, referenceImage: '/tmp/portrait.png' }, agent, 'dayu-arbitrary-path');
+    assert.equal(arbitraryPath.isError, true, 'paths outside the dedicated bundled directory are denied');
+    const bothInputs = await nativeCall(ctx, GENERATE_IMAGE_TOOL,
+        { ...args, imageAttachmentId: 'not-authorized' }, agent, 'dayu-two-image-inputs');
+    assert.equal(bothInputs.isError, true, 'a bundled reference cannot be combined with a QQ attachment grant');
+    assert.equal(apiRequests.length, 1);
+    assert.equal(imageSends.length, 1);
+    assert.equal(notices.length, 0, 'pre-dispatch argument refusals do not send misleading completion notices');
+
+    await endGenerationTurn(agent, scope);
+    endDocumentTurn(agent, documentScope);
+    const expiredTurn = await nativeCall(ctx, GENERATE_IMAGE_TOOL, args, agent, 'dayu-expired-turn');
+    assert.equal(expiredTurn.isError, true, 'an expired or cancelled document turn cannot reuse the bundled portrait');
+    assert.equal(apiRequests.length, 1, 'an expired call cannot reach the image API');
 });
 
 test('native editing converts WebP, GIF and decoder-valid JPEG inputs to PNG only when the edit runs', async (t) => {
@@ -1342,7 +1421,8 @@ test('native Markdown remains available in document mode, validates UTF-8, and f
     assert.equal(documentScope.documentMode, true, 'a quoted document from a non-first merged request protects the whole turn');
 
     const imageResult = await nativeCall(ctx, GENERATE_IMAGE_TOOL,
-        { requestId: secondId, prompt: 'Make an image.' }, agent, 'doc-mode-image-call');
+        { requestId: secondId, prompt: 'Draw a self portrait.', referenceImage: join(DAYU_ASSET_ROOT, 'portrait.png') },
+        agent, 'doc-mode-image-call');
     assert.equal(imageResult.isError, true, 'native image execution is denied in document mode');
     assert.equal(quota.events.length, 0, 'the image guard runs before quota or provider work');
 

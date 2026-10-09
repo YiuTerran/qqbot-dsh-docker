@@ -998,8 +998,21 @@ test('raw face payloads never enter durable capture or posted events, and bot ou
         await createOnebotLogCaptureMiddleware({ runtime: { logCapture: service } })({
             message: current, state: { quote: { text: 'QUOTED_HISTORY_SENTINEL' }, history: ['HISTORY_SENTINEL'] },
         }, async () => {});
-        await waitFor(() => service.diagnostics().pending === 1);
-        const stored = await readFile(filePath, 'utf8');
+        let persisted;
+        const expectedText = 'before [表情] [表情: 微笑] after\n[表情: 微笑]';
+        await waitFor(async () => {
+            let snapshot;
+            try { snapshot = JSON.parse(await readFile(filePath, 'utf8')); }
+            catch (error) {
+                if (error?.code === 'ENOENT') return false;
+                throw error;
+            }
+            if (!snapshot.pending?.some((item) => item.event?.kind === 'message'
+                && item.event.text === expectedText)) return false;
+            persisted = JSON.stringify(snapshot);
+            return true;
+        }, 'sanitized face event must be durably persisted before inspecting the queue');
+        const stored = persisted;
         assert.ok(Buffer.byteLength(stored, 'utf8') < 8192, '64 KiB face data becomes a short durable record');
         for (const forbidden of [largeTag, 'faceType=', 'OPAQUE_EXTRA', 'SDK_POLLUTED_HISTORY',
             'RAW_QUOTE_SENTINEL', 'QUOTED_HISTORY_SENTINEL', 'HISTORY_SENTINEL']) {
@@ -1007,7 +1020,7 @@ test('raw face payloads never enter durable capture or posted events, and bot ou
         }
         service.setBackends(groupBackend);
         await waitFor(() => posted.length === 1);
-        assert.equal(posted[0].text, 'before [表情] [表情: 微笑] after\n[表情: 微笑]');
+        assert.equal(posted[0].text, expectedText);
         assert.equal(await service.recordBotDelivery({ target: { scope: 'group', targetId: 'group-a' },
             status: 'sent', messageId: 'face-bot', text: `bot ${largeTag} ${namedFace('赞')}` }), true);
         await waitFor(() => posted.length === 2);

@@ -25,6 +25,7 @@ const imageToolPolicyImport = `import { loadChatImageBytes } from '${policy}';`;
 const imageLoaderV3Marker = '// Chat-only scoped image loader v3.';
 const imageSchemaV3Marker = '// Chat-only image schema: scoped QQ media paths or public HTTPS image URLs v3.';
 const imageSchemaV4Marker = '// Chat-only image schema: current, quoted, public HTTPS, or recent QQ image references v4.';
+const imageSchemaV5Marker = '// Chat-only image schema: fixed bundled Dayu image assets v5.';
 const memoryVisionImageMarker = '// Chat-only recent image bytes stay in memory v1.';
 
 function replaceOne(content, needle, replacement, file) {
@@ -2076,7 +2077,7 @@ if (patchedMediaCleaner.split(mediaRootMarker).length !== 2
 }
 
 await patch('media/vision-tool.js', '// Chat-only image schema: current and explicitly quoted QQ attachments v2.', (content, file) => {
-    if (content.includes(imageSchemaV4Marker)) return content;
+    if (content.includes(imageSchemaV5Marker) || content.includes(imageSchemaV4Marker)) return content;
     if (content.includes(imageSchemaV3Marker)) return content;
     const oldDescription = [
         "const DESCRIPTION = 'Inspect one image and return the text the user needs. The image is a local absolute path '",
@@ -2122,7 +2123,7 @@ await patch('media/vision-tool.js', '// Chat-only image schema: current and expl
 });
 
 await patch('media/vision-tool.js', imageSchemaV3Marker, (content, file) => {
-    if (content.includes(imageSchemaV4Marker)) return content;
+    if (content.includes(imageSchemaV5Marker) || content.includes(imageSchemaV4Marker)) return content;
     const oldDescription = [
         '// Chat-only image schema: current and explicitly quoted QQ attachments v2.',
         "const DESCRIPTION = 'Inspect one image and return the text the user needs. The image must be an absolute path '",
@@ -2151,6 +2152,7 @@ await patch('media/vision-tool.js', imageSchemaV3Marker, (content, file) => {
 });
 
 await patch('media/vision-tool.js', imageSchemaV4Marker, (content, file) => {
+    if (content.includes(imageSchemaV5Marker)) return content;
     const previousDescription = [
         '// Chat-only image schema: current and explicitly quoted QQ attachments v2.',
         "const DESCRIPTION = 'Inspect one image and return the text the user needs. The image must be either an absolute path '",
@@ -2189,6 +2191,36 @@ await patch('media/vision-tool.js', imageSchemaV4Marker, (content, file) => {
     if (content.includes(previousParameter)) content = replaceOne(content, previousParameter, recentParameter, file);
     else if (!content.includes(recentParameter)) throw new Error(`Chat-only patch: expected v3 image parameter in ${file}`);
     return content;
+});
+
+await patch('media/vision-tool.js', imageSchemaV5Marker, (content, file) => {
+    const previousDescription = [
+        imageSchemaV4Marker,
+        "const DESCRIPTION = 'Inspect one image and return the text the user needs. The image must be either an absolute path '",
+        "    + 'of a current or explicitly quoted QQ image inside the QQ media directory, a public HTTPS image URL, or the exact '",
+        "    + 'imageRef capability listed in recentImages for the matching original request. Recent refs are only for explicit '",
+        "    + 'image analysis, OCR, image content questions, or edits. Other local paths and non-HTTPS URLs are forbidden. '",
+        "    + 'Current and explicitly quoted images and user-provided URLs take priority; never fall back to a recent image when '",
+        "    + 'the selected source fails. Ask which image to edit when multiple recent candidates are ambiguous. Always pass an '",
+        "    + 'explicit `prompt` with a precise instruction instead of relying on the generic default.';",
+    ].join('\n');
+    const newDescription = [
+        imageSchemaV5Marker,
+        "const DESCRIPTION = 'Inspect one image and return the text the user needs. The image must be either an absolute path '",
+        "    + 'of a current or explicitly quoted QQ image inside the QQ media directory, a public HTTPS image URL, the exact '",
+        "    + 'imageRef capability listed in recentImages for the matching original request, or an image asset inside the fixed '",
+        "    + '/opt/qqbot-assets/dayu/ directory. Use bundled assets for character appearance checks or the bot self-portrait; '",
+        "    + 'other local paths and non-HTTPS URLs are forbidden. Recent refs are only for explicit image analysis, OCR, image '",
+        "    + 'content questions, or edits. Current and explicitly quoted images and user-provided URLs take priority; never fall '",
+        "    + 'back to a recent image when the selected source fails. Ask which image to edit when multiple recent candidates are '",
+        "    + 'ambiguous. Always pass an explicit `prompt` with a precise instruction instead of relying on the generic default.';",
+    ].join('\n');
+    if (content.includes(previousDescription)) content = replaceOne(content, previousDescription, newDescription, file);
+    else throw new Error(`Chat-only patch: expected v4 vision description in ${file}`);
+    return replaceOne(content,
+        "                    description: 'Current or explicitly quoted QQ image path inside the QQ media directory, public HTTPS image URL, or exact recentImages imageRef for the matching original request.',",
+        "                    description: 'Current or explicitly quoted QQ image path, public HTTPS image URL, exact recentImages imageRef, or image asset inside /opt/qqbot-assets/dayu/.',",
+        file);
 });
 
 await patch('media/vision-tool.js', imageLoaderV3Marker, (content, file) => {
@@ -2273,7 +2305,10 @@ const patchedVision = updates.get(visionPath) ?? await readFile(visionPath, 'utf
 if (patchedVision.split(imageToolPolicyImport).length !== 2
     || patchedVision.split(`import { withMemoryVisionImage } from '${memoryImagesPolicy}';`).length !== 2
     || patchedVision.split(imageLoaderV3Marker).length !== 2
-    || patchedVision.split(imageSchemaV4Marker).length !== 2
+    || patchedVision.split(imageSchemaV5Marker).length !== 2
+    || patchedVision.includes(imageSchemaV4Marker)
+    || !patchedVision.includes("    + 'imageRef capability listed in recentImages for the matching original request, or an image asset inside the fixed '")
+    || !patchedVision.includes("                    description: 'Current or explicitly quoted QQ image path, public HTTPS image URL, exact recentImages imageRef, or image asset inside /opt/qqbot-assets/dayu/.',")
     || patchedVision.split(memoryVisionImageMarker).length !== 2
     || !patchedVision.includes('const data = await loadChatImageBytes(image, maxBytes, exec);')
     || !patchedVision.includes('loadImageBytes(image, vision.maxBytes, exec)')

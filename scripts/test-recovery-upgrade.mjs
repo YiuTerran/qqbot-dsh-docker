@@ -196,6 +196,45 @@ async function assertCurrentPatch(root) {
         for (const marker of markers) assert.equal(content.split(marker).length, 2, `${file}: exactly one ${marker}`);
         await run('--check', [join(root, file)]);
     }
+    const vision = await readFile(join(root, 'media/vision-tool.js'), 'utf8');
+    const bundledSchemaMarker = '// Chat-only image schema: fixed bundled Dayu image assets v5.';
+    assert.equal(vision.split(bundledSchemaMarker).length, 2, 'the vision tool has exactly one bundled-asset schema marker');
+    assert.ok(vision.includes("image asset inside /opt/qqbot-assets/dayu/"), 'the registered vision schema advertises the fixed asset directory');
+    assert.equal(vision.includes('// Chat-only image schema: current, quoted, public HTTPS, or recent QQ image references v4.'),
+        false, 'the stale V4 schema marker is replaced');
+}
+
+async function downgradeVisionSchemaToV4(root) {
+    const path = join(root, 'media/vision-tool.js');
+    let vision = await readFile(path, 'utf8');
+    const v5 = [
+        '// Chat-only image schema: fixed bundled Dayu image assets v5.',
+        "const DESCRIPTION = 'Inspect one image and return the text the user needs. The image must be either an absolute path '",
+        "    + 'of a current or explicitly quoted QQ image inside the QQ media directory, a public HTTPS image URL, the exact '",
+        "    + 'imageRef capability listed in recentImages for the matching original request, or an image asset inside the fixed '",
+        "    + '/opt/qqbot-assets/dayu/ directory. Use bundled assets for character appearance checks or the bot self-portrait; '",
+        "    + 'other local paths and non-HTTPS URLs are forbidden. Recent refs are only for explicit image analysis, OCR, image '",
+        "    + 'content questions, or edits. Current and explicitly quoted images and user-provided URLs take priority; never fall '",
+        "    + 'back to a recent image when the selected source fails. Ask which image to edit when multiple recent candidates are '",
+        "    + 'ambiguous. Always pass an explicit `prompt` with a precise instruction instead of relying on the generic default.';",
+    ].join('\n');
+    const v4 = [
+        '// Chat-only image schema: current, quoted, public HTTPS, or recent QQ image references v4.',
+        "const DESCRIPTION = 'Inspect one image and return the text the user needs. The image must be either an absolute path '",
+        "    + 'of a current or explicitly quoted QQ image inside the QQ media directory, a public HTTPS image URL, or the exact '",
+        "    + 'imageRef capability listed in recentImages for the matching original request. Recent refs are only for explicit '",
+        "    + 'image analysis, OCR, image content questions, or edits. Other local paths and non-HTTPS URLs are forbidden. '",
+        "    + 'Current and explicitly quoted images and user-provided URLs take priority; never fall back to a recent image when '",
+        "    + 'the selected source fails. Ask which image to edit when multiple recent candidates are ambiguous. Always pass an '",
+        "    + 'explicit `prompt` with a precise instruction instead of relying on the generic default.';",
+    ].join('\n');
+    assert.equal(vision.split(v5).length, 2, 'fixture source starts with exactly one V5 vision description');
+    vision = vision.replace(v5, v4);
+    const newParameter = "                    description: 'Current or explicitly quoted QQ image path, public HTTPS image URL, exact recentImages imageRef, or image asset inside /opt/qqbot-assets/dayu/.',";
+    const oldParameter = "                    description: 'Current or explicitly quoted QQ image path inside the QQ media directory, public HTTPS image URL, or exact recentImages imageRef for the matching original request.',";
+    assert.equal(vision.split(newParameter).length, 2, 'fixture source starts with exactly one V5 image parameter');
+    vision = vision.replace(newParameter, oldParameter);
+    await writeFile(path, vision);
 }
 
 for (const version of ['v0.12.4', 'pre-thinking', 'pre-concurrency', 'pre-recovery', 'recovery-v1', 'onebot-v10.2', 'onebot-v11.2']) {
@@ -223,6 +262,19 @@ for (const version of ['v0.12.4', 'pre-thinking', 'pre-concurrency', 'pre-recove
         assert.deepEqual(await hashes(root), upgraded, 'the full dist is byte-for-byte unchanged on repeat startup');
     });
 }
+
+integration('a persisted V4 vision schema upgrades to bundled assets and remains idempotent', async (t) => {
+    const root = await isolatedAdapter(t);
+    await run(enforcer, [root]);
+    await downgradeVisionSchemaToV4(root);
+    const before = await hashes(root);
+    await run(enforcer, [root]);
+    await assertCurrentPatch(root);
+    const upgraded = await hashes(root);
+    assert.notDeepEqual(upgraded, before, 'the persisted V4 description was replaced');
+    await run(enforcer, [root]);
+    assert.deepEqual(await hashes(root), upgraded, 'the V5 patch is byte-for-byte idempotent');
+});
 
 integration('a partial current-event mention sanitizer fails before writing any adapter file', async (t) => {
     const root = await isolatedAdapter(t);

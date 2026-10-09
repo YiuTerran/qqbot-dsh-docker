@@ -290,6 +290,38 @@ await edit('media/vision-tool.js', (source) => {
     else if (source.includes('withMemoryVisionImage') || source.includes('qqbot-memory-images.mjs')) {
         throw new Error('pre-concurrency fixture found partial memory vision handling');
     }
+    const bundledMarker = '// Chat-only image schema: fixed bundled Dayu image assets v5.';
+    if (source.includes(bundledMarker)) {
+        const current = [
+            bundledMarker,
+            "const DESCRIPTION = 'Inspect one image and return the text the user needs. The image must be either an absolute path '",
+            "    + 'of a current or explicitly quoted QQ image inside the QQ media directory, a public HTTPS image URL, the exact '",
+            "    + 'imageRef capability listed in recentImages for the matching original request, or an image asset inside the fixed '",
+            "    + '/opt/qqbot-assets/dayu/ directory. Use bundled assets for character appearance checks or the bot self-portrait; '",
+            "    + 'other local paths and non-HTTPS URLs are forbidden. Recent refs are only for explicit image analysis, OCR, image '",
+            "    + 'content questions, or edits. Current and explicitly quoted images and user-provided URLs take priority; never fall '",
+            "    + 'back to a recent image when the selected source fails. Ask which image to edit when multiple recent candidates are '",
+            "    + 'ambiguous. Always pass an explicit `prompt` with a precise instruction instead of relying on the generic default.';",
+        ].join('\n');
+        const previous = [
+            '// Chat-only image schema: current, quoted, public HTTPS, or recent QQ image references v4.',
+            "const DESCRIPTION = 'Inspect one image and return the text the user needs. The image must be either an absolute path '",
+            "    + 'of a current or explicitly quoted QQ image inside the QQ media directory, a public HTTPS image URL, or the exact '",
+            "    + 'imageRef capability listed in recentImages for the matching original request. Recent refs are only for explicit '",
+            "    + 'image analysis, OCR, image content questions, or edits. Other local paths and non-HTTPS URLs are forbidden. '",
+            "    + 'Current and explicitly quoted images and user-provided URLs take priority; never fall back to a recent image when '",
+            "    + 'the selected source fails. Ask which image to edit when multiple recent candidates are ambiguous. Always pass an '",
+            "    + 'explicit `prompt` with a precise instruction instead of relying on the generic default.';",
+        ].join('\n');
+        source = replaceOnce(source, current, previous, 'bundled-asset vision schema');
+        source = replaceOnce(source,
+            "                    description: 'Current or explicitly quoted QQ image path, public HTTPS image URL, exact recentImages imageRef, or image asset inside /opt/qqbot-assets/dayu/.',",
+            "                    description: 'Current or explicitly quoted QQ image path inside the QQ media directory, public HTTPS image URL, or exact recentImages imageRef for the matching original request.',",
+            'bundled-asset vision parameter');
+    }
+    else if (source.includes('/opt/qqbot-assets/dayu/')) {
+        throw new Error('pre-concurrency fixture found partial bundled-asset vision schema');
+    }
     const marker = '// Chat-only image schema: current, quoted, public HTTPS, or recent QQ image references v4.';
     if (source.includes(marker)) {
         const current = [

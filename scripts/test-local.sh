@@ -58,6 +58,7 @@ legacy_stock_agents_fixtures=(
     "${repo_root}/scripts/fixtures/agents-legacy-v0.8.0-stock.md"
     "${repo_root}/scripts/fixtures/agents-v0.12.9-stock.md"
     "${repo_root}/scripts/fixtures/agents-v0.12.10-stock.md"
+    "${repo_root}/scripts/fixtures/agents-v0.12.10-pre-selfportrait-stock.md"
 )
 legacy_stock_agents_hashes=(
     c249259a60d4b04c9c9c3df1a92977adf748ba4143a3639c3e85a006ad802ef5
@@ -76,6 +77,7 @@ legacy_stock_agents_hashes=(
     a38a9940dee2fe8183f1192a7996e84abf12deccf6b9185e581aa3b1db79da5a
     d8212769d26825832637a4522476c8623a7dd8ceaf7d1bedf05efac0d7bd3e8c
     ed63c35f9a171136374d81a5e99a3d0b48a5303afcfa4443b09164d8126579df
+    53cb71cc3832cd6da1b20c9226370143afe384f4e6796893c2d7a8e7d2f3934d
 )
 persistent_reset_probe="${repo_root}/scripts/test-persistent-reset.mjs"
 suffix="$(date +%s)-$$"
@@ -1400,7 +1402,8 @@ docker run --rm --network none --entrypoint node --volume "${legacy_data_volume}
         ["media/vision-tool.js", "timeoutMs: vision.timeoutMs"],
         ["media/vision-tool.js", "loadChatImageBytes"],
         ["media/vision-tool.js", "Chat-only scoped image loader v3."],
-        ["media/vision-tool.js", "scoped QQ media paths or public HTTPS image URLs v3."],
+        ["media/vision-tool.js", "Chat-only image schema: fixed bundled Dayu image assets v5."],
+        ["media/vision-tool.js", "/opt/qqbot-assets/dayu/"],
         ["media/media-cleaner.js", "Chat-only persistent media root v1."]
     ];
     const restoredAttachment = fs.readFileSync(root + "/transport/attachment.js", "utf8");
@@ -1446,6 +1449,8 @@ docker run --rm \
     grep -Fq "timeoutMs: vision.timeoutMs" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/vision-tool.js
     grep -Fq "import { loadChatImageBytes } from '\''/opt/qqbot-defaults/qqbot-chat-policy.mjs'\'';" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/vision-tool.js
     grep -Fq "Chat-only scoped image loader v3." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/vision-tool.js
+    grep -Fq "Chat-only image schema: fixed bundled Dayu image assets v5." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/vision-tool.js
+    grep -Fq "/opt/qqbot-assets/dayu/" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/vision-tool.js
     grep -Fq "loadImageBytes(image, vision.maxBytes, exec)" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/vision-tool.js
     grep -Fq "// Chat-only persistent media root v1." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/media-cleaner.js
     grep -Fq "export const MEDIA_ROOT = '\''/data/qqbot-media'\'';" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/media-cleaner.js

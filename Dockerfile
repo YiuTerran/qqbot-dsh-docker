@@ -93,6 +93,8 @@ RUN set -eu \
 
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY defaults/AGENTS.md /opt/qqbot-defaults/AGENTS.md
+COPY assets/dayu/ /opt/qqbot-assets/dayu/
+COPY defaults/qqbot-assets.mjs /opt/qqbot-defaults/qqbot-assets.mjs
 COPY defaults/cordis.safety.patch.yml /opt/qqbot-defaults/cordis.safety.patch.yml
 COPY defaults/qqbot-chat-policy.mjs /opt/qqbot-defaults/qqbot-chat-policy.mjs
 COPY defaults/qqbot-onebot.mjs /opt/qqbot-defaults/qqbot-onebot.mjs
@@ -130,6 +132,8 @@ RUN node --check /opt/qqbot-defaults/qqbot-mention-text.mjs \
 RUN node --input-type=module -e "import '/opt/qqbot-defaults/qqbot-chat-policy.mjs'; import '/opt/qqbot-defaults/qqbot-generation-scope.mjs'; import '/opt/qqbot-defaults/qqbot-memory-images.mjs'; import sharp from '/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/sharp/dist/index.cjs'; import { normalizeEditImage } from '/opt/qqbot-defaults/qqbot-image-input.mjs'; const source = await sharp({ create: { width: 1, height: 1, channels: 4, background: { r: 255, g: 0, b: 0, alpha: 1 } } }).webp({ lossless: true }).toBuffer(); const output = await normalizeEditImage(source, { inspectImage: bytes => bytes[0] === 137 ? 'image/png' : undefined }); const metadata = await sharp(output).metadata(); if (metadata.format !== 'png' || metadata.width !== 1 || metadata.height !== 1) process.exit(1)"
 
 RUN chmod 0755 /usr/local/bin/docker-entrypoint.sh \
+    && find /opt/qqbot-assets -type d -exec chmod 0555 {} + \
+    && find /opt/qqbot-assets -type f -exec chmod 0444 {} + \
     && chown -R node:node /opt/dsh-seed /opt/qqbot-defaults
 
 # tini remains PID 1; docker-entrypoint drops the dsh process to the unprivileged
