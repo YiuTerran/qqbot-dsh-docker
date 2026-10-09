@@ -39,6 +39,7 @@ previous_stock_agents_v0_11_1_fixture="${repo_root}/scripts/fixtures/agents-v0.1
 previous_stock_agents_v0_11_2_fixture="${repo_root}/scripts/fixtures/agents-v0.11.2-stock.md"
 previous_stock_agents_v0_12_2_fixture="${repo_root}/scripts/fixtures/agents-v0.12.2-stock.md"
 previous_stock_agents_v0_12_5_fixture="${repo_root}/scripts/fixtures/agents-v0.12.5-stock.md"
+previous_stock_agents_v0_12_8_fixture="${repo_root}/scripts/fixtures/agents-v0.12.8-stock.md"
 persistent_reset_probe="${repo_root}/scripts/test-persistent-reset.mjs"
 suffix="$(date +%s)-$$"
 data_volume="dsh-qqbot-test-data-${suffix}"
@@ -125,6 +126,17 @@ if [[ ! -r "$previous_stock_agents_fixture" ]]; then
 fi
 if [[ ! -r "$previous_stock_agents_v0_12_5_fixture" ]]; then
     echo "missing previous stock AGENTS.md fixture: $previous_stock_agents_v0_12_5_fixture" >&2
+    exit 1
+fi
+if [[ ! -r "$previous_stock_agents_v0_12_8_fixture" ]]; then
+    echo "missing previous stock AGENTS.md fixture: $previous_stock_agents_v0_12_8_fixture" >&2
+    exit 1
+fi
+
+expected_v0_12_8_stock_agents_sha256=1b917f9daca010d80b69185a9b4b6d7bb89792a26ae2ac79deb09647aa9c0235
+actual_v0_12_8_stock_agents_sha256="$(sha256sum "$previous_stock_agents_v0_12_8_fixture" | cut -d ' ' -f 1)"
+if [[ "$actual_v0_12_8_stock_agents_sha256" != "$expected_v0_12_8_stock_agents_sha256" ]]; then
+    echo "unexpected v0.12.8 stock AGENTS.md fixture hash: $actual_v0_12_8_stock_agents_sha256" >&2
     exit 1
 fi
 
@@ -470,6 +482,21 @@ docker run --rm \
     --volume "${readonly_stock_agents_v0_10_data_volume}:/data" \
     --mount "type=bind,src=${previous_stock_agents_v0_12_5_fixture},dst=/data/AGENTS.md,readonly" \
     --mount "type=bind,src=${previous_stock_agents_v0_12_5_fixture},dst=/tmp/agents-stock.md,readonly" \
+    "$IMAGE" sh -ec 'cmp /data/AGENTS.md /tmp/agents-stock.md'
+docker run --rm --entrypoint sh \
+    --volume "${stock_agents_v0_10_data_volume}:/data" \
+    --mount "type=bind,src=${previous_stock_agents_v0_12_8_fixture},dst=/tmp/agents-stock.md,readonly" \
+    "$IMAGE" -ec 'cp /tmp/agents-stock.md /data/AGENTS.md; chmod 0644 /data/AGENTS.md'
+docker run --rm \
+    --volume "${stock_agents_v0_10_data_volume}:/data" \
+    "$IMAGE" sh -ec 'cmp /data/AGENTS.md /opt/qqbot-defaults/AGENTS.md'
+docker run --rm \
+    --volume "${stock_agents_v0_10_data_volume}:/data" \
+    "$IMAGE" sh -ec 'cmp /data/AGENTS.md /opt/qqbot-defaults/AGENTS.md'
+docker run --rm \
+    --volume "${readonly_stock_agents_v0_10_data_volume}:/data" \
+    --mount "type=bind,src=${previous_stock_agents_v0_12_8_fixture},dst=/data/AGENTS.md,readonly" \
+    --mount "type=bind,src=${previous_stock_agents_v0_12_8_fixture},dst=/tmp/agents-stock.md,readonly" \
     "$IMAGE" sh -ec 'cmp /data/AGENTS.md /tmp/agents-stock.md'
 docker run --rm --entrypoint sh \
     --volume "${symlink_stock_agents_data_volume}:/data" \

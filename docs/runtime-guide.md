@@ -50,7 +50,7 @@ LLM_API_KEY=YOUR_GATEWAY_API_KEY
 
 ## 自定义人设
 
-入口脚本首次启动时将默认指引放入 `/data/AGENTS.md`。可以只读绑定挂载自己的普通文件到该路径，以替换人设和软性行为指引。它不能启用新工具或放宽运行时策略。镜像只会升级与其 v0.9.0、v0.10.0、v0.10.3、v0.11.0、v0.11.1 或 v0.11.2 内置默认文件逐字节一致的可写普通文件；自定义内容、符号链接和只读挂载不会被覆盖。
+入口脚本首次启动时将默认指引放入 `/data/AGENTS.md`。可以只读绑定挂载自己的普通文件到该路径，以替换人设和软性行为指引。它不能启用新工具或放宽运行时策略。镜像只会升级与已知历史版本内置默认文件逐字节一致的可写普通文件；自定义内容、符号链接和只读挂载不会被覆盖。每次发布时同步更新 `defaults/AGENTS.md` 中声明的镜像版本，保留发布前默认文件对应的 fixture 和 SHA-256，并更新公开镜像标签。
 
 ## 启动与故障排查
 
@@ -95,7 +95,7 @@ mkdir -p /tmp/qqbot-image-probe
 docker run --rm --entrypoint node --env-file .env \
   --mount "type=bind,src=$PWD/scripts/verify-image-route.mjs,dst=/tmp/verify-image-route.mjs,readonly" \
   --mount type=bind,src=/tmp/qqbot-image-probe,dst=/probe-output \
-  tryao/qqbot-dsh:v0.12.8 /tmp/verify-image-route.mjs /probe-output
+  tryao/qqbot-dsh:v0.12.9 /tmp/verify-image-route.mjs /probe-output
 ```
 
 探测会发起真实图片服务请求并消耗服务额度；不会发送真实 QQ 消息或修改生产额度。真实 QQ 图片和文件投递仍需用机器人账号验证。
