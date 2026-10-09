@@ -11,7 +11,7 @@
 | dsh | `@deepseek-ai/dsh@0.1.7-rc.2` |
 | QQ 插件 | `@tencent-connect/dsh-qqbot@0.5.0` |
 
-当前镜像标签为 `tryao/qqbot-dsh:v0.12.9`。可选 TRPG 组件独立发布：Gensokyo-MCP `v0.3.1`、海豹骰 `v1.6.2-bridge.8`。Dockerfile 固定基础镜像摘要及软件包版本；不发布 `latest` 标签。
+当前镜像标签为 `tryao/qqbot-dsh:v0.12.10`。可选 TRPG 组件独立发布：Gensokyo-MCP `v0.3.1`、海豹骰 `v1.6.2-bridge.8`。Dockerfile 固定基础镜像摘要及软件包版本；不发布 `latest` 标签。
 
 ## 快速部署
 
@@ -46,6 +46,8 @@ v0.12.6 起，命令帮助请求由 LLM 兜底说明；可读日志中的 QQ @�
 v0.12.8 修复第三方模式的搜索默认地址：`LLM_SEARCH_BASE_URL` 留空时使用 `LLM_API_BASE_URL`，`LLM_SEARCH_MODEL` 仍默认 `deepseek-flash`。
 
 v0.12.9 更新内置人设中的当前版本与斜杠命令说明。斜杠命令须作为当前消息正文独立发送；工具能力以当前请求提供的工具定义为准。
+
+v0.12.10 修复旧版内置指引的迁移识别，只有与已发布默认文件逐字节一致的配置会升级；自定义指引、符号链接和只读挂载继续保留。
 
 v0.12.7 配套海豹骰 v1.6.2-bridge.8，修复同日志旧 @机器人识别及多段正文展示；机器人保留 Markdown 渲染且不染色，用户正文继续染色。Markdown/TXT 导出隐藏系统缺口提示，`.log stat` 保留诊断统计。
 

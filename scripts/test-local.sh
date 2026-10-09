@@ -40,6 +40,41 @@ previous_stock_agents_v0_11_2_fixture="${repo_root}/scripts/fixtures/agents-v0.1
 previous_stock_agents_v0_12_2_fixture="${repo_root}/scripts/fixtures/agents-v0.12.2-stock.md"
 previous_stock_agents_v0_12_5_fixture="${repo_root}/scripts/fixtures/agents-v0.12.5-stock.md"
 previous_stock_agents_v0_12_8_fixture="${repo_root}/scripts/fixtures/agents-v0.12.8-stock.md"
+previous_stock_agents_v0_12_9_fixture="${repo_root}/scripts/fixtures/agents-v0.12.9-stock.md"
+legacy_stock_agents_fixtures=(
+    "${repo_root}/scripts/fixtures/agents-legacy-v0.3.0-stock.md"
+    "${repo_root}/scripts/fixtures/agents-legacy-v0.3.1-stock.md"
+    "${repo_root}/scripts/fixtures/agents-legacy-v0.3.10-stock.md"
+    "${repo_root}/scripts/fixtures/agents-legacy-v0.3.8-stock.md"
+    "${repo_root}/scripts/fixtures/agents-legacy-v0.4.0-stock.md"
+    "${repo_root}/scripts/fixtures/agents-legacy-v0.4.1-stock.md"
+    "${repo_root}/scripts/fixtures/agents-legacy-v0.5.0-stock.md"
+    "${repo_root}/scripts/fixtures/agents-legacy-v0.6.0-stock.md"
+    "${repo_root}/scripts/fixtures/agents-legacy-v0.7.0-stock.md"
+    "${repo_root}/scripts/fixtures/agents-legacy-v0.7.3-stock.md"
+    "${repo_root}/scripts/fixtures/agents-legacy-v0.7.6-stock.md"
+    "${repo_root}/scripts/fixtures/agents-legacy-v0.7.7-stock.md"
+    "${repo_root}/scripts/fixtures/agents-legacy-v0.7.8-stock.md"
+    "${repo_root}/scripts/fixtures/agents-legacy-v0.8.0-stock.md"
+    "${repo_root}/scripts/fixtures/agents-v0.12.9-stock.md"
+)
+legacy_stock_agents_hashes=(
+    c249259a60d4b04c9c9c3df1a92977adf748ba4143a3639c3e85a006ad802ef5
+    9101cd863b9973e3ce7210e3d2f4e17fa23d8238564d463c18207fcf1622688d
+    c1240f192f24ab877e30a5314bbaa5cb0f84856a16e2561fbf00c5040cf6f2d9
+    aff7450858c1c0803ce1e290a682ce86d1f80e985f792da6a4a5eb2c3aeb14ae
+    4004715b3a57d107e20261a556123e2a1500a41c1f4641758a6a31ae3a4abbe3
+    b50f70c835f04501c8fb3991d4bb1c07700144910955da7de01ac87d06947f64
+    561ad14f612852bf0cecd80fd5abd5a0fab0f5d7e1092d29a77c23ec761f8545
+    31bc14c8a383f7acd9741a7f341f5ccb59c52b6e8cf8ae5aee47b84050984dd7
+    9c3528a07dad1af2e6880420174b0d85873052c33f3ed605a970dbb645ddb64f
+    a0951cf6b164b83e708ca36e6bf9dcd8f1aa637f32602de544ae8f9e4039e5e8
+    f8b0cd832ad0ba81f693538e2958b92ef589e66b695870113a458614607575b0
+    f71d8a3a4f3f191f141e759ba7806457444387d1dd7cbbde23486633a982b88e
+    34e4892a0caceff87f54091f358eeabc26bd42fd02a2e98cd371f3264a34bcb4
+    a38a9940dee2fe8183f1192a7996e84abf12deccf6b9185e581aa3b1db79da5a
+    d8212769d26825832637a4522476c8623a7dd8ceaf7d1bedf05efac0d7bd3e8c
+)
 persistent_reset_probe="${repo_root}/scripts/test-persistent-reset.mjs"
 suffix="$(date +%s)-$$"
 data_volume="dsh-qqbot-test-data-${suffix}"
@@ -63,6 +98,7 @@ readonly_stock_agents_v0_10_data_volume="dsh-qqbot-test-readonly-stock-agents-v0
 symlink_stock_agents_data_volume="dsh-qqbot-test-symlink-stock-agents-data-${suffix}"
 container="dsh-qqbot-test-${suffix}"
 instructions_file="$(mktemp)"
+custom_stock_agents_file="$(mktemp)"
 incompatible_log="$(mktemp)"
 
 log() {
@@ -80,6 +116,7 @@ cleanup() {
     docker rm --force "$container" >/dev/null 2>&1 || true
     docker volume rm "$data_volume" "$workspace_volume" "$override_data_volume" "$legacy_data_volume" "$dice_legacy_data_volume" "$incompatible_data_volume" "$media_guard_data_volume" "$search_env_data_volume" "$official_data_volume" "$search_fallback_data_volume" "$partial_recovery_data_volume" "$recovery_v1_data_volume" "$pre_concurrency_data_volume" "$partial_concurrency_data_volume" "$stock_agents_data_volume" "$readonly_stock_agents_data_volume" "$stock_agents_v0_10_data_volume" "$readonly_stock_agents_v0_10_data_volume" "$symlink_stock_agents_data_volume" >/dev/null 2>&1 || true
     rm -f "$instructions_file"
+    rm -f "$custom_stock_agents_file"
     rm -f "$incompatible_log"
 }
 trap cleanup EXIT
@@ -124,12 +161,22 @@ if [[ ! -r "$previous_stock_agents_fixture" ]]; then
     echo "missing previous stock AGENTS.md fixture: $previous_stock_agents_fixture" >&2
     exit 66
 fi
+expected_v0_9_stock_agents_sha256=fab8af8ab708ab6103eaea6093c682a069f8289f44f73605b849064ff474bdd9
+actual_v0_9_stock_agents_sha256="$(sha256sum "$previous_stock_agents_fixture" | cut -d ' ' -f 1)"
+if [[ "$actual_v0_9_stock_agents_sha256" != "$expected_v0_9_stock_agents_sha256" ]]; then
+    echo "unexpected v0.9.0 stock AGENTS.md fixture hash: $actual_v0_9_stock_agents_sha256" >&2
+    exit 1
+fi
 if [[ ! -r "$previous_stock_agents_v0_12_5_fixture" ]]; then
     echo "missing previous stock AGENTS.md fixture: $previous_stock_agents_v0_12_5_fixture" >&2
     exit 1
 fi
 if [[ ! -r "$previous_stock_agents_v0_12_8_fixture" ]]; then
     echo "missing previous stock AGENTS.md fixture: $previous_stock_agents_v0_12_8_fixture" >&2
+    exit 1
+fi
+if [[ ! -r "$previous_stock_agents_v0_12_9_fixture" ]]; then
+    echo "missing previous stock AGENTS.md fixture: $previous_stock_agents_v0_12_9_fixture" >&2
     exit 1
 fi
 
@@ -139,6 +186,20 @@ if [[ "$actual_v0_12_8_stock_agents_sha256" != "$expected_v0_12_8_stock_agents_s
     echo "unexpected v0.12.8 stock AGENTS.md fixture hash: $actual_v0_12_8_stock_agents_sha256" >&2
     exit 1
 fi
+
+for legacy_stock_agents_index in "${!legacy_stock_agents_fixtures[@]}"; do
+    legacy_stock_agents_fixture="${legacy_stock_agents_fixtures[$legacy_stock_agents_index]}"
+    expected_legacy_stock_agents_sha256="${legacy_stock_agents_hashes[$legacy_stock_agents_index]}"
+    if [[ ! -r "$legacy_stock_agents_fixture" ]]; then
+        echo "missing legacy stock AGENTS.md fixture: $legacy_stock_agents_fixture" >&2
+        exit 66
+    fi
+    actual_legacy_stock_agents_sha256="$(sha256sum "$legacy_stock_agents_fixture" | cut -d ' ' -f 1)"
+    if [[ "$actual_legacy_stock_agents_sha256" != "$expected_legacy_stock_agents_sha256" ]]; then
+        echo "unexpected legacy stock AGENTS.md fixture hash for $legacy_stock_agents_fixture: $actual_legacy_stock_agents_sha256" >&2
+        exit 1
+    fi
+done
 
 if [[ ! -r "$previous_stock_agents_v0_10_fixture" ]]; then
     echo "missing previous stock AGENTS.md fixture: $previous_stock_agents_v0_10_fixture" >&2
@@ -498,6 +559,35 @@ docker run --rm \
     --mount "type=bind,src=${previous_stock_agents_v0_12_8_fixture},dst=/data/AGENTS.md,readonly" \
     --mount "type=bind,src=${previous_stock_agents_v0_12_8_fixture},dst=/tmp/agents-stock.md,readonly" \
     "$IMAGE" sh -ec 'cmp /data/AGENTS.md /tmp/agents-stock.md'
+log "Checking every distinct legacy stock AGENTS.md hash migrates"
+for legacy_stock_agents_fixture in "${legacy_stock_agents_fixtures[@]}"; do
+    docker run --rm --network none --entrypoint sh \
+        --volume "${stock_agents_v0_10_data_volume}:/data" \
+        --mount "type=bind,src=${legacy_stock_agents_fixture},dst=/tmp/agents-legacy-stock.md,readonly" \
+        "$IMAGE" -ec 'cp /tmp/agents-legacy-stock.md /data/AGENTS.md; chmod 0644 /data/AGENTS.md'
+    docker run --rm --network none \
+        --volume "${stock_agents_v0_10_data_volume}:/data" \
+        "$IMAGE" sh -ec 'cmp /data/AGENTS.md /opt/qqbot-defaults/AGENTS.md'
+done
+
+log "Checking legacy custom suffix and read-only preservation"
+legacy_v0_7_stock_agents_fixture="${repo_root}/scripts/fixtures/agents-legacy-v0.7.0-stock.md"
+cp "$legacy_v0_7_stock_agents_fixture" "$custom_stock_agents_file"
+printf '\n\nUser customization that must survive migration.\n' >> "$custom_stock_agents_file"
+chmod 0644 "$custom_stock_agents_file"
+docker run --rm --network none --entrypoint sh \
+    --volume "${stock_agents_v0_10_data_volume}:/data" \
+    --mount "type=bind,src=${custom_stock_agents_file},dst=/tmp/custom-legacy-stock.md,readonly" \
+    "$IMAGE" -ec 'cp /tmp/custom-legacy-stock.md /data/AGENTS.md; chmod 0644 /data/AGENTS.md'
+docker run --rm --network none \
+    --volume "${stock_agents_v0_10_data_volume}:/data" \
+    --mount "type=bind,src=${custom_stock_agents_file},dst=/tmp/custom-legacy-stock.md,readonly" \
+    "$IMAGE" sh -ec 'cmp /data/AGENTS.md /tmp/custom-legacy-stock.md'
+docker run --rm --network none \
+    --volume "${readonly_stock_agents_v0_10_data_volume}:/data" \
+    --mount "type=bind,src=${legacy_v0_7_stock_agents_fixture},dst=/data/AGENTS.md,readonly" \
+    --mount "type=bind,src=${legacy_v0_7_stock_agents_fixture},dst=/tmp/agents-legacy-stock.md,readonly" \
+    "$IMAGE" sh -ec 'cmp /data/AGENTS.md /tmp/agents-legacy-stock.md'
 docker run --rm --entrypoint sh \
     --volume "${symlink_stock_agents_data_volume}:/data" \
     --mount "type=bind,src=${previous_stock_agents_v0_12_5_fixture},dst=/tmp/agents-stock.md,readonly" \
