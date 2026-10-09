@@ -11,7 +11,7 @@
 | dsh | `@deepseek-ai/dsh@0.1.7-rc.2` |
 | QQ 插件 | `@tencent-connect/dsh-qqbot@0.5.0` |
 
-当前镜像标签为 `tryao/qqbot-dsh:v0.12.7`。可选 TRPG 组件独立发布：Gensokyo-MCP `v0.3.1`、海豹骰 `v1.6.2-bridge.8`。Dockerfile 固定基础镜像摘要及软件包版本；不发布 `latest` 标签。
+当前镜像标签为 `tryao/qqbot-dsh:v0.12.8`。可选 TRPG 组件独立发布：Gensokyo-MCP `v0.3.1`、海豹骰 `v1.6.2-bridge.8`。Dockerfile 固定基础镜像摘要及软件包版本；不发布 `latest` 标签。
 
 ## 快速部署
 
@@ -35,13 +35,15 @@ Compose 使用 `dsh-qqbot-data` 和 `dsh-qqbot-workspace` 命名卷。升级或�
 
 ## 可选能力
 
-基础聊天使用上面选定的聊天服务。官方模式默认启用 DeepSeek 原生网页搜索；第三方模式可配置独立的 `LLM_SEARCH_BASE_URL`，留空则关闭搜索。该设置不影响聊天和网页读取。
+基础聊天使用上面选定的聊天服务。官方模式默认启用 DeepSeek 原生网页搜索；第三方模式默认用 `LLM_API_BASE_URL` 搜索，也可用 `LLM_SEARCH_BASE_URL` 覆盖。该设置不影响聊天和网页读取。
 
 视觉模型使用当前聊天凭据模式的服务。可选图片生成/编辑路由使用独立密钥；在 `.env` 中一起设置 `IMAGE_API_KEY`、`IMAGE_API_BASE_URL` 和 `IMAGE_MODEL`，`IMAGE_API_PROTOCOL` 可选 `openai-images`（默认）或 `xai-images`。未配置时不会提供图片生成工具。
 
 可选 OneBot/TRPG 集成默认关闭。启用 `QQBOT_ONEBOT_ENABLED=true` 并启动 `trpg` Compose profile 后，可使用外部 Gensokyo-MCP 与海豹骰；完整配置、权限和 YAML 实例见 [OneBot 集成说明](docs/onebot-integration.md)。
 
 v0.12.6 起，命令帮助请求由 LLM 兜底说明；可读日志中的 QQ @标记要求 Gensokyo-MCP v0.3.1 与海豹骰 v1.6.2-bridge.7 均协商 `log-display-v1`。OneBot 启用后实时跑团日志默认可用，管理员执行 `.log new/on` 后开始记录；可导出带 HTML 配色的 Markdown 或原始 TXT。设置 `QQBOT_ONEBOT_LOG_ENABLED=false` 可关闭。配套版本及权限见 [日志说明](docs/onebot-integration.md#实时跑团日志与导出)。
+
+v0.12.8 修复第三方模式的搜索默认地址：`LLM_SEARCH_BASE_URL` 留空时使用 `LLM_API_BASE_URL`，`LLM_SEARCH_MODEL` 仍默认 `deepseek-flash`。
 
 v0.12.7 配套海豹骰 v1.6.2-bridge.8，修复同日志旧 @机器人识别及多段正文展示；机器人保留 Markdown 渲染且不染色，用户正文继续染色。Markdown/TXT 导出隐藏系统缺口提示，`.log stat` 保留诊断统计。
 

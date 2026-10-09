@@ -22,7 +22,7 @@ Markdown 导出默认开启。每份 UTF-8 Markdown 文件最多 128 KiB，每�
 
 ## 网页与纯文本
 
-`web_search` 按关键词搜索，每次最多 4 个查询，合并后最多 8 个来源。官方聊天模式使用 DeepSeek 原生搜索；第三方聊天模式只有设置独立的 `LLM_SEARCH_BASE_URL` 后才提供搜索，并复用 `LLM_API_KEY`。搜索端点和额度由部署的服务决定。
+`web_search` 按关键词搜索，每次最多 4 个查询，合并后最多 8 个来源。官方聊天模式使用 DeepSeek 原生搜索；第三方聊天模式默认复用聊天端点，也可设置 `LLM_SEARCH_BASE_URL` 覆盖，并复用 `LLM_API_KEY`。搜索端点和额度由部署的服务决定。
 
 `web_fetch` 可读取经过公网校验的公共网页或纯文本。支持文本、XHTML、JSON、YAML、XML 类型；HTML 转为文本，其他允许类型按文本读取。拒绝未知或二进制类型，以及伪装成文本的 PDF、Office、ZIP、图片或可执行文件。单次请求最多 30 秒、2 MiB，返回模型的文本最多 100,000 字符；内容只在内存处理，不执行脚本或写入文件。
 
@@ -36,7 +36,9 @@ Markdown 导出默认开启。每份 UTF-8 Markdown 文件最多 128 KiB，每�
 
 第三方模式下的聊天、视觉共用 `LLM_API_KEY`。`QQBOT_VISION_PROVIDER`（可选）必须与当前聊天服务商 ID 相同；`QQBOT_VISION_MODEL`（可选）覆盖视觉模型。请确认所选模型本身支持图片输入。
 
-搜索端点独立于聊天 API 地址。第三方模式示例：
+搜索默认复用聊天 API 地址。需要独立搜索端点时，可设置 `LLM_SEARCH_BASE_URL` 覆盖；留空或未设置时继续使用 `LLM_API_BASE_URL`。搜索使用当前模式的同一凭据，第三方模式使用 `LLM_API_KEY`。
+
+第三方模式示例：
 
 ```dotenv
 LLM_SEARCH_BASE_URL=https://gateway.example.com/anthropic/v1
@@ -44,7 +46,7 @@ LLM_SEARCH_MODEL=your-search-model
 LLM_API_KEY=YOUR_GATEWAY_API_KEY
 ```
 
-搜索后端须兼容 DeepSeek 原生 Anthropic Messages 搜索工具。留空 `LLM_SEARCH_BASE_URL` 只会关闭第三方模式的 `web_search`。官方模式使用官方搜索地址和 `DEEPSEEK_API_KEY`。两种模式下 `LLM_SEARCH_MODEL` 均可选，默认 `deepseek-flash`。
+搜索后端须兼容 DeepSeek 原生 Anthropic Messages 搜索工具。官方模式固定使用 `https://api.deepseek.com/anthropic/v1` 和 `DEEPSEEK_API_KEY`。两种模式下 `LLM_SEARCH_MODEL` 均可选，默认 `deepseek-flash`，与聊天模型独立。
 
 ## 自定义人设
 
@@ -93,7 +95,7 @@ mkdir -p /tmp/qqbot-image-probe
 docker run --rm --entrypoint node --env-file .env \
   --mount "type=bind,src=$PWD/scripts/verify-image-route.mjs,dst=/tmp/verify-image-route.mjs,readonly" \
   --mount type=bind,src=/tmp/qqbot-image-probe,dst=/probe-output \
-  tryao/qqbot-dsh:v0.12.7 /tmp/verify-image-route.mjs /probe-output
+  tryao/qqbot-dsh:v0.12.8 /tmp/verify-image-route.mjs /probe-output
 ```
 
 探测会发起真实图片服务请求并消耗服务额度；不会发送真实 QQ 消息或修改生产额度。真实 QQ 图片和文件投递仍需用机器人账号验证。

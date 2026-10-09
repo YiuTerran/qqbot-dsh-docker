@@ -195,8 +195,8 @@ fi
 
 # A non-empty LLM_API_KEY selects a third-party OpenAI-compatible route. The
 # generated profile patch contains only the environment-variable name, never
-# LLM_API_KEY itself. LLM_SEARCH_BASE_URL is an independent optional native
-# DeepSeek search endpoint; it is not inferred from LLM_API_BASE_URL.
+# LLM_API_KEY itself. LLM_SEARCH_BASE_URL optionally overrides the native
+# DeepSeek search endpoint; without it, search reuses LLM_API_BASE_URL.
 if [ -n "$llm_api_key" ]; then
     node <<'NODE'
 const fs = require('node:fs');

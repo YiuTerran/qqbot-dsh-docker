@@ -174,14 +174,16 @@ try {
   const agentDefaultModel = ctx.get('agentDefaultModel');
   const systemPrompt = ctx.get('systemPrompt');
   const web = ctx.get('web');
-  const expectedSearchBaseUrl = process.env.QQBOT_TEST_EXPECT_SEARCH_BASE_URL;
   const expectedImageEnabled = Boolean(process.env.IMAGE_API_KEY);
   const expectedMarkdownEnabled = process.env.QQBOT_MARKDOWN_ENABLED !== 'false';
   const thirdPartyMode = Boolean(process.env.LLM_API_KEY);
   const expectedProvider = thirdPartyMode ? process.env.LLM_PROVIDER : 'deepseek-official';
   const expectedModel = thirdPartyMode ? process.env.LLM_MODEL : 'deepseek-flash';
   const expectedSearchModel = process.env.LLM_SEARCH_MODEL || 'deepseek-flash';
-  const searchEnabled = !thirdPartyMode || Boolean(process.env.LLM_SEARCH_BASE_URL);
+  const expectedSearchBaseUrl = process.env.QQBOT_TEST_EXPECT_SEARCH_BASE_URL
+    ?? (thirdPartyMode
+      ? process.env.LLM_SEARCH_BASE_URL || process.env.LLM_API_BASE_URL
+      : 'https://api.deepseek.com/anthropic/v1');
   assert.equal(ctx.fiber.state, 2, 'Cordis root did not reach the running state');
   assert.ok(tools && typeof tools.schemas === 'function', 'tools service is missing');
   assert.ok(agentDefaultModel && typeof agentDefaultModel.currentSelection === 'function', 'agent default model service is missing');
@@ -203,20 +205,14 @@ try {
   const defaultSelection = agentDefaultModel.currentSelection();
   assert.equal(defaultSelection.provider, expectedProvider, 'default chat provider did not follow the active credential mode');
   assert.equal(defaultSelection.model, expectedModel, 'default chat model did not follow the active credential mode');
-  assert.equal(web?.searchProviders?.has('deepseek-official'), searchEnabled, 'native search provider registration does not match the active mode');
-  let searchBaseUrlMatches;
-  if (searchEnabled) {
-    const searchProvider = web.searchProviders.get('deepseek-official');
-    assert.equal(typeof searchProvider?.resolveOptions, 'function', 'the native search provider options are unavailable');
-    const searchOptions = searchProvider.resolveOptions();
-    assert.equal(searchOptions.apiKeyEnv, thirdPartyMode ? 'LLM_API_KEY' : 'DEEPSEEK_API_KEY', 'search must use the active mode credential');
-    assert.equal(searchOptions.apiKey, undefined, 'persisted literal search keys must be cleared');
-    assert.equal(searchOptions.model, expectedSearchModel, 'native search model did not resolve independently from the chat model');
-    if (expectedSearchBaseUrl) {
-      assert.equal(searchOptions.baseURL, expectedSearchBaseUrl, 'native search endpoint did not resolve from deployment configuration');
-      searchBaseUrlMatches = true;
-    }
-  }
+  assert.equal(web?.searchProviders?.has('deepseek-official'), true, 'native search provider must stay registered in every credential mode');
+  const searchProvider = web.searchProviders.get('deepseek-official');
+  assert.equal(typeof searchProvider?.resolveOptions, 'function', 'the native search provider options are unavailable');
+  const searchOptions = searchProvider.resolveOptions();
+  assert.equal(searchOptions.apiKeyEnv, thirdPartyMode ? 'LLM_API_KEY' : 'DEEPSEEK_API_KEY', 'search must use the active mode credential');
+  assert.equal(searchOptions.apiKey, undefined, 'persisted literal search keys must be cleared');
+  assert.equal(searchOptions.model, expectedSearchModel, 'native search model did not resolve independently from the chat model');
+  assert.equal(searchOptions.baseURL, expectedSearchBaseUrl, 'native search endpoint did not resolve from deployment configuration');
   const persistedPatch = await readFile(`${profileRoot}/cordis.patch.yml`, 'utf8').catch(() => '');
   for (const fixtureKey of ['fixture-chat-key', 'fixture-official-key']) {
     assert.ok(!persistedPatch.includes(fixtureKey), `persisted profile must not contain ${fixtureKey}`);
@@ -253,22 +249,11 @@ try {
     ...(expectedImageEnabled ? ['qqbot_generate_image'] : []),
     ...(expectedMarkdownEnabled ? ['qqbot_create_markdown'] : []),
     'web_fetch',
-    ...(searchEnabled ? ['web_search'] : []),
+    'web_search',
     ...(onebotProbeEnabled ? ['qqbot_onebot_command'] : []),
   ].sort();
   assert.deepEqual(modelNames, expectedTools, 'model-facing chat tool catalog does not match configured search and generation availability');
   assert.ok(registryNames.includes('qqbot_read_document'), 'QQ document reader must be registered');
-  if (!searchEnabled) {
-    assert.ok(!registryNames.includes('web_search'), 'web_search must not be registered when native search is disabled');
-    const unavailable = await tools.execute({
-      name: 'web_search',
-      arguments: { queries: ['must not call search'] },
-      agent: {},
-      callId: 'qqbot-profile-search-disabled',
-      signal: new AbortController().signal,
-    });
-    assert.equal(unavailable.isError, true, 'direct web_search call must fail when search is disabled');
-  }
   assert.ok(assembly.sections.some((section) => section.name === 'qqbot:chat-only-policy'), 'chat policy prompt section is missing');
   const generationPolicy = assembly.sections.find((section) => section.name === 'qqbot:generation-policy');
   assert.ok(generationPolicy, 'immutable generation policy prompt section is missing');
@@ -370,12 +355,12 @@ try {
     registryNames,
     modelNames,
     defaultSelection,
-    searchEnabled,
+    searchEnabled: true,
     policySection: true,
     ...(onebotProbeEnabled ? { onebotProjection } : {}),
     dangerousToolDenied: true,
-    ...(searchBaseUrlMatches === undefined ? {} : { searchBaseUrlMatches }),
-    ...(searchEnabled ? { searchModel: expectedSearchModel } : {}),
+    searchBaseUrlMatches: true,
+    searchModel: expectedSearchModel,
   }));
   await shutdown.shutdown(0);
 } catch (error) {

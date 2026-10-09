@@ -50,7 +50,7 @@ incompatible_data_volume="dsh-qqbot-test-incompatible-data-${suffix}"
 media_guard_data_volume="dsh-qqbot-test-media-guard-data-${suffix}"
 search_env_data_volume="dsh-qqbot-test-search-env-data-${suffix}"
 official_data_volume="dsh-qqbot-test-official-data-${suffix}"
-no_search_data_volume="dsh-qqbot-test-no-search-data-${suffix}"
+search_fallback_data_volume="dsh-qqbot-test-search-fallback-data-${suffix}"
 partial_recovery_data_volume="dsh-qqbot-test-partial-recovery-data-${suffix}"
 recovery_v1_data_volume="dsh-qqbot-test-recovery-v1-data-${suffix}"
 pre_concurrency_data_volume="dsh-qqbot-test-pre-concurrency-data-${suffix}"
@@ -77,7 +77,7 @@ on_error() {
 cleanup() {
     log "Cleaning up temporary container, volumes, and instruction file"
     docker rm --force "$container" >/dev/null 2>&1 || true
-    docker volume rm "$data_volume" "$workspace_volume" "$override_data_volume" "$legacy_data_volume" "$dice_legacy_data_volume" "$incompatible_data_volume" "$media_guard_data_volume" "$search_env_data_volume" "$official_data_volume" "$no_search_data_volume" "$partial_recovery_data_volume" "$recovery_v1_data_volume" "$pre_concurrency_data_volume" "$partial_concurrency_data_volume" "$stock_agents_data_volume" "$readonly_stock_agents_data_volume" "$stock_agents_v0_10_data_volume" "$readonly_stock_agents_v0_10_data_volume" "$symlink_stock_agents_data_volume" >/dev/null 2>&1 || true
+    docker volume rm "$data_volume" "$workspace_volume" "$override_data_volume" "$legacy_data_volume" "$dice_legacy_data_volume" "$incompatible_data_volume" "$media_guard_data_volume" "$search_env_data_volume" "$official_data_volume" "$search_fallback_data_volume" "$partial_recovery_data_volume" "$recovery_v1_data_volume" "$pre_concurrency_data_volume" "$partial_concurrency_data_volume" "$stock_agents_data_volume" "$readonly_stock_agents_data_volume" "$stock_agents_v0_10_data_volume" "$readonly_stock_agents_v0_10_data_volume" "$symlink_stock_agents_data_volume" >/dev/null 2>&1 || true
     rm -f "$instructions_file"
     rm -f "$incompatible_log"
 }
@@ -232,7 +232,7 @@ docker volume create "$incompatible_data_volume" >/dev/null
 docker volume create "$media_guard_data_volume" >/dev/null
 docker volume create "$search_env_data_volume" >/dev/null
 docker volume create "$official_data_volume" >/dev/null
-docker volume create "$no_search_data_volume" >/dev/null
+docker volume create "$search_fallback_data_volume" >/dev/null
 docker volume create "$partial_recovery_data_volume" >/dev/null
 docker volume create "$recovery_v1_data_volume" >/dev/null
 docker volume create "$pre_concurrency_data_volume" >/dev/null
@@ -290,15 +290,39 @@ run_profile_probe \
     --env LLM_SEARCH_BASE_URL=https://search-gateway.example.com/anthropic/v1 \
     --env LLM_SEARCH_MODEL=fixture-third-party-search-model
 run_profile_probe \
-    "third-party custom search model alone does not enable search" \
-    "$no_search_data_volume" \
-    "" \
+    "third-party route falls back to chat endpoint when search override is absent" \
+    "$search_fallback_data_volume" \
+    "https://chat-gateway.example.com/v1" \
+    --env LLM_PROVIDER=fixture-chat \
+    --env LLM_MODEL=fixture-chat-model \
+    --env LLM_API_BASE_URL=https://chat-gateway.example.com/v1 \
+    --env LLM_API_PROTOCOL=openai-responses \
+    --env LLM_API_KEY=fixture-chat-key
+log "Seeding a stale persisted disabled search provider before the next overlay probe"
+docker run --rm --network none --volume "${search_fallback_data_volume}:/data" --entrypoint node "$IMAGE" -e '
+const fs = require("node:fs");
+const yaml = require("/data/profiles/qqbot/node_modules/js-yaml");
+const path = "/data/profiles/qqbot/cordis.patch.yml";
+const entries = yaml.load(fs.readFileSync(path, "utf8")) || [];
+let provider = entries.find((entry) => entry && entry.id === "web-search-deepseek");
+if (!provider) {
+  provider = { id: "web-search-deepseek", config: {} };
+  entries.push(provider);
+}
+provider.disabled = true;
+fs.writeFileSync(path, yaml.dump(entries));
+'
+run_profile_probe \
+    "safety overlay re-enables persisted search and empty override falls back to chat endpoint" \
+    "$search_fallback_data_volume" \
+    "https://chat-gateway.example.com/v1" \
     --env LLM_PROVIDER=fixture-chat \
     --env LLM_MODEL=fixture-chat-model \
     --env LLM_API_BASE_URL=https://chat-gateway.example.com/v1 \
     --env LLM_API_PROTOCOL=openai-responses \
     --env LLM_API_KEY=fixture-chat-key \
-    --env LLM_SEARCH_MODEL=fixture-search-without-endpoint
+    --env LLM_SEARCH_BASE_URL= \
+    --env LLM_SEARCH_MODEL=
 run_profile_probe \
     "dedicated OpenAI image route defaults its protocol independently" \
     "$official_data_volume" \

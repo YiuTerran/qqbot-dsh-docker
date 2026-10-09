@@ -18,8 +18,8 @@ services:
       LLM_MODEL: ${LLM_MODEL:-}
       LLM_API_BASE_URL: ${LLM_API_BASE_URL:-}
       LLM_API_PROTOCOL: ${LLM_API_PROTOCOL:-}
-      # Optional independent DeepSeek-native Messages search endpoint. Empty
-      # disables web_search in LLM_API_KEY mode.
+      # Optional DeepSeek-native Messages search endpoint override. Empty or
+      # unset reuses LLM_API_BASE_URL in LLM_API_KEY mode.
       LLM_SEARCH_BASE_URL: ${LLM_SEARCH_BASE_URL:-}
       # Optional model alias for native search; defaults to deepseek-flash.
       LLM_SEARCH_MODEL: ${LLM_SEARCH_MODEL:-}
