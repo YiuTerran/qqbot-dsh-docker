@@ -12,7 +12,7 @@ const STABLE_CATEGORIES = new Map([
 const LOG_TOOLS = new Set([
     'qqbot_describe_image', 'qqbot_read_document', 'qqbot_generate_image',
     'qqbot_create_markdown', 'qqbot_onebot_command', 'web_fetch', 'web_search',
-    'qqbot_send_asset_image',
+    'qqbot_send_asset_image', 'ask_user_question',
 ]);
 const LOG_STAGES = new Set([
     'execute', 'execute-result', 'execute-throw', 'quota-acquire', 'quota-reserve',

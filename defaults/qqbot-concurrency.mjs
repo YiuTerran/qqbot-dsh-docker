@@ -99,6 +99,18 @@ function snapshotReplyTarget(target) {
     return Object.freeze({ scope, targetId, ...(typeof msgId === 'string' && msgId ? { msgId } : {}) });
 }
 
+function snapshotQuestionReplyTarget(identity, credential) {
+    if (!identity || !credential || identity.scope !== credential.scope || identity.targetId !== credential.targetId) return undefined;
+    if (typeof credential.msgId === 'string' && /^[\x21-\x7e]{1,256}$/u.test(credential.msgId)) {
+        return Object.freeze({ scope: identity.scope, targetId: identity.targetId, msgId: credential.msgId });
+    }
+    if (typeof credential.eventId === 'string' && /^INTERACTION_CREATE:[A-Za-z0-9_:+./=-]{1,256}$/u.test(credential.eventId)) {
+        return Object.freeze({ scope: identity.scope, targetId: identity.targetId,
+            eventId: credential.eventId, questionEvent: true });
+    }
+    return undefined;
+}
+
 /** Send one overflow notice using the dropped message's own reply target. */
 export async function sendMergeQueueFullNotice(sender, ctx) {
     const replyTarget = snapshotReplyTarget(ctx?.message?.replyTarget ?? ctx?.replyTarget);
@@ -327,6 +339,7 @@ export function beginMergeBatch(record, replyTarget) {
         agent: record.agent,
         sessionId: record.sessionId,
         replyTarget: target,
+        questionReplyTarget: undefined,
         pending: new Set(),
         sendQueue: Promise.resolve(),
         closed: false,
@@ -341,13 +354,31 @@ export function beginMergeBatch(record, replyTarget) {
     return batch;
 }
 
+/** Capture a capability to renew only the exact active batch for this question call. */
+export function bindMergeBatchQuestionReply(record, agent, sessionId, originalTarget) {
+    if (!validObject(record) || !validObject(agent) || typeof sessionId !== 'string') return false;
+    const batch = activeBatches.get(record);
+    if (!batch || batch.closed || batch.record !== record || batch.agent !== agent || batch.sessionId !== sessionId
+        || record.agent !== agent || record.sessionId !== sessionId
+        || originalTarget?.scope !== batch.replyTarget.scope || originalTarget?.targetId !== batch.replyTarget.targetId) return false;
+    return (credential) => {
+        if (activeBatches.get(record) !== batch || batch.closed || batch.record !== record
+            || batch.agent !== agent || batch.sessionId !== sessionId
+            || record.agent !== agent || record.sessionId !== sessionId) return false;
+        const renewed = snapshotQuestionReplyTarget(batch.replyTarget, credential);
+        if (!renewed) return false;
+        batch.questionReplyTarget = renewed;
+        return true;
+    };
+}
+
 /** Capture a per-event record view; closed production records suppress late events. */
 export function captureMergeBatchReply(record, event) {
     if (!validObject(record)) return undefined;
     const batch = activeBatches.get(record);
     if (batch && !batch.closed) {
         if (!acceptMergeBatchEvent(record, event)) return undefined;
-        return { record, batch, replyRecord: { ...record, replyTarget: batch.replyTarget } };
+        return { record, batch, replyRecord: { ...record, replyTarget: batch.questionReplyTarget ?? batch.replyTarget } };
     }
     if (everBoundRecords.has(record)) return undefined;
     const target = snapshotReplyTarget(record.replyTarget);

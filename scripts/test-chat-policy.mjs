@@ -273,6 +273,7 @@ test('the patched QQ middleware chain preserves SDK group history and guarded or
             message: {
                 kind: 'group', groupOpenid, senderId: 'chain-user', senderName: 'fixture',
                 messageId, content, attachments, timestamp: new Date().toISOString(),
+                raw: { id: messageId, group_openid: groupOpenid, author: { member_openid: 'chain-user' } },
                 ...(refMsgIdx ? { refMsgIdx } : {}),
                 ...(msgElements ? { msgElements } : {}),
                 replyTarget: { scope: 'group', targetId: groupOpenid, msgId: messageId },

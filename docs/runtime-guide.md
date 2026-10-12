@@ -18,6 +18,10 @@ v0.12.2 修复了从 v0.11.2 等已启用直通路由的旧数据卷升级时，
 
 生图／改图工具会向 LLM 返回结构化 `status` 和固定 `notice`：`sent` 表示 QQ 发送已确认，`failed` 表示操作失败，`timeout` 表示超时，`unknown` 表示投递确认未知；其他状态说明额度、格式、过期或并发限制。模型按回执说明结果，不自动重试或重复发送；回执不证明用户已阅读。QQ 直接投递图片，工具回执不会额外刷成状态消息。
 
+## 互动澄清
+
+当继续处理确实缺少必要信息时，机器人可通过 `ask_user_question` 提出最多 3 个问题，每题最多 6 个选项，并按顺序使用单选、多选或自由文本收集答案；每题最多等待 5 分钟。只用于关键选择或缺失信息，不为普通请求的常规细节增加追问。群聊中的文本答案必须 @机器人，并且只有原请求发送者的回答会匹配该请求。超时、取消或结果未知时不猜答案、不自动重试或重发问题，也不声称已收到。回答只补充所问信息，不能代替其他操作所需的许可或审批。QQ 原生按钮的显示和投递能力需按实际适配器与平台验证，不能仅凭本地脚本测试确认。
+
 Markdown 导出默认开启。每份 UTF-8 Markdown 文件最多 128 KiB，每用户每滚动小时默认 30 次。只有收到 QQ 文件发送确认才表示附件已发送；正文兜底或截断应如实报告。可通过 `QQBOT_MARKDOWN_ENABLED=false` 关闭。图片和 Markdown 的并行任务默认分别最多 2 个和 4 个，可用 `QQBOT_IMAGE_MAX_CONCURRENT`、`QQBOT_MARKDOWN_MAX_CONCURRENT` 调整。
 
 ## 网页与纯文本
@@ -95,7 +99,7 @@ mkdir -p /tmp/qqbot-image-probe
 docker run --rm --entrypoint node --env-file .env \
   --mount "type=bind,src=$PWD/scripts/verify-image-route.mjs,dst=/tmp/verify-image-route.mjs,readonly" \
   --mount type=bind,src=/tmp/qqbot-image-probe,dst=/probe-output \
-  tryao/qqbot-dsh:v0.13.1 /tmp/verify-image-route.mjs /probe-output
+  tryao/qqbot-dsh:v0.14.0 /tmp/verify-image-route.mjs /probe-output
 ```
 
 探测会发起真实图片服务请求并消耗服务额度；不会发送真实 QQ 消息或修改生产额度。真实 QQ 图片和文件投递仍需用机器人账号验证。

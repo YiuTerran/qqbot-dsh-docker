@@ -18,15 +18,25 @@ function senderError(code = 'failed') {
     return error;
 }
 
-function validTarget(request) {
+function validTarget(request, kind) {
     const target = request?.replyTarget;
     // QQ msgId is opaque and may contain punctuation; it is a JSON reply field, never a URL path segment.
     if (!target || !SCOPE_VALUES.includes(target.scope) ||
-        typeof target.targetId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/u.test(target.targetId) ||
-        typeof target.msgId !== 'string' || !/^[\x21-\x7e]{1,256}$/u.test(target.msgId)) {
+        typeof target.targetId !== 'string' || !/^[A-Za-z0-9_-]{1,128}$/u.test(target.targetId)) {
         return undefined;
     }
-    return Object.freeze({ scope: target.scope, targetId: target.targetId, msgId: target.msgId });
+    if (typeof target.msgId === 'string' && /^[\x21-\x7e]{1,256}$/u.test(target.msgId)) {
+        return Object.freeze({ scope: target.scope, targetId: target.targetId, msgId: target.msgId });
+    }
+    if (kind === 'question' && target.questionEvent === true
+        && typeof target.eventId === 'string' && /^INTERACTION_CREATE:[A-Za-z0-9_:+./=-]{1,256}$/u.test(target.eventId)) {
+        return Object.freeze({ scope: target.scope, targetId: target.targetId, eventId: target.eventId, questionEvent: true });
+    }
+    return undefined;
+}
+
+function targetReplyId(target) {
+    return target?.msgId ?? target?.eventId;
 }
 
 function targetPath(target, resource) {
@@ -128,6 +138,44 @@ function validateRawMessageBody(body, msgId, expectedContent) {
     return true;
 }
 
+function validateQuestionMessageBody(body, target, ownerId, expectedContent) {
+    const credentialKey = target.msgId ? 'msg_id' : 'event_id';
+    const credential = target.msgId ?? target.eventId;
+    if (!exactKeys(body, ['msg_type', 'markdown', credentialKey], ['keyboard', 'msg_seq'])
+        || body.msg_type !== 2 || body[credentialKey] !== credential
+        || !exactKeys(body.markdown, ['content']) || body.markdown.content !== expectedContent
+        || (target.eventId && (!target.questionEvent || !Number.isSafeInteger(body.msg_seq) || body.msg_seq < 1 || body.msg_seq > 65535))
+        || Array.from(expectedContent).length > MAX_MESSAGE_CHARS
+        || (Object.hasOwn(body, 'msg_seq') && !Number.isSafeInteger(body.msg_seq))) return false;
+    if (!Object.hasOwn(body, 'keyboard')) return true;
+    const keyboard = body.keyboard;
+    if (!exactKeys(keyboard, ['content']) || !exactKeys(keyboard.content, ['rows'])
+        || !Array.isArray(keyboard.content.rows) || keyboard.content.rows.length < 1 || keyboard.content.rows.length > 3) return false;
+    const buttons = keyboard.content.rows.flatMap((row) => Array.isArray(row?.buttons) ? row.buttons : []);
+    if (buttons.length < 1 || buttons.length > 6) return false;
+    return buttons.every((button) => exactKeys(button, ['id', 'render_data', 'action'])
+        && typeof button.id === 'string' && button.id.length > 0 && button.id.length <= 64
+        && exactKeys(button.render_data, ['label', 'visited_label', 'style'])
+        && typeof button.render_data.label === 'string' && Array.from(button.render_data.label).length <= 10
+        && typeof button.render_data.visited_label === 'string' && Number.isSafeInteger(button.render_data.style)
+        && exactKeys(button.action, ['type', 'permission', 'data', 'unsupport_tips'])
+        && button.action.type === 1
+        && exactKeys(button.action.permission, ['type', 'specify_user_ids'])
+        && button.action.permission.type === 0
+        && Array.isArray(button.action.permission.specify_user_ids)
+        && button.action.permission.specify_user_ids.length === 1
+        && button.action.permission.specify_user_ids[0] === ownerId
+        && typeof button.action.data === 'string' && button.action.data.length > 0 && button.action.data.length <= 256
+        && typeof button.action.unsupport_tips === 'string' && button.action.unsupport_tips.length > 0
+        && button.action.unsupport_tips.length <= 60);
+}
+
+function isUnsupportedQuestionKeyboard(status, path, response, body) {
+    const code = response?.code ?? response?.err_code;
+    return (status === 400 || status === 403) && /\/v2\/(?:groups|users)\/[A-Za-z0-9_-]{1,128}\/messages$/u.test(path)
+        && Object.hasOwn(body ?? {}, 'keyboard') && code === 304037;
+}
+
 function hasApiError(response) {
     if (!isPlainObject(response)) return true;
     for (const key of ['code', 'errcode', 'error_code', 'retcode']) {
@@ -153,7 +201,7 @@ function createAbortError() {
     return senderError('cancelled');
 }
 
-async function readBoundedResponse(response, maximum = MAX_QQ_RESPONSE_BYTES, signal) {
+async function readBoundedResponse(response, maximum = MAX_QQ_RESPONSE_BYTES, signal, allowNonOk = false) {
     if (!response || !Number.isInteger(response.status)) throw senderError();
     const declared = response.headers?.get?.('content-length');
     if (declared !== null && declared !== undefined) {
@@ -195,7 +243,7 @@ async function readBoundedResponse(response, maximum = MAX_QQ_RESPONSE_BYTES, si
         reader.releaseLock?.();
     }
 
-    if (!response.ok) throw senderError();
+    if (!response.ok && !allowNonOk) throw senderError();
     if (total === 0) return {};
     try {
         return JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, total)));
@@ -290,6 +338,8 @@ export function createGenerationSender({
                 const upload = path === filesPath;
                 const validBody = upload
                     ? validateUploadBody(body, kind === 'image' ? 1 : 4, kind)
+                    : kind === 'question'
+                        ? validateQuestionMessageBody(body, target, request.ownerId, expectedRawContent)
                     : expectedRawContent === undefined
                         ? validateMediaMessageBody(body, target.msgId)
                         : validateRawMessageBody(body, target.msgId, expectedRawContent);
@@ -308,11 +358,12 @@ export function createGenerationSender({
                 // The limiter is charged only for a user-visible message, synchronously
                 // immediately before fetch; uploads do not consume a QQ reply slot.
                 if (!upload) {
-                    if (!isActive(request, target, kind, signal) || !replySlotAvailable(replyLimiter, target.msgId)) {
+                    const replyId = targetReplyId(target);
+                    if (!isActive(request, target, kind, signal) || !replySlotAvailable(replyLimiter, replyId)) {
                         throw senderError('limit');
                     }
                     try {
-                        replyLimiter.record(target.msgId);
+                        replyLimiter.record(replyId);
                     }
                     catch {
                         throw senderError('limit');
@@ -352,6 +403,21 @@ export function createGenerationSender({
                     }
                     if (!isActive(request, target, kind, signal)) throw senderError(upload ? 'expired' : 'unknown');
                     if (!response || !Number.isInteger(response.status)) throw senderError(upload ? 'failed' : 'unknown');
+                    if (response.ok === false && kind === 'question') {
+                        if (response.status >= 500) {
+                            await response.body?.cancel?.().catch(() => {});
+                            throw senderError('unknown');
+                        }
+                        if (response.status >= 400 && response.status < 500) {
+                            let rejection;
+                            try { rejection = await readResponse(response, MAX_QQ_RESPONSE_BYTES, requestSignal, true); }
+                            catch { throw senderError('failed'); }
+                            if (isUnsupportedQuestionKeyboard(response.status, path, rejection, body)) {
+                                throw senderError('keyboard-unsupported');
+                            }
+                            throw senderError('failed');
+                        }
+                    }
                     if (response.ok === false && response.status < 500) {
                         await response.body?.cancel?.().catch(() => {});
                         throw senderError('failed');
@@ -365,8 +431,14 @@ export function createGenerationSender({
                             ? ((kind === 'artifact' || kind === 'asset') && controller.signal.aborted && !signal?.aborted ? 'timeout' : 'failed')
                             : 'unknown');
                     }
+                    if (response.ok === false) {
+                        if (kind === 'question' && isUnsupportedQuestionKeyboard(response.status, path, parsed, body)) {
+                            throw senderError('keyboard-unsupported');
+                        }
+                        throw senderError('failed');
+                    }
                     if (!validApiAcknowledgement(path, parsed)) {
-                        throw senderError(upload || hasApiError(parsed) ? 'failed' : 'unknown');
+                        throw senderError(kind === 'question' ? 'unknown' : upload || hasApiError(parsed) ? 'failed' : 'unknown');
                     }
                     if (!upload) {
                         finalMessageAcknowledged = true;
@@ -392,7 +464,7 @@ export function createGenerationSender({
     }
 
     async function execute(request, kind, signal, operation) {
-        const target = validTarget(request);
+        const target = validTarget(request, kind);
         if (!target || typeof request?.enqueueSend !== 'function' ||
             !isActive(request, target, kind, signal) || signal?.aborted) {
             return { sent: false, reason: 'expired' };
@@ -417,6 +489,7 @@ export function createGenerationSender({
             catch (error) {
                 if (error?.code === 'limit') return { sent: false, reason: 'limit' };
                 if (error?.code === 'unknown') return { sent: false, reason: 'unknown' };
+                if (error?.code === 'keyboard-unsupported') return { sent: false, reason: 'keyboard-unsupported' };
                 if (error?.code === 'expired' || error?.code === 'cancelled' || signal?.aborted) {
                     return { sent: false, reason: 'expired' };
                 }
@@ -493,6 +566,34 @@ export function createGenerationSender({
         });
     }
 
+    async function sendQuestionMarkdown(request, content, keyboard, signal) {
+        if (typeof content !== 'string' || content.length === 0
+            || Array.from(content).length > MAX_MESSAGE_CHARS
+            || (keyboard !== undefined && (!keyboard || typeof keyboard !== 'object'))) {
+            return { sent: false, reason: 'failed' };
+        }
+        return execute(request, 'question', signal, async (target, operationSignal) => {
+            if (!isActive(request, target, 'question', operationSignal)) return { sent: false, reason: 'expired' };
+            const replyId = targetReplyId(target);
+            if (!replySlotAvailable(replyLimiter, replyId)) return { sent: false, reason: 'limit' };
+            const shim = makeShim(request, target, 'question', operationSignal, content);
+            const messages = new MessageApi(shim, bot.tokenManager, {});
+            const body = {
+                msg_type: 2,
+                markdown: { content },
+                ...(target.msgId ? { msg_id: target.msgId } : { event_id: target.eventId, msg_seq: request.replySequence }),
+                ...(keyboard !== undefined ? { keyboard } : {}),
+            };
+            const acknowledgement = await messages.sendRaw(target.scope, target.targetId, credentials, body);
+            if (!isActive(request, target, 'question', operationSignal)) return { sent: false, reason: 'unknown' };
+            if (typeof acknowledgement?.id !== 'string' || acknowledgement.id.length === 0
+                || acknowledgement.id.length > 256 || /[\u0000-\u001f\u007f]/u.test(acknowledgement.id)) {
+                return { sent: false, reason: 'unknown' };
+            }
+            return { sent: true, messageId: acknowledgement.id };
+        });
+    }
+
     return Object.freeze({
         sendImage(request, buffer, signal) {
             if (!Buffer.isBuffer(buffer) || buffer.length < 1 || buffer.length > MAX_IMAGE_BYTES ||
@@ -549,5 +650,7 @@ export function createGenerationSender({
             if (safeText === undefined) return Promise.resolve({ sent: false, reason: 'failed' });
             return sendRawText(request, safeText, 'markdown', signal);
         },
+
+        sendQuestionMarkdown,
     });
 }

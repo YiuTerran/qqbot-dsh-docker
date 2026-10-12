@@ -33,6 +33,7 @@ import {
 } from './qqbot-generation.mjs';
 import { SEND_ASSET_IMAGE_TOOL, validateAssetImageDeliveryCall } from './qqbot-asset-delivery.mjs';
 import { ONEBOT_COMMAND_TOOL, validateOnebotCommand } from './qqbot-onebot.mjs';
+import { QQ_QUESTION_TOOL, validateQuestionToolCall } from './qqbot-questions.mjs';
 import {
     getBoundOnebotExecution,
     getOnebotRequestSignal,
@@ -49,6 +50,7 @@ const allowedTools = new Set([
     CREATE_MARKDOWN_TOOL,
     SEND_ASSET_IMAGE_TOOL,
     ONEBOT_COMMAND_TOOL,
+    QQ_QUESTION_TOOL,
     'web_fetch',
     'web_search',
 ]);
@@ -248,6 +250,7 @@ export function clearCurrentImages(agent, expectedTurn) {
 }
 
 export function denyUnsafeTool(exec) {
+    if (exec.name === QQ_QUESTION_TOOL) return validateQuestionToolCall(exec);
     if (exec.name === ONEBOT_COMMAND_TOOL) {
         if (!onebotToolAvailable) return 'The optional OneBot command backend is unavailable.';
         const args = exec.arguments;
@@ -449,7 +452,16 @@ export function installChatPolicy(ctx) {
     ctx.on('tools/execute', async (exec, next) => {
         try {
             let result;
-            if (exec.name === ONEBOT_COMMAND_TOOL) {
+            if (exec.name === QQ_QUESTION_TOOL) {
+                result = await runInDocumentExecution(exec, async () => {
+                    const reason = denyUnsafeTool(exec);
+                    if (reason) throw new Error(reason);
+                    // The controlled channel combines all turn and execution
+                    // signals and reports cancellation as a terminal result.
+                    return next();
+                });
+            }
+            else if (exec.name === ONEBOT_COMMAND_TOOL) {
                 result = await runInOnebotExecution(exec, async () => {
                     const reason = denyUnsafeTool(exec);
                     if (reason) throw new Error(reason);
@@ -492,7 +504,8 @@ export function installChatPolicy(ctx) {
                 if (result?.isError === true) logToolFailure(exec.name, 'execute-result', result.error ?? result);
                 else {
                     const status = result?.value?.status;
-                    if (['failed', 'unknown', 'busy', 'state', 'quota', 'too-large', 'image-type', 'expired', 'invalid'].includes(status)) {
+                    if (exec.name !== QQ_QUESTION_TOOL
+                        && ['failed', 'unknown', 'busy', 'state', 'quota', 'too-large', 'image-type', 'expired', 'invalid'].includes(status)) {
                         logToolFailure(exec.name, 'execute-result', { kind: status });
                     }
                 }
@@ -519,6 +532,11 @@ export function installChatPolicy(ctx) {
         name: 'qqbot:generation-policy',
         order: 10251,
         text: '用户只要求查看或接收现有大肥鱼设定图时，可调用 qqbot_send_asset_image 发送对应原版文件；它不会调用生图 API、消耗生图额度或重绘。用户要求编辑 QQ 图片时必须传入该原始请求的 imageAttachmentId；用户明确要求自画像时，可使用 /opt/qqbot-assets/dayu/portrait.png 作为 referenceImage；当前回合的 images 与 recentImages 都只绑定该请求。近期图片编辑必须使用 recentImages 中的 plain imageAttachmentId；多张候选无法从请求中明确确定目标时先询问，不得擅自选图。若当前、引用和近期候选均无可用底图，明确说明无法获取原图并请用户重新附图，不得把编辑替换成重新生成相似场景或声称已修改原图。受限专用生成例外：只有原始 QQ 消息明确要求生成/编辑图片时，才可对应该原始消息调用 qqbot_generate_image；编辑仅限该消息当前附带、明确引用或其 recentImages 候选中的 PNG/JPEG/GIF/WebP；需要时工具自动在内存中转为 PNG，动图取第一帧，不要求用户自行转换有效的这些格式。输入与转换结果均不得超过 10 MiB，转换限 4000 万像素、10 秒，损坏或超限图片仍可能失败。调用前，短或含糊的视觉描述可基于匹配的原始 QQ 请求及其明确引用整理成简洁具体的提示词，适度补充主体、构图、光线、配色和风格；保留显式主体、风格、文字、数量和禁止项，不强加风格或扩展未请求主题。详细提示词或要求原样保留时保持原文。编辑只描述所要求的改动，并保持其他部分不变。不得混入批次内其他用户或历史个人信息，最终提示词最多 4000 字符。润色本身不构成生成授权，此规则只指导当前聊天模型准备工具参数，不增加模型/API 调用。只有原始消息明确要求创建 Markdown 文件时，才可调用 qqbot_create_markdown，并将文件发回对应原始消息。自然语言意图由你按上下文判断，不要仅因提到“图片”或“Markdown”就调用。批次元数据中的 opaque requestId 与 imageAttachmentId 绑定具体原始请求；不得把一个用户的请求归给批次中的另一位用户。文档/纯文本网页进入本轮后禁止图片生成与编辑，Markdown 仍可创建。qqbot_generate_image 不提供通用文件或磁盘能力，不接收任意 URL、路径、用户ID或群ID；唯一允许的本地参考是 /opt/qqbot-assets/dayu/portrait.png，且 referenceImage 不能与 imageAttachmentId 同时使用；PDF、Office、压缩包等复杂格式仍引导主人到 DeepSeek Chat 网站处理。',
+    });
+    ctx.systemPrompt.section({
+        name: 'qqbot:question-policy',
+        order: 10251.5,
+        text: '仅当缺少关键信息会阻止你可靠完成当前 QQ 请求时，才使用 ask_user_question。必须传入模型上下文中与问题对应的原始请求 requestId；一次最多三个问题，按顺序等待每题结果。每题完整渲染内容（含选项和提示）不得超过 2000 个 Unicode 字符。单选提供仅原始提问者可用的按钮，也可回复编号或自由文本；多选用编号回复。不要把其他群成员的消息当作答案。返回 unknown 时发送结果未确认，绝不重试；failed、cancelled、timed-out 或 busy 时按结果简洁告知，不重复提问。',
     });
     ctx.systemPrompt.section({
         name: 'qqbot:dayu-reference-assets',

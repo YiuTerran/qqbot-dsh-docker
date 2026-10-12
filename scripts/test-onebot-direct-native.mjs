@@ -712,6 +712,9 @@ test('bootstrap executes with stubs and passes the registered service and sender
     let bootServiceOptions;
     let routerOptions;
     let bootBot;
+    let questionChannel;
+    let registeredQuestionChannel;
+    const questionSends = [];
     const observedDeliveries = [];
 
     const service = {
@@ -750,7 +753,18 @@ test('bootstrap executes with stubs and passes the registered service and sender
         async disposeAll() { order.push('manager-dispose'); }
         async remove() {}
     }
-    class FakeQuestionChannel { install() {} }
+    class FakeQuestionChannel {
+        constructor(manager, sender, config) {
+            this.manager = manager;
+            this.sender = sender;
+            this.config = config;
+            questionChannel = this;
+        }
+        install() { order.push('question-install'); }
+        uninstall() { order.push('question-uninstall'); }
+        tryAnswer() { return false; }
+        handleInteraction() { return false; }
+    }
     class FakeApprovalChannel { install() {} }
     class FakeReplyLimiter { constructor() {} }
 
@@ -772,8 +786,14 @@ test('bootstrap executes with stubs and passes the registered service and sender
             return fakeRouter;
         },
     });
+    imports.set(`${defaultsRoot}/qqbot-questions.mjs`, {
+        QuestionChannel: FakeQuestionChannel,
+        registerQuestionTool(_ctx, channel) { registeredQuestionChannel = channel; },
+    });
     imports.set(`${defaultsRoot}/qqbot-generation.mjs`, {
-        createGenerationSender() { return {}; },
+        createGenerationSender() { return { async sendQuestionMarkdown(...args) {
+            questionSends.push(args); return { sent: true, messageId: 'bootstrap-question-ack' };
+        } }; },
         registerGenerationTools() {},
     });
     imports.set('@tencent-connect/qqbot-nodejs/protocol', { MediaApi: {}, MessageApi: {}, messagePath: '/messages' });
@@ -783,7 +803,7 @@ test('bootstrap executes with stubs and passes the registered service and sender
     imports.set('../transport/reply-limiter.js', { ReplyLimiter: FakeReplyLimiter });
     imports.set('../transport/msgid-cache.js', { cacheMsgId() {}, cacheEventId() {} });
     imports.set('../transport/reply-target.js', {
-        resolveReplyTarget(_bot, target) { return target; },
+        resolveReplyTarget(target) { return target; },
         sendResolvedMarkdown: async () => {},
     });
     imports.set('../features/question-channel.js', { QuestionChannel: FakeQuestionChannel });
@@ -835,6 +855,15 @@ test('bootstrap executes with stubs and passes the registered service and sender
     };
     await vmContext.__bootstrapGateway(ctx, {}, config, logger);
 
+    assert.equal(registeredQuestionChannel, questionChannel, 'bootstrap registers its controlled question channel with native tools');
+    assert.equal(questionChannel.manager.questionChannel, questionChannel);
+    assert.equal(questionChannel.config.appId, appId);
+    const fixtureSignal = new AbortController().signal;
+    const fixtureRequest = { ownerId: 'owner-a', replyTarget: { scope: 'group', targetId: 'group-a', msgId: 'question-source' } };
+    assert.deepEqual(await questionChannel.sender.sendQuestionMarkdown(fixtureRequest, 'Bound question', undefined, fixtureSignal),
+        { sent: true, messageId: 'bootstrap-question-ack' });
+    assert.deepEqual(questionSends, [[fixtureRequest, 'Bound question', undefined, fixtureSignal]],
+        'the bootstrap question adapter forwards the exact request and signal to its bounded generation sender');
     assert.ok(bootServiceOptions?.bot === bootBot, 'bootstrap registers OneBot after constructing the QQ SDK bot');
     assert.notEqual(bootBot.send, FakeBot.prototype.send, 'bootstrap installs the QQ send observer');
     await bootBot.send({ target: { scope: 'group', targetId: 'observer-group' }, markdown: { content: 'confirmed output' } });
@@ -852,6 +881,7 @@ test('bootstrap executes with stubs and passes the registered service and sender
 
     await lifecycleCleanup();
     assert.equal(bootBot.send, FakeBot.prototype.send, 'shutdown restores the original QQ send method');
+    assert.ok(order.includes('question-uninstall'), 'shutdown releases the installed question channel');
     assert.ok(order.indexOf('router-stop') < order.indexOf('service-stop'),
         'shutdown awaits direct conversation cancellation before stopping the OneBot service');
 });

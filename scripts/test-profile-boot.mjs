@@ -173,6 +173,7 @@ try {
   const tools = ctx.get('tools');
   const agentDefaultModel = ctx.get('agentDefaultModel');
   const systemPrompt = ctx.get('systemPrompt');
+  const userQuestions = ctx.get('userQuestions');
   const web = ctx.get('web');
   const expectedImageEnabled = Boolean(process.env.IMAGE_API_KEY);
   const expectedMarkdownEnabled = process.env.QQBOT_MARKDOWN_ENABLED !== 'false';
@@ -188,6 +189,7 @@ try {
   assert.ok(tools && typeof tools.schemas === 'function', 'tools service is missing');
   assert.ok(agentDefaultModel && typeof agentDefaultModel.currentSelection === 'function', 'agent default model service is missing');
   assert.ok(systemPrompt && typeof systemPrompt.assemble === 'function', 'systemPrompt service is missing');
+  assert.ok(userQuestions, 'userQuestions service is missing from the running profile');
   if (onebotFixtureMode) {
     const deadline = Date.now() + 5_000;
     while (Date.now() < deadline
@@ -247,6 +249,7 @@ try {
   assert.ok(registryNames.includes('qqbot_send_asset_image'), 'original setting images must be sendable without image API configuration');
   const expectedTools = [
     'qqbot_describe_image', 'qqbot_read_document',
+    'ask_user_question',
     'qqbot_send_asset_image',
     ...(expectedImageEnabled ? ['qqbot_generate_image'] : []),
     ...(expectedMarkdownEnabled ? ['qqbot_create_markdown'] : []),
@@ -255,6 +258,39 @@ try {
     ...(onebotProbeEnabled ? ['qqbot_onebot_command'] : []),
   ].sort();
   assert.deepEqual(modelNames, expectedTools, 'model-facing chat tool catalog does not match configured search and generation availability');
+  const questionTool = assembly.tools.find((tool) => tool.name === 'ask_user_question');
+  assert.ok(questionTool, 'controlled user question tool is visible to the model');
+  const questionSchema = questionTool.parameters;
+  assert.equal(questionSchema?.type, 'object', 'question tool arguments must use a bounded object schema');
+  assert.ok(questionSchema.required?.includes('requestId'), 'question tool must require the original requestId');
+  assert.ok(questionSchema.required?.includes('questions'), 'question tool must require its question list');
+  assert.equal(questionSchema.additionalProperties, false, 'question tool must reject undeclared top-level arguments');
+  assert.equal(questionSchema.properties?.requestId?.type, 'string', 'question tool requestId must be a string');
+  const questionsSchema = questionSchema.properties?.questions;
+  assert.equal(questionsSchema?.type, 'array', 'question tool must accept a question list');
+  assert.equal(questionsSchema.minItems, 1, 'question tool must require at least one question');
+  assert.equal(questionsSchema.maxItems, 3, 'question tool must cap each call at three questions');
+  const questionItemSchema = questionsSchema.items;
+  assert.equal(questionItemSchema?.additionalProperties, false, 'question items must reject undeclared fields');
+  assert.ok(questionItemSchema.required?.includes('id'), 'each question must require an id');
+  assert.ok(questionItemSchema.required?.includes('question'), 'each question must require its prompt');
+  const optionsSchema = questionItemSchema.properties?.options;
+  assert.equal(optionsSchema?.type, 'array', 'question options must use an array when provided');
+  assert.equal(optionsSchema.maxItems, 6, 'each question must cap options at six');
+  assert.equal(optionsSchema.items?.additionalProperties, false, 'question options must reject undeclared fields');
+  assert.ok(optionsSchema.items?.required?.includes('label'), 'each option must require a label');
+  assert.equal(optionsSchema.items?.properties?.label?.type, 'string', 'option labels must be strings');
+  const exposedQuestionKeys = new Set();
+  const collectQuestionSchemaKeys = (value) => {
+    if (!value || typeof value !== 'object') return;
+    if (value.properties && typeof value.properties === 'object') {
+      for (const key of Object.keys(value.properties)) exposedQuestionKeys.add(key);
+    }
+    for (const child of Object.values(value)) collectQuestionSchemaKeys(child);
+  };
+  collectQuestionSchemaKeys(questionSchema);
+  assert.equal(exposedQuestionKeys.has('role'), false, 'question tool must not expose a caller role field');
+  assert.equal(exposedQuestionKeys.has('target'), false, 'question tool must not expose a delivery target field');
   assert.ok(registryNames.includes('qqbot_read_document'), 'QQ document reader must be registered');
   assert.ok(assembly.sections.some((section) => section.name === 'qqbot:chat-only-policy'), 'chat policy prompt section is missing');
   const generationPolicy = assembly.sections.find((section) => section.name === 'qqbot:generation-policy');

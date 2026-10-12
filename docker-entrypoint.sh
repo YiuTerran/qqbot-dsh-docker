@@ -149,6 +149,7 @@ previous_v0_12_2_stock_agents_sha256=abf2b148fbd709941051a5488e696c2f84f105d3793
 previous_v0_12_5_stock_agents_sha256=6ad2a30bb50a5d55be9b9290f4b1b35167fedeb16d20c94c28b881a16bed09d9
 previous_v0_12_8_stock_agents_sha256=1b917f9daca010d80b69185a9b4b6d7bb89792a26ae2ac79deb09647aa9c0235
 previous_v0_13_0_stock_agents_sha256=744b144ac1027820829b8c053d2a23e4396042fd88d5eab873285acb84ab6f9d
+previous_v0_13_1_stock_agents_sha256=68e05983a4bc0615bcf04c36362ebe8818995eb8e1ebbbb696c711f107829f11
 legacy_stock_agents_sha256_list='
 c249259a60d4b04c9c9c3df1a92977adf748ba4143a3639c3e85a006ad802ef5
 9101cd863b9973e3ce7210e3d2f4e17fa23d8238564d463c18207fcf1622688d
@@ -187,6 +188,7 @@ if [ -f /data/AGENTS.md ] && [ ! -L /data/AGENTS.md ] && [ -r /data/AGENTS.md ] 
         || [ "$current_agents_sha256" = "$previous_v0_12_5_stock_agents_sha256" ] \
         || [ "$current_agents_sha256" = "$previous_v0_12_8_stock_agents_sha256" ] \
         || [ "$current_agents_sha256" = "$previous_v0_13_0_stock_agents_sha256" ] \
+        || [ "$current_agents_sha256" = "$previous_v0_13_1_stock_agents_sha256" ] \
         || [ "$legacy_stock_agents_match" = true ]; then
         agents_migration_tmp="/data/.AGENTS.md.$$"
         if install -o node -g node -m 0644 /opt/qqbot-defaults/AGENTS.md "$agents_migration_tmp" \

@@ -21,6 +21,7 @@ const onebotScopePolicy = '/opt/qqbot-defaults/qqbot-onebot-scope.mjs';
 const onebotDirectPolicy = '/opt/qqbot-defaults/qqbot-onebot-direct.mjs';
 const onebotLogPolicy = '/opt/qqbot-defaults/qqbot-onebot-log.mjs';
 const mentionTextPolicy = '/opt/qqbot-defaults/qqbot-mention-text.mjs';
+const questionPolicy = '/opt/qqbot-defaults/qqbot-questions.mjs';
 const imageToolPolicyImport = `import { loadChatImageBytes } from '${policy}';`;
 const imageLoaderV3Marker = '// Chat-only scoped image loader v3.';
 const imageSchemaV3Marker = '// Chat-only image schema: scoped QQ media paths or public HTTPS image URLs v3.';
@@ -277,6 +278,78 @@ await patch('gateway/bootstrap.js', '// Chat-only native OneBot delivery integra
         `    // Chat-only native OneBot delivery integration v1.\n${directMarker}`, file);
 });
 
+await patch('gateway/bootstrap.js', '// Chat-only controlled QQ questions v1.', (content, file) => {
+    const importLine = `import { QuestionChannel, registerQuestionTool } from '${questionPolicy}';`;
+    const upstreamImport = 'import { QuestionChannel } from "../features/question-channel.js";';
+    if (content.includes(upstreamImport)) content = replaceOne(content, upstreamImport, importLine, file);
+    else if (!content.includes(importLine)) throw new Error(`Chat-only patch: upstream question channel import is unrecognized in ${file}`);
+    const oldChannel = [
+        '    const questionChannel = new QuestionChannel(manager, sender, config, logger);',
+        '    manager.questionChannel = questionChannel;',
+        '    questionChannel.install(ctx);',
+    ].join('\n');
+    const controlledChannel = [
+        '    // Chat-only controlled QQ questions v1.',
+        '    const questionSender = { sendQuestionMarkdown: (...args) => generationSender?.sendQuestionMarkdown?.(...args) };',
+        '    const questionChannel = new QuestionChannel(manager, questionSender, { ...config, appId: config.appId }, logger);',
+        '    manager.questionChannel = questionChannel;',
+        '    questionChannel.install(ctx);',
+        '    registerQuestionTool(ctx, questionChannel);',
+    ].join('\n');
+    if (content.includes(oldChannel)) content = replaceOne(content, oldChannel, controlledChannel, file);
+    else if (!content.includes('// Chat-only controlled QQ questions v1.')
+        || !content.includes('registerQuestionTool(ctx, questionChannel);')) {
+        throw new Error(`Chat-only patch: question channel bootstrap layout is unrecognized in ${file}`);
+    }
+    content = replaceOne(content, '            await manager.disposeAll();',
+        '            await manager.disposeAll();\n            manager.questionChannel?.uninstall();', file);
+    return content;
+});
+
+await patch('transport/reply-target.js', '// Chat-only question event reply credentials v1.', (content, file) => {
+    const allocateImport = `import { allocateQuestionEventSequence } from '${questionPolicy}';`;
+    if (!content.includes(allocateImport)) content = `${allocateImport}\n${content}`;
+    const resolverAnchor = '    const candidates = [];';
+    const questionResolver = [
+        '    // Chat-only question event reply credentials v1.',
+        '    if (target.questionEvent === true) {',
+        "        const validEvent = ['group', 'c2c'].includes(target.scope) && /^[A-Za-z0-9_-]{1,128}$/u.test(target.targetId ?? '') && /^INTERACTION_CREATE:[A-Za-z0-9_:+./=-]{1,256}$/u.test(target.eventId ?? '');",
+        '        if (!allowEvent || !validEvent) return { ...target, msgId: undefined, questionReplyBlocked: true };',
+        '        try {',
+        '            if (!limiter.checkLimit(target.eventId).allowed) return { ...target, msgId: undefined, questionReplyBlocked: true };',
+        '            const msgSeq = allocateQuestionEventSequence(target);',
+        '            if (!Number.isSafeInteger(msgSeq) || msgSeq < 1 || msgSeq > 65535) return { ...target, msgId: undefined, questionReplyBlocked: true };',
+        '            limiter.record(target.eventId);',
+        '            return { ...target, msgId: undefined, eventId: target.eventId, msgSeq };',
+        '        }',
+        '        catch { return { ...target, msgId: undefined, questionReplyBlocked: true }; }',
+        '    }',
+    ].join('\n');
+    if (content.includes(resolverAnchor)) content = replaceOne(content, resolverAnchor, `${questionResolver}\n${resolverAnchor}`, file);
+    else if (!content.includes('// Chat-only question event reply credentials v1.')) {
+        throw new Error(`Chat-only patch: reply-target resolver is unrecognized in ${file}`);
+    }
+    const sendAnchor = '    if (target.eventId) {';
+    const questionSend = [
+        '    if (target.questionReplyBlocked) throw new Error(\'QQ question reply target is unavailable.\');',
+        '    if (target.questionEvent) {',
+        "        if (!target.eventId || !Number.isSafeInteger(target.msgSeq) || target.msgSeq < 1 || target.msgSeq > 65535) throw new Error('QQ question reply target is unavailable.');",
+        '        return bot.send({',
+        '            target: { scope: target.scope, targetId: target.targetId, msgId: undefined },',
+        '            msgType: MsgType.MARKDOWN,',
+        '            markdown: { content },',
+        '            keyboard: opts?.keyboard,',
+        '            extra: { event_id: target.eventId, msg_seq: target.msgSeq },',
+        '        });',
+        '    }',
+    ].join('\n');
+    if (content.includes(sendAnchor)) content = replaceOne(content, sendAnchor, `${questionSend}\n${sendAnchor}`, file);
+    else if (!content.includes("extra: { event_id: target.eventId, msg_seq: target.msgSeq }")) {
+        throw new Error(`Chat-only patch: reply-target markdown sender is unrecognized in ${file}`);
+    }
+    return content;
+});
+
 await patch('gateway/middleware-setup.js', '// Chat-only serialized merge guard v1.', (content, file) => {
     const helperImport = `import { createMergeConcurrencyGuard, sendMergeQueueFullNotice } from '${concurrencyPolicy}';`;
     if (!content.includes(helperImport)) content = `${helperImport}\n${content}`;
@@ -377,11 +450,12 @@ await patch('gateway/middleware-setup.js', '// Chat-only OneBot log capture afte
     return replaceOne(content, anchor, `${captureBlock}\n${anchor}`, file);
 });
 
-await patch('middleware/question-answer.js', '// Chat-only OneBot fallback question bypass v1.', (content, file) => {
-    const fallbackImport = `import { getOnebotDirectFallback } from '${onebotScopePolicy}';`;
-    if (!content.includes(fallbackImport)) content = `${fallbackImport}\n${content}`;
-    return replaceOne(content, '    return async (ctx, next) => {',
-        '    return async (ctx, next) => {\n        // Chat-only OneBot fallback question bypass v1.\n        if (getOnebotDirectFallback(ctx)) return await next();', file);
+await patch('middleware/question-answer.js', '// Chat-only controlled QQ question-answer middleware v1.', (content) => {
+    return [
+        '// Chat-only controlled QQ question-answer middleware v1.',
+        `export { questionAnswerMiddleware as questionAnswer } from '${questionPolicy}';`,
+        '',
+    ].join('\n');
 });
 
 await patch('gateway/middleware-setup.js', `import {createScopedQuoteRef} from '${policy}';`, (content, file) => {
@@ -734,10 +808,12 @@ if (patchedMiddlewareSetup.split(`import { createPendingImageCaptureMiddleware, 
     throw new Error('Chat-only patch: generation quote provenance is missing or duplicated');
 }
 
-await patch('index.js', "export const inject = ['agents', 'tools', 'web', 'systemPrompt'];", (content, file) => {
-    const desired = "export const inject = ['agents', 'tools', 'web', 'systemPrompt'];";
+await patch('index.js', "export const inject = ['agents', 'tools', 'web', 'systemPrompt', 'userQuestions'];", (content, file) => {
+    const desired = "export const inject = ['agents', 'tools', 'web', 'systemPrompt', 'userQuestions'];";
+    const current = "export const inject = ['agents', 'tools', 'web', 'systemPrompt'];";
     const intermediate = "export const inject = ['agents', 'tools', 'web'];";
     const original = "export const inject = ['agents'];";
+    if (content.includes(current)) return replaceOne(content, current, desired, file);
     if (content.includes(intermediate)) return replaceOne(content, intermediate, desired, file);
     if (content.includes(original)) return replaceOne(content, original, desired, file);
     throw new Error(`Chat-only patch: expected one matching location in ${file}`);
@@ -1451,6 +1527,16 @@ await patch('transport/outbound.js', '// Chat-only original asset outbound v1.',
         '            return;',
     ].join('\n');
     return replaceOne(content, oldGate, newGate, file);
+});
+
+await patch('transport/outbound.js', '// Chat-only controlled question outbound v1.', (content, file) => {
+    return replaceOne(content,
+        '        const resultBlocks = raw?.data?.message?.content;',
+        [
+            '        // Chat-only controlled question outbound v1.',
+            "        if (call.name === 'ask_user_question') return;",
+            '        const resultBlocks = raw?.data?.message?.content;',
+        ].join('\n'), file);
 });
 
 await patch('transport/outbound.js', '// Chat-only deferred tool failures v1.', (content, file) => {
@@ -2419,7 +2505,8 @@ assertOnce(finalInbound, "const requestBody = [documentBody, deferredImagePrompt
 assertOnce(finalInbound, `import { renderOnebotDirectFallbackMetadata } from '${onebotScopePolicy}';`, 'OneBot independent fallback import');
 assertOnce(finalInbound, 'const onebotFallbackMetadata = renderOnebotDirectFallbackMetadata(getMergedGenerationRequests(ctx));', 'OneBot fallback even without tool availability');
 const finalQuestionAnswer = await finalText('middleware/question-answer.js');
-assertOnce(finalQuestionAnswer, 'if (getOnebotDirectFallback(ctx)) return await next();', 'OneBot fallback bypasses pending questions');
+assertOnce(finalQuestionAnswer, '// Chat-only controlled QQ question-answer middleware v1.', 'controlled question-answer middleware');
+assertOnce(finalQuestionAnswer, `export { questionAnswerMiddleware as questionAnswer } from '${questionPolicy}';`, 'controlled question-answer middleware export');
 assertOnce(finalInbound, 'await endOnebotTurn(chatOnlyAgent, onebotTurn);', 'OneBot scope cleanup');
 assertOnce(finalInbound, '// Chat-only safe inbound errors v1.', 'safe inbound errors marker');
 assertOnce(finalInbound, "logger.warn('whenIdle/followup rejected');", 'safe inbound exception log');

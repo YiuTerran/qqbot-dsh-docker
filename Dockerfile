@@ -98,6 +98,7 @@ COPY defaults/qqbot-assets.mjs /opt/qqbot-defaults/qqbot-assets.mjs
 COPY defaults/qqbot-asset-delivery.mjs /opt/qqbot-defaults/qqbot-asset-delivery.mjs
 COPY defaults/cordis.safety.patch.yml /opt/qqbot-defaults/cordis.safety.patch.yml
 COPY defaults/qqbot-chat-policy.mjs /opt/qqbot-defaults/qqbot-chat-policy.mjs
+COPY defaults/qqbot-questions.mjs /opt/qqbot-defaults/qqbot-questions.mjs
 COPY defaults/qqbot-onebot.mjs /opt/qqbot-defaults/qqbot-onebot.mjs
 COPY defaults/qqbot-onebot-log.mjs /opt/qqbot-defaults/qqbot-onebot-log.mjs
 COPY defaults/qqbot-log-text.mjs /opt/qqbot-defaults/qqbot-log-text.mjs
@@ -126,6 +127,7 @@ COPY defaults/qqbot-generation-sender.mjs /opt/qqbot-defaults/qqbot-generation-s
 
 RUN node --check /opt/qqbot-defaults/qqbot-onebot-direct.mjs
 RUN node --check /opt/qqbot-defaults/qqbot-mention-text.mjs \
+    && node --check /opt/qqbot-defaults/qqbot-questions.mjs \
     && node --check /opt/qqbot-defaults/qqbot-pending-images.mjs \
     && node --check /opt/qqbot-defaults/qqbot-sealdice-policy.mjs \
     && node --check /opt/qqbot-defaults/qqbot-onebot-scope.mjs
