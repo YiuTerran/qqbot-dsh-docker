@@ -44,6 +44,7 @@ previous_stock_agents_v0_12_5_fixture="${repo_root}/scripts/fixtures/agents-v0.1
 previous_stock_agents_v0_12_8_fixture="${repo_root}/scripts/fixtures/agents-v0.12.8-stock.md"
 previous_stock_agents_v0_12_9_fixture="${repo_root}/scripts/fixtures/agents-v0.12.9-stock.md"
 previous_stock_agents_v0_13_1_fixture="${repo_root}/scripts/fixtures/agents-v0.13.1-stock.md"
+previous_stock_agents_v0_14_0_fixture="${repo_root}/scripts/fixtures/agents-v0.14.0-stock.md"
 legacy_stock_agents_fixtures=(
     "${repo_root}/scripts/fixtures/agents-legacy-v0.3.0-stock.md"
     "${repo_root}/scripts/fixtures/agents-legacy-v0.3.1-stock.md"
@@ -64,6 +65,7 @@ legacy_stock_agents_fixtures=(
     "${repo_root}/scripts/fixtures/agents-v0.12.10-pre-selfportrait-stock.md"
     "${repo_root}/scripts/fixtures/agents-v0.13.0-stock.md"
     "${repo_root}/scripts/fixtures/agents-v0.13.1-stock.md"
+    "${repo_root}/scripts/fixtures/agents-v0.14.0-stock.md"
 )
 legacy_stock_agents_hashes=(
     c249259a60d4b04c9c9c3df1a92977adf748ba4143a3639c3e85a006ad802ef5
@@ -85,6 +87,7 @@ legacy_stock_agents_hashes=(
     53cb71cc3832cd6da1b20c9226370143afe384f4e6796893c2d7a8e7d2f3934d
     744b144ac1027820829b8c053d2a23e4396042fd88d5eab873285acb84ab6f9d
     68e05983a4bc0615bcf04c36362ebe8818995eb8e1ebbbb696c711f107829f11
+    f88404f2950486567a0cc1a347abbb650cacb141ede49a80ddcee1d5e9338135
 )
 persistent_reset_probe="${repo_root}/scripts/test-persistent-reset.mjs"
 suffix="$(date +%s)-$$"
@@ -194,11 +197,22 @@ if [[ ! -r "$previous_stock_agents_v0_13_1_fixture" ]]; then
     echo "missing previous stock AGENTS.md fixture: $previous_stock_agents_v0_13_1_fixture" >&2
     exit 1
 fi
+if [[ ! -r "$previous_stock_agents_v0_14_0_fixture" ]]; then
+    echo "missing previous stock AGENTS.md fixture: $previous_stock_agents_v0_14_0_fixture" >&2
+    exit 1
+fi
 
 expected_v0_13_1_stock_agents_sha256=68e05983a4bc0615bcf04c36362ebe8818995eb8e1ebbbb696c711f107829f11
 actual_v0_13_1_stock_agents_sha256="$(sha256sum "$previous_stock_agents_v0_13_1_fixture" | cut -d ' ' -f 1)"
 if [[ "$actual_v0_13_1_stock_agents_sha256" != "$expected_v0_13_1_stock_agents_sha256" ]]; then
     echo "unexpected v0.13.1 stock AGENTS.md fixture hash: $actual_v0_13_1_stock_agents_sha256" >&2
+    exit 1
+fi
+
+expected_v0_14_0_stock_agents_sha256=f88404f2950486567a0cc1a347abbb650cacb141ede49a80ddcee1d5e9338135
+actual_v0_14_0_stock_agents_sha256="$(sha256sum "$previous_stock_agents_v0_14_0_fixture" | cut -d ' ' -f 1)"
+if [[ "$actual_v0_14_0_stock_agents_sha256" != "$expected_v0_14_0_stock_agents_sha256" ]]; then
+    echo "unexpected v0.14.0 stock AGENTS.md fixture hash: $actual_v0_14_0_stock_agents_sha256" >&2
     exit 1
 fi
 
@@ -726,6 +740,20 @@ docker run --rm --network none \
     --mount "type=bind,src=${previous_stock_agents_v0_13_1_fixture},dst=/data/AGENTS.md,readonly" \
     --mount "type=bind,src=${previous_stock_agents_v0_13_1_fixture},dst=/tmp/agents-v0.13.1-stock.md,readonly" \
     "$IMAGE" sh -ec 'cmp /data/AGENTS.md /tmp/agents-v0.13.1-stock.md'
+
+docker run --rm --network none --entrypoint sh \
+    --volume "${stock_agents_data_volume}:/data" \
+    --mount "type=bind,src=${previous_stock_agents_v0_14_0_fixture},dst=/tmp/agents-v0.14.0-stock.md,readonly" \
+    "$IMAGE" -ec 'cp /tmp/agents-v0.14.0-stock.md /data/AGENTS.md; chmod 0644 /data/AGENTS.md'
+docker run --rm --network none \
+    --volume "${stock_agents_data_volume}:/data" \
+    "$IMAGE" sh -ec 'cmp /data/AGENTS.md /opt/qqbot-defaults/AGENTS.md'
+
+docker run --rm --network none \
+    --volume "${readonly_stock_agents_data_volume}:/data" \
+    --mount "type=bind,src=${previous_stock_agents_v0_14_0_fixture},dst=/data/AGENTS.md,readonly" \
+    --mount "type=bind,src=${previous_stock_agents_v0_14_0_fixture},dst=/tmp/agents-v0.14.0-stock.md,readonly" \
+    "$IMAGE" sh -ec 'cmp /data/AGENTS.md /tmp/agents-v0.14.0-stock.md'
 
 # The command is deliberately finite: fixture credentials are supplied only to
 # the local SDK probe, never real QQ credentials, so no QR login is attempted.

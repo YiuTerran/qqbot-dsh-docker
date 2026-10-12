@@ -14,7 +14,7 @@ const { default: SystemPrompt } = await import(`${dshRoot}dsh-system-prompt/lib/
 const { default: ToolRuntime } = await import(`${dshRoot}dsh-tools/lib/index.js`);
 const defaultsRoot = process.env.QQBOT_NATIVE_DEFAULTS_ROOT ?? '/opt/qqbot-defaults';
 const questionModule = process.env.QQBOT_QUESTIONS_MODULE ?? `${defaultsRoot}/qqbot-questions.mjs`;
-const { QQ_QUESTION_TOOL, questionToolSchema, QuestionChannel, registerQuestionTool } = await import(questionModule);
+const { QQ_QUESTION_TOOL, questionToolSchema, validateQuestionToolCall, QuestionChannel, registerQuestionTool } = await import(questionModule);
 const { beginGenerationTurn, endGenerationTurn, getGenerationTurn, generationRequestMetadata } = await import(`${defaultsRoot}/qqbot-generation-scope.mjs`);
 const { beginDocumentTurn, getDocumentTurn, endDocumentTurn, runInDocumentExecution } = await import(`${defaultsRoot}/qqbot-document-scope.mjs`);
 const { beginMergeBatch, closeMergeBatch } = await import(`${defaultsRoot}/qqbot-concurrency.mjs`);
@@ -198,6 +198,40 @@ test('question tool exposes a strict request-bound schema with small limits', ()
     visit(schema);
     assert.equal(propertyNames.has('role'), false);
     assert.equal(propertyNames.has('target'), false);
+});
+
+test('the provider tool-call id stays opaque and still delivers the question', async (t) => {
+    const delivered = deferred();
+    const harness = await questionHarness(t, { sender: {
+        async sendQuestionMarkdown(request, content) {
+            delivered.resolve({ request, content });
+            return { sent: true, messageId: 'opaque-id-message' };
+        },
+    } });
+    // dsh brands the model's call id as an opaque provider string. The pinned
+    // pi-ai openai-responses adapter encodes a Responses function call as
+    // "<call_id>|<item_id>", so the gate must not impose a bespoke alphabet on
+    // it: a bounded, control-character-free id is the whole contract.
+    const providerCallId = 'call_00_abc|fc_00_abc';
+    const pending = callQuestion(harness, questions({ id: 'q' }), providerCallId);
+    const outcome = await Promise.race([
+        delivered.promise.then((sent) => ({ sent })),
+        pending.then((output) => ({ output })),
+    ]);
+    assert.ok(outcome.sent, `a composite provider id reached QQ delivery: ${JSON.stringify(outcome.output)}`);
+    assert.match(outcome.sent.content, /Choose q/u);
+    assert.ok(harness.channel.pending.has(harness.record.sessionKey),
+        'the delivered question waits for its answer');
+    assert.equal(harness.channel.tryAnswer('group', 'group-a', 'owner-a', '1', 'opaque-id-answer', true), true);
+    assert.deepEqual(outputValue(await pending), { status: 'answered', answers: [{ id: 'q', selected: ['A'] }] });
+
+    const args = { requestId: harness.requestId, questions: questions({ id: 'q' }) };
+    const exec = (callId) => ({ name: QQ_QUESTION_TOOL, arguments: args, callId, agent: harness.agent, signal: new AbortController().signal });
+    assert.equal(validateQuestionToolCall(exec(providerCallId)), undefined, 'the composite provider id is authorized');
+    for (const invalidCallId of ['', 'control\u0001id', `x${'y'.repeat(256)}`]) {
+        assert.equal(validateQuestionToolCall(exec(invalidCallId)), 'A valid question tool-call id is required.',
+            `${JSON.stringify(invalidCallId.slice(0, 24))} is not a usable call id`);
+    }
 });
 
 test('native tools runtime exposes the question tool and fixed service rejects delegated roots', async (t) => {

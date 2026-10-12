@@ -27,7 +27,8 @@ const MAX_EVENT_SEQUENCES = 10_000;
 const EVENT_SEQUENCE_TTL_MS = 5 * 60 * 1000;
 const EVENT_PREFIX = 'INTERACTION_CREATE:';
 const QUESTION_ID = /^[A-Za-z0-9_-]{1,64}$/u;
-const CALL_ID = /^[A-Za-z0-9_-]{1,128}$/u;
+const MAX_CALL_ID_CHARS = 256;
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/u;
 const OPEN_ID = /^[A-Za-z0-9_-]{1,128}$/u;
 const MESSAGE_ID = /^[\x21-\x7e]{1,256}$/u;
 const RAW_EVENT_ID = /^[A-Za-z0-9_:+./=-]{1,256}$/u;
@@ -99,7 +100,15 @@ function normalizeQuestions(args) {
 }
 
 function safeCallId(value) {
-    return typeof value === 'string' && CALL_ID.test(value);
+    // dsh hands the registry an opaque provider-issued call id and performs no
+    // validation of its own. The pinned pi-ai openai-responses adapter encodes a
+    // Responses function call as "<call_id>|<item_id>", so call ids legitimately
+    // carry characters outside this deployment's own alphabets. Only require a
+    // bounded, non-empty, control-character-free string: it is used solely as an
+    // opaque per-call cache key and claim identity. This matches the generation
+    // and asset-delivery gates, which must accept the same runtime ids.
+    return typeof value === 'string' && value.length > 0 && value.length <= MAX_CALL_ID_CHARS
+        && !CONTROL_CHARACTERS.test(value);
 }
 
 function sameRecord(record, scope, source) {
