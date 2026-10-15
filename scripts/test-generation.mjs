@@ -229,6 +229,17 @@ function responseImage(bytes = png) {
     };
 }
 
+function responseGemini(bytes = png, mimeType = 'image/png', extra = {}) {
+    return {
+        status: 200,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        body: Buffer.from(JSON.stringify({
+            candidates: [{ content: { parts: [{ inlineData: { mimeType, data: Buffer.from(bytes).toString('base64') } }] } }],
+            ...extra,
+        })),
+    };
+}
+
 function header(headers, name) {
     if (headers instanceof Headers) return headers.get(name);
     if (headers && typeof headers.get === 'function') return headers.get(name);
@@ -338,6 +349,15 @@ test('image route config is independent, all-or-none, and defaults only a comple
         IMAGE_MODEL: 'image-model', IMAGE_API_PROTOCOL: 'xai-images',
     });
     assert.equal(xai.protocol, 'xai-images');
+    const gemini = readImageRouteConfig({
+        IMAGE_API_KEY: 'dedicated-image-key',
+        IMAGE_API_BASE_URL: 'https://generativelanguage.googleapis.com/v1beta',
+        IMAGE_MODEL: 'gemini-image-model', IMAGE_API_PROTOCOL: 'gemini',
+    });
+    assert.deepEqual(gemini, {
+        apiKey: 'dedicated-image-key', baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+        model: 'gemini-image-model', protocol: 'gemini',
+    });
 
     for (const baseUrl of [
         'http://images.example.test/v1',
@@ -446,6 +466,116 @@ test('xAI image edits use JSON with an embedded data image and fixed one-image r
     assert.equal(payload.n, 1);
     assert.deepEqual(payload.image, { url: `data:image/png;base64,${png.toString('base64')}` },
         'the xAI edit image is embedded as a data URI');
+});
+
+test('Gemini generation and edit requests use generateContent, encoded model names, and x-goog-api-key', async () => {
+    const requests = [];
+    const geminiRoute = {
+        ...route('gemini'),
+        baseUrl: 'https://generativelanguage.googleapis.com/v1beta/',
+        model: 'fixture image/model:preview',
+    };
+    const service = createImageService({ route: geminiRoute, transport: async (request) => {
+        requests.push(request);
+        return requests.length === 2 ? responseGemini(jpeg, 'image/jpeg') : responseGemini();
+    } });
+    assert.deepEqual(await service.generate({ prompt: 'Draw a blue whale.' }), png);
+    assert.deepEqual(await service.generate({ prompt: 'Remove the cloud.', imageBytes: jpeg }), jpeg);
+    assert.equal(requests.length, 2);
+    for (const request of requests) {
+        assert.equal(request.method, 'POST');
+        assert.equal(requestUrl(request), 'https://generativelanguage.googleapis.com/v1beta/models/fixture%20image%2Fmodel%3Apreview:generateContent');
+        assert.equal(header(request.headers, 'x-goog-api-key'), 'fixture-image-secret');
+        assert.equal(header(request.headers, 'authorization'), undefined, 'Gemini does not receive a Bearer header');
+        assert.match(header(request.headers, 'content-type') ?? '', /application\/json/iu);
+    }
+    assert.deepEqual(JSON.parse(bodyBuffer(requests[0].body).toString('utf8')), {
+        contents: [{ role: 'user', parts: [{ text: 'Draw a blue whale.' }] }],
+        generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
+    });
+    assert.deepEqual(JSON.parse(bodyBuffer(requests[1].body).toString('utf8')), {
+        contents: [{ role: 'user', parts: [
+            { text: 'Remove the cloud.' },
+            { inlineData: { mimeType: 'image/jpeg', data: jpeg.toString('base64') } },
+        ] }],
+        generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
+    });
+});
+
+test('Gemini response selects the first non-thought image from the first candidate and ignores text', async () => {
+    const mixed = {
+        candidates: [
+            { content: { parts: [
+                { text: 'Image follows.' },
+                { thought: true, inlineData: { mimeType: 'image/png', data: 'not-base64' } },
+                { inlineData: { mimeType: 'image/png', data: png.toString('base64') } },
+                { inlineData: { mimeType: 'image/jpeg', data: jpeg.toString('base64') } },
+            ] } },
+            { content: { parts: [{ inlineData: { mimeType: 'image/jpeg', data: jpeg.toString('base64') } }] } },
+        ],
+    };
+    const service = createImageService({ route: route('gemini'), transport: async () => ({
+        status: 200, headers: new Headers({ 'content-type': 'application/json' }), body: Buffer.from(JSON.stringify(mixed)),
+    }) });
+    assert.deepEqual(await service.generate({ prompt: 'Return the first image.' }), png);
+});
+
+test('Gemini fails closed for blocked, text-only, wrong-MIME, malformed, and oversized results', async () => {
+    const imagePart = { inlineData: { mimeType: 'image/png', data: png.toString('base64') } };
+    const cases = [
+        { promptFeedback: { blockReason: 'SAFETY' }, candidates: [{ content: { parts: [imagePart] } }] },
+        { candidates: [{ finishReason: 'SAFETY', content: { parts: [imagePart] } }] },
+        { candidates: [{ finishReason: 'REFUSAL', content: { parts: [imagePart] } }] },
+        { candidates: [{ content: { parts: [{ text: 'No image was generated.' }] } }] },
+        { candidates: [
+            { content: { parts: [{ text: 'Only the first candidate counts.' }] } },
+            { content: { parts: [imagePart] } },
+        ] },
+        { candidates: [] },
+        { candidates: [{ content: { parts: [{ thought: true, inlineData: imagePart.inlineData }] } }] },
+        { candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/jpeg', data: png.toString('base64') } }] } }] },
+        { candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/png', data: '%%%=' } }] } }] },
+        { candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/gif', data: png.toString('base64') } }] } }] },
+    ];
+    for (const payload of cases) {
+        const service = createImageService({ route: route('gemini'), transport: async () => ({
+            status: 200, headers: new Headers({ 'content-type': 'application/json' }), body: Buffer.from(JSON.stringify(payload)),
+        }) });
+        await assert.rejects(service.generate({ prompt: 'Reject invalid responses.' }), { message: 'provider-response' });
+    }
+
+    const oversized = oversizedValidPng();
+    const oversizedService = createImageService({ route: route('gemini'), transport: async () => responseGemini(oversized) });
+    await assert.rejects(oversizedService.generate({ prompt: 'Reject oversized output.' }), { message: 'provider-response' });
+});
+
+test('Gemini request cancellation and expiry stop the result before it is accepted', async () => {
+    const requestStarted = deferred();
+    const responseReady = deferred();
+    let capturedRequest;
+    const controller = new AbortController();
+    const cancelService = createImageService({ route: route('gemini'), transport: async (request) => {
+        capturedRequest = request;
+        requestStarted.resolve();
+        await responseReady.promise;
+        return responseGemini();
+    } });
+    const pending = cancelService.generate({ prompt: 'Cancel this request.', signal: controller.signal });
+    await requestStarted.promise;
+    controller.abort(new Error('fixture cancel'));
+    responseReady.resolve();
+    await assert.rejects(pending, /fixture cancel/u);
+    assert.equal(capturedRequest.signal.aborted, true);
+
+    let active = true;
+    let calls = 0;
+    const expiryService = createImageService({ route: route('gemini'), transport: async () => {
+        calls += 1;
+        active = false;
+        return responseGemini();
+    } });
+    await assert.rejects(expiryService.generate({ prompt: 'Expire this request.', assertActive: () => active }), { message: 'expired' });
+    assert.equal(calls, 1);
 });
 
 test('production image transport pairs Undici fetch and Agent and verifies HTTPS certificates', async (t) => {

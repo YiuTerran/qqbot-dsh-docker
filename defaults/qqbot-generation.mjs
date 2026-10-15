@@ -86,7 +86,7 @@ export function readImageRouteConfig(env = process.env) {
         || !noControlCharacters(raw.model) || raw.model.trim().length === 0 || raw.model.length > 256
         || !noControlCharacters(raw.baseUrl) || raw.baseUrl.length > 2048) throw imageRouteError();
     const protocol = raw.protocol === undefined || raw.protocol === '' ? 'openai-images' : raw.protocol;
-    if (!['openai-images', 'xai-images'].includes(protocol)) throw imageRouteError();
+    if (!['openai-images', 'xai-images', 'gemini'].includes(protocol)) throw imageRouteError();
     let url;
     try {
         url = new URL(raw.baseUrl);
@@ -426,6 +426,46 @@ function parseImageResponse(body) {
     throw new Error('provider-response');
 }
 
+function parseGeminiImageResponse(body) {
+    if (!Buffer.isBuffer(body) || body.length === 0 || body.length > MAX_API_JSON_BYTES) throw new Error('provider-response');
+    let payload;
+    try {
+        payload = JSON.parse(body.toString('utf8'));
+    }
+    catch {
+        throw new Error('provider-response');
+    }
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('provider-response');
+    const blockReason = payload.promptFeedback?.blockReason;
+    if (blockReason !== undefined && blockReason !== null && blockReason !== '' && blockReason !== 'BLOCK_REASON_UNSPECIFIED') {
+        throw new Error('provider-response');
+    }
+    const candidate = Array.isArray(payload.candidates) ? payload.candidates[0] : undefined;
+    const finishReason = candidate?.finishReason;
+    if (typeof finishReason === 'string'
+        && /^(?:SAFETY|BLOCKLIST|PROHIBITED_CONTENT|SPII|RECITATION|IMAGE_SAFETY|IMAGE_PROHIBITED_CONTENT|MODEL_ARMOR|REFUSAL)$/iu.test(finishReason)) {
+        throw new Error('provider-response');
+    }
+    const parts = candidate?.content?.parts;
+    if (!Array.isArray(parts)) throw new Error('provider-response');
+    const imagePart = parts.find((part) => part && typeof part === 'object' && !Array.isArray(part)
+        && part.thought !== true && Object.hasOwn(part, 'inlineData'));
+    const inlineData = imagePart?.inlineData;
+    if (!inlineData || typeof inlineData !== 'object' || Array.isArray(inlineData)
+        || typeof inlineData.data !== 'string' || typeof inlineData.mimeType !== 'string'
+        || !['image/png', 'image/jpeg'].includes(inlineData.mimeType)
+        || inlineData.data.length > Math.ceil(MAX_IMAGE_BYTES / 3) * 4 + 4
+        || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(inlineData.data)) {
+        throw new Error('provider-response');
+    }
+    const bytes = Buffer.from(inlineData.data, 'base64');
+    const actualMime = inspectImage(bytes);
+    if (bytes.toString('base64') !== inlineData.data || bytes.length > MAX_IMAGE_BYTES || actualMime !== inlineData.mimeType) {
+        throw new Error('provider-response');
+    }
+    return { bytes };
+}
+
 function imageExtension(mime) {
     return mime === 'image/png' ? 'png' : 'jpg';
 }
@@ -479,16 +519,33 @@ export function createImageService({ route, transport, resolvePublic, fetchImpl 
                 if (inputBuffer.length > MAX_IMAGE_BYTES) throw Object.assign(new Error('image-too-large'), { kind: 'too-large' });
             }
 
-            const url = endpoint(inputBuffer ? 'edits' : 'generations');
+            const gemini = route.protocol === 'gemini';
+            let url;
+            if (gemini) {
+                const geminiUrl = new URL(base.href);
+                geminiUrl.pathname = `${geminiUrl.pathname.replace(/\/+$/u, '')}/models/${encodeURIComponent(route.model)}:generateContent`;
+                url = geminiUrl.href;
+            }
+            else {
+                url = endpoint(inputBuffer ? 'edits' : 'generations');
+            }
             const requestSignal = signal
                 ? AbortSignal.any([signal, AbortSignal.timeout(API_TIMEOUT_MS)])
                 : AbortSignal.timeout(API_TIMEOUT_MS);
             let body;
-            const headers = {
-                authorization: `Bearer ${route.apiKey}`,
-                accept: 'application/json',
-            };
-            if (inputBuffer && route.protocol === 'openai-images') {
+            const headers = gemini
+                ? { 'x-goog-api-key': route.apiKey, accept: 'application/json' }
+                : { authorization: `Bearer ${route.apiKey}`, accept: 'application/json' };
+            if (gemini) {
+                headers['content-type'] = 'application/json';
+                const parts = [{ text: prompt }];
+                if (inputBuffer) parts.push({ inlineData: { mimeType: inputMime, data: inputBuffer.toString('base64') } });
+                body = JSON.stringify({
+                    contents: [{ role: 'user', parts }],
+                    generationConfig: { responseModalities: ['TEXT', 'IMAGE'] },
+                });
+            }
+            else if (inputBuffer && route.protocol === 'openai-images') {
                 body = new FormData();
                 body.set('model', route.model);
                 body.set('prompt', prompt);
@@ -518,7 +575,7 @@ export function createImageService({ route, transport, resolvePublic, fetchImpl 
                 if (Number.isInteger(response?.status)) error.status = response.status;
                 throw error;
             }
-            const parsed = parseImageResponse(response.body);
+            const parsed = gemini ? parseGeminiImageResponse(response.body) : parseImageResponse(response.body);
             let result = parsed.bytes;
             if (!result) {
                 if (signal?.aborted || (typeof assertActive === 'function' && assertActive() !== true)) throw new Error('aborted');

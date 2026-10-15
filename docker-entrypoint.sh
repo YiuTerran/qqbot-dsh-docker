@@ -36,8 +36,8 @@ if [ -n "$image_api_key" ] || [ -n "$image_api_base_url" ] || [ -n "$image_model
         exit 64
     fi
     image_api_protocol=${image_api_protocol:-openai-images}
-    if [ "$image_api_protocol" != "openai-images" ] && [ "$image_api_protocol" != "xai-images" ]; then
-        echo "[entrypoint] IMAGE_API_PROTOCOL must be openai-images or xai-images" >&2
+    if [ "$image_api_protocol" != "openai-images" ] && [ "$image_api_protocol" != "xai-images" ] && [ "$image_api_protocol" != "gemini" ]; then
+        echo "[entrypoint] IMAGE_API_PROTOCOL must be openai-images, xai-images, or gemini" >&2
         exit 64
     fi
     export IMAGE_API_PROTOCOL="$image_api_protocol"
@@ -153,6 +153,7 @@ previous_v0_13_1_stock_agents_sha256=68e05983a4bc0615bcf04c36362ebe8818995eb8e1e
 previous_v0_14_0_stock_agents_sha256=f88404f2950486567a0cc1a347abbb650cacb141ede49a80ddcee1d5e9338135
 previous_v0_14_1_stock_agents_sha256=e95de832302aae41874d2f076e4678fa8f3e84450a7a7fe1a07f3d8113781738
 previous_v0_14_2_stock_agents_sha256=c1fc913722d9b620c36ab245a2424e119035dcfa07e17d8f89127d4338d1276e
+previous_v0_15_0_stock_agents_sha256=2bfb225fe636f01df3a7ba285e27b93d99ad259563eea7beebd3f8c0329b3162
 legacy_stock_agents_sha256_list='
 c249259a60d4b04c9c9c3df1a92977adf748ba4143a3639c3e85a006ad802ef5
 9101cd863b9973e3ce7210e3d2f4e17fa23d8238564d463c18207fcf1622688d
@@ -195,6 +196,7 @@ if [ -f /data/AGENTS.md ] && [ ! -L /data/AGENTS.md ] && [ -r /data/AGENTS.md ] 
         || [ "$current_agents_sha256" = "$previous_v0_14_0_stock_agents_sha256" ] \
         || [ "$current_agents_sha256" = "$previous_v0_14_1_stock_agents_sha256" ] \
         || [ "$current_agents_sha256" = "$previous_v0_14_2_stock_agents_sha256" ] \
+        || [ "$current_agents_sha256" = "$previous_v0_15_0_stock_agents_sha256" ] \
         || [ "$legacy_stock_agents_match" = true ]; then
         agents_migration_tmp="/data/.AGENTS.md.$$"
         if install -o node -g node -m 0644 /opt/qqbot-defaults/AGENTS.md "$agents_migration_tmp" \

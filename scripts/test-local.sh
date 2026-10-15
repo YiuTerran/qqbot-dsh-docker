@@ -48,6 +48,7 @@ previous_stock_agents_v0_13_1_fixture="${repo_root}/scripts/fixtures/agents-v0.1
 previous_stock_agents_v0_14_0_fixture="${repo_root}/scripts/fixtures/agents-v0.14.0-stock.md"
 previous_stock_agents_v0_14_1_fixture="${repo_root}/scripts/fixtures/agents-v0.14.1-stock.md"
 previous_stock_agents_v0_14_2_fixture="${repo_root}/scripts/fixtures/agents-v0.14.2-stock.md"
+previous_stock_agents_v0_15_0_fixture="${repo_root}/scripts/fixtures/agents-v0.15.0-stock.md"
 legacy_stock_agents_fixtures=(
     "${repo_root}/scripts/fixtures/agents-legacy-v0.3.0-stock.md"
     "${repo_root}/scripts/fixtures/agents-legacy-v0.3.1-stock.md"
@@ -71,6 +72,7 @@ legacy_stock_agents_fixtures=(
     "${repo_root}/scripts/fixtures/agents-v0.14.0-stock.md"
     "${repo_root}/scripts/fixtures/agents-v0.14.1-stock.md"
     "${repo_root}/scripts/fixtures/agents-v0.14.2-stock.md"
+    "${repo_root}/scripts/fixtures/agents-v0.15.0-stock.md"
 )
 legacy_stock_agents_hashes=(
     c249259a60d4b04c9c9c3df1a92977adf748ba4143a3639c3e85a006ad802ef5
@@ -95,6 +97,7 @@ legacy_stock_agents_hashes=(
     f88404f2950486567a0cc1a347abbb650cacb141ede49a80ddcee1d5e9338135
     e95de832302aae41874d2f076e4678fa8f3e84450a7a7fe1a07f3d8113781738
     c1fc913722d9b620c36ab245a2424e119035dcfa07e17d8f89127d4338d1276e
+    2bfb225fe636f01df3a7ba285e27b93d99ad259563eea7beebd3f8c0329b3162
 )
 persistent_reset_probe="${repo_root}/scripts/test-persistent-reset.mjs"
 suffix="$(date +%s)-$$"
@@ -212,6 +215,10 @@ if [[ ! -r "$previous_stock_agents_v0_14_1_fixture" ]]; then
     echo "missing previous stock AGENTS.md fixture: $previous_stock_agents_v0_14_1_fixture" >&2
     exit 1
 fi
+if [[ ! -r "$previous_stock_agents_v0_15_0_fixture" ]]; then
+    echo "missing previous stock AGENTS.md fixture: $previous_stock_agents_v0_15_0_fixture" >&2
+    exit 1
+fi
 
 expected_v0_13_1_stock_agents_sha256=68e05983a4bc0615bcf04c36362ebe8818995eb8e1ebbbb696c711f107829f11
 actual_v0_13_1_stock_agents_sha256="$(sha256sum "$previous_stock_agents_v0_13_1_fixture" | cut -d ' ' -f 1)"
@@ -238,6 +245,13 @@ expected_v0_14_2_stock_agents_sha256=c1fc913722d9b620c36ab245a2424e119035dcfa07e
 actual_v0_14_2_stock_agents_sha256="$(sha256sum "$previous_stock_agents_v0_14_2_fixture" | cut -d ' ' -f 1)"
 if [[ "$actual_v0_14_2_stock_agents_sha256" != "$expected_v0_14_2_stock_agents_sha256" ]]; then
     echo "unexpected v0.14.2 stock AGENTS.md fixture hash: $actual_v0_14_2_stock_agents_sha256" >&2
+    exit 1
+fi
+
+expected_v0_15_0_stock_agents_sha256=2bfb225fe636f01df3a7ba285e27b93d99ad259563eea7beebd3f8c0329b3162
+actual_v0_15_0_stock_agents_sha256="$(sha256sum "$previous_stock_agents_v0_15_0_fixture" | cut -d ' ' -f 1)"
+if [[ "$actual_v0_15_0_stock_agents_sha256" != "$expected_v0_15_0_stock_agents_sha256" ]]; then
+    echo "unexpected v0.15.0 stock AGENTS.md fixture hash: $actual_v0_15_0_stock_agents_sha256" >&2
     exit 1
 fi
 
@@ -506,6 +520,15 @@ run_profile_probe \
     --env IMAGE_API_PROTOCOL=xai-images \
     --env QQBOT_MARKDOWN_ENABLED=false
 run_profile_probe \
+    "dedicated Gemini image route accepts a versioned API root and bare model name" \
+    "$official_data_volume" \
+    "https://api.deepseek.com/anthropic/v1" \
+    --env DEEPSEEK_API_KEY=fixture-official-key \
+    --env IMAGE_API_KEY=fixture-gemini-image-key \
+    --env IMAGE_API_BASE_URL=https://generativelanguage.googleapis.com/v1beta \
+    --env IMAGE_MODEL=fixture-gemini-image-model \
+    --env IMAGE_API_PROTOCOL=gemini
+run_profile_probe \
     "official route after third-party config persists in same volume" \
     "$search_env_data_volume" \
     "https://api.deepseek.com/anthropic/v1" \
@@ -556,7 +579,7 @@ if docker run --rm --network none --volume "${official_data_volume}:/data" \
     echo "entrypoint unexpectedly accepted an unsupported image protocol" >&2
     exit 1
 fi
-grep -Fq "IMAGE_API_PROTOCOL must be openai-images or xai-images" "$incompatible_log"
+grep -Fq "IMAGE_API_PROTOCOL must be openai-images, xai-images, or gemini" "$incompatible_log"
 if docker run --rm --network none --volume "${official_data_volume}:/data" \
     --env QQBOT_APPID=fixture-app-id --env QQBOT_SECRET=fixture-app-secret \
     --env IMAGE_API_KEY=fixture-image-key \
@@ -827,6 +850,20 @@ docker run --rm --network none \
     --mount "type=bind,src=${previous_stock_agents_v0_14_2_fixture},dst=/data/AGENTS.md,readonly" \
     --mount "type=bind,src=${previous_stock_agents_v0_14_2_fixture},dst=/tmp/agents-v0.14.2-stock.md,readonly" \
     "$IMAGE" sh -ec 'cmp /data/AGENTS.md /tmp/agents-v0.14.2-stock.md'
+
+docker run --rm --network none --entrypoint sh \
+    --volume "${stock_agents_data_volume}:/data" \
+    --mount "type=bind,src=${previous_stock_agents_v0_15_0_fixture},dst=/tmp/agents-v0.15.0-stock.md,readonly" \
+    "$IMAGE" -ec 'cp /tmp/agents-v0.15.0-stock.md /data/AGENTS.md; chmod 0644 /data/AGENTS.md'
+docker run --rm --network none \
+    --volume "${stock_agents_data_volume}:/data" \
+    "$IMAGE" sh -ec 'cmp /data/AGENTS.md /opt/qqbot-defaults/AGENTS.md'
+
+docker run --rm --network none \
+    --volume "${readonly_stock_agents_data_volume}:/data" \
+    --mount "type=bind,src=${previous_stock_agents_v0_15_0_fixture},dst=/data/AGENTS.md,readonly" \
+    --mount "type=bind,src=${previous_stock_agents_v0_15_0_fixture},dst=/tmp/agents-v0.15.0-stock.md,readonly" \
+    "$IMAGE" sh -ec 'cmp /data/AGENTS.md /tmp/agents-v0.15.0-stock.md'
 
 # The command is deliberately finite: fixture credentials are supplied only to
 # the local SDK probe, never real QQ credentials, so no QR login is attempted.

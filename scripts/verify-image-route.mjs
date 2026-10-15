@@ -69,7 +69,9 @@ try {
     const route = generation.readImageRouteConfig();
     if (!route) throw new Error('image-route-required');
     const api = new URL(route.baseUrl);
-    const apiPath = `${api.pathname.replace(/\/+$/u, '')}/images/generations`;
+    const apiPath = route.protocol === 'gemini'
+        ? `${api.pathname.replace(/\/+$/u, '')}/models/${encodeURIComponent(route.model)}:generateContent`
+        : `${api.pathname.replace(/\/+$/u, '')}/images/generations`;
     const generationScopes = await import(pathToFileURL(join(generationDir, 'qqbot-generation-scope.mjs')).href);
     const documentScopes = await import(pathToFileURL(join(generationDir, 'qqbot-document-scope.mjs')).href);
     scopeModules = { ...generationScopes, ...documentScopes };

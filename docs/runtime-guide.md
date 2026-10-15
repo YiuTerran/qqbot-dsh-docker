@@ -14,7 +14,16 @@ v0.12.2 修复了从 v0.11.2 等已启用直通路由的旧数据卷升级时，
 
 连续发送的纯图片会按应用、群/私聊目标和发送者分别暂存为最近图片批次，最多 8 张、最多 200 组，最后一张图片到达 5 分钟后过期。暂存只保留内存元数据，不下载图片或调用模型。群聊未 @机器人的消息不会触发模型或消费批次；普通聊天和文生图不消费批次。只有明确要求分析、OCR、询问图片内容或编辑时才可使用；一次操作消费整批，失败或取消后不会恢复。编辑底图不明确时应先询问。
 
-图片生成路由与聊天密钥完全独立。配置 `IMAGE_API_KEY`、`IMAGE_API_BASE_URL` 和 `IMAGE_MODEL` 后才启用；协议支持 `openai-images`（默认）或 `xai-images`。需改图时，当前消息或明确引用只授权一张底图，支持 PNG、JPEG、GIF、WebP；输入与结果上限为 10 MiB。有效 GIF/WebP 和需要规范化的 PNG/JPEG 会在内存中转成 PNG，动图取第一帧；最多处理 4,000 万像素并限时 10 秒。提示词最多 4,000 字符，图片服务请求限时 120 秒，整个工具限时 180 秒。每用户每滚动小时默认 10 次生成与编辑合计；调用失败和取消也计入已开始任务额度。图片结果经当前 QQ 回复发送。
+图片生成路由与聊天密钥完全独立。配置 `IMAGE_API_KEY`、`IMAGE_API_BASE_URL` 和 `IMAGE_MODEL` 后才启用；协议支持 `openai-images`（默认）、`xai-images` 和 `gemini`。Gemini 的 base URL 应包含 `/v1beta`，`IMAGE_MODEL` 使用不带 `models/` 的模型名。需改图时，当前消息或明确引用只授权一张底图，支持 PNG、JPEG、GIF、WebP；输入与结果上限为 10 MiB。有效 GIF/WebP 和需要规范化的 PNG/JPEG 会在内存中转成 PNG，动图取第一帧；最多处理 4,000 万像素并限时 10 秒。提示词最多 4,000 字符，图片服务请求限时 120 秒，整个工具限时 180 秒。每用户每滚动小时默认 10 次生成与编辑合计；调用失败和取消也计入已开始任务额度。图片结果经当前 QQ 回复发送。
+
+Gemini 中转站配置示例：
+
+```dotenv
+IMAGE_API_KEY=<中转站密钥>
+IMAGE_API_PROTOCOL=gemini
+IMAGE_API_BASE_URL=https://sub.callai.one/v1beta
+IMAGE_MODEL=<中转站提供的模型名称>
+```
 
 生图／改图工具会向 LLM 返回结构化 `status` 和固定 `notice`：`sent` 表示 QQ 发送已确认，`failed` 表示操作失败，`timeout` 表示超时，`unknown` 表示投递确认未知；其他状态说明额度、格式、过期或并发限制。模型按回执说明结果，不自动重试或重复发送；回执不证明用户已阅读。QQ 直接投递图片，工具回执不会额外刷成状态消息。
 
@@ -103,7 +112,7 @@ mkdir -p /tmp/qqbot-image-probe
 docker run --rm --entrypoint node --env-file .env \
   --mount "type=bind,src=$PWD/scripts/verify-image-route.mjs,dst=/tmp/verify-image-route.mjs,readonly" \
   --mount type=bind,src=/tmp/qqbot-image-probe,dst=/probe-output \
-  tryao/qqbot-dsh:v0.15.0 /tmp/verify-image-route.mjs /probe-output
+  tryao/qqbot-dsh:v0.16.0 /tmp/verify-image-route.mjs /probe-output
 ```
 
 探测会发起真实图片服务请求并消耗服务额度；不会发送真实 QQ 消息或修改生产额度。真实 QQ 图片和文件投递仍需用机器人账号验证。

@@ -6,7 +6,7 @@ qq-bot 使用专用工具调用 Gensokyo-MCP；桥将请求变成虚拟 OneBot v
 
 两个 fork 固定为子模块：`third_party/gensokyo-mcp`、`third_party/sealdice-core`。初始化使用 `git submodule update --init --recursive`。海豹嵌套资源按其自己的 gitlink 检出，不改变 UI。
 
-镜像分别为 `tryao/qqbot-dsh:v0.15.0`、`tryao/gensokyo-mcp:v0.3.1`、`tryao/sealdice-core:v1.6.2-bridge.8`，只使用版本标签，没有 latest。主镜像不包含两个 Go 项目源码或运行程序。
+镜像分别为 `tryao/qqbot-dsh:v0.16.0`、`tryao/gensokyo-mcp:v0.3.1`、`tryao/sealdice-core:v1.6.2-bridge.8`，只使用版本标签，没有 latest。主镜像不包含两个 Go 项目源码或运行程序。
 
 v0.11.0 新增 Markdown 投递回执、扩展命令和连接级 Master ACL；三项镜像版本须一同升级，旧后端未协商 ACL 时仍可处理普通命令。
 
@@ -17,7 +17,7 @@ v0.11.1 增加群主／管理员的整群规则修改权限，以及单条自然
 可以直接使用仓库的 `docker-compose.qnap.yml`，或将下方完整 YAML 保存为 `docker-compose.yml`。在同一目录创建 `.env`；QQ 和聊天凭据按实际账号填写，三份 OneBot 服务密钥使用不同的随机值，不复用 QQ/LLM 密钥。已有配置可保留聊天、视觉和生图路由，只更新三个镜像版本及 OneBot 配置。
 
 ```dotenv
-IMAGE_TAG=v0.15.0
+IMAGE_TAG=v0.16.0
 QQBOT_APPID=
 QQBOT_SECRET=
 # 官方聊天模式填此项；不要同时配置 LLM_API_KEY。
@@ -37,7 +37,8 @@ LLM_SEARCH_MODEL=
 IMAGE_API_KEY=
 IMAGE_API_BASE_URL=
 IMAGE_MODEL=
-# 未启用生图时也留空；启用后默认 openai-images，可选 xai-images。
+# 未启用生图时也留空；启用后默认 openai-images，可选 xai-images 或 gemini。
+# Gemini 的 base URL 需包含 /v1beta，IMAGE_MODEL 填不带 models/ 的模型名。
 IMAGE_API_PROTOCOL=
 QQBOT_ONEBOT_ENABLED=true
 QQBOT_ONEBOT_LOG_ENABLED=true
