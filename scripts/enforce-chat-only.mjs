@@ -1575,6 +1575,70 @@ await patch('transport/outbound.js', '// Chat-only deferred tool failures v1.', 
     return content;
 });
 
+await patch('transport/outbound.js', '// Chat-only DeepSeek timeout status notices v1.', (content, file) => {
+    const oldImport = `import { formatProviderFailure, formatToolFailure } from '${providerErrorsPolicy}';`;
+    const newImport = `import { classifyProviderFailure, formatProviderFailure, formatToolFailure, resolveProviderFailureNotice } from '${providerErrorsPolicy}';`;
+    if (content.includes(oldImport)) content = replaceOne(content, oldImport, newImport, file);
+    else if (!content.includes(newImport)) throw new Error(`Chat-only patch: missing provider error import in ${file}`);
+
+    content = replaceOne(content,
+        '    toolFailureTurns = new WeakMap();',
+        '    toolFailureTurns = new WeakMap();\n    // Chat-only DeepSeek timeout status notices v1.\n    timeoutNoticeTurns = new WeakMap();', file);
+    content = replaceOne(content,
+        '            this.toolFailureTurns.delete(startRecord);',
+        '            this.toolFailureTurns.delete(startRecord);\n            this.timeoutNoticeTurns.delete(startRecord);', file);
+
+    content = replaceOne(content,
+        '    onTurnEnd(sessionId, record, event, turnId, originRecord = record) {',
+        "    onTurnEnd(sessionId, record, event, turnId, originRecord = record) {\n        if (event.reason?.kind === 'cancelled') this.timeoutNoticeTurns.delete(originRecord);", file);
+
+    content = replaceOne(content,
+        "            enqueueMergeBatchSend(originRecord, () => this.send(record, formatProviderFailure(failure), 'sendTurnEndError'));",
+        [
+            "            if (classifyProviderFailure(failure) === 'timeout') {",
+            '                const existingTimeoutNotice = this.timeoutNoticeTurns.get(originRecord);',
+            '                const duplicateTimeout = Number.isSafeInteger(turnId) && turnId > 0',
+            '                    && existingTimeoutNotice?.sessionId === sessionId',
+            '                    && existingTimeoutNotice?.agent === originRecord.agent',
+            '                    && Object.is(existingTimeoutNotice?.turnId, turnId);',
+            '                if (!duplicateTimeout) {',
+            '                    const timeoutNotice = { record: originRecord, sessionId, agent: originRecord.agent, turnId };',
+            '                    this.timeoutNoticeTurns.set(originRecord, timeoutNotice);',
+            '                    enqueueMergeBatchSend(originRecord, async () => {',
+            '                        const notice = await resolveProviderFailureNotice(failure);',
+            '                        if (this.timeoutNoticeTurns.get(originRecord) !== timeoutNotice',
+            '                            || timeoutNotice.record !== originRecord',
+            '                            || this.manager.findBySessionId(sessionId) !== originRecord',
+            '                            || originRecord.agent !== timeoutNotice.agent',
+            '                            || originRecord.sessionId !== sessionId',
+            '                            || record.agent !== timeoutNotice.agent',
+            '                            || record.sessionId !== sessionId) return;',
+            "                        return this.send(record, notice, 'sendTurnEndError');",
+            '                    });',
+            '                }',
+            '            }',
+            "            else enqueueMergeBatchSend(originRecord, () => this.send(record, formatProviderFailure(failure), 'sendTurnEndError'));",
+        ].join('\n'), file);
+
+    for (const [value, label] of [
+        ['// Chat-only DeepSeek timeout status notices v1.', 'timeout notice state marker'],
+        ['this.timeoutNoticeTurns.delete(startRecord);', 'accepted turn start invalidation'],
+        ["if (event.reason?.kind === 'cancelled') this.timeoutNoticeTurns.delete(originRecord);", 'accepted cancellation invalidation'],
+        ['Number.isSafeInteger(turnId) && turnId > 0', 'duplicate suppression only with concrete turn IDs'],
+        ['if (classifyProviderFailure(failure) === \'timeout\') {', 'timeout-only status branch'],
+        ['await resolveProviderFailureNotice(failure)', 'deferred timeout status lookup'],
+        ['this.timeoutNoticeTurns.get(originRecord) !== timeoutNotice', 'late timeout token guard'],
+        ['this.manager.findBySessionId(sessionId) !== originRecord', 'late timeout session identity guard'],
+        ['originRecord.agent !== timeoutNotice.agent', 'late timeout agent guard'],
+        ['originRecord.sessionId !== sessionId', 'late timeout record session guard'],
+        ['record.agent !== timeoutNotice.agent', 'late timeout reply record agent guard'],
+        ['record.sessionId !== sessionId', 'late timeout reply record session guard'],
+    ]) {
+        if (content.split(value).length !== 2) throw new Error(`Chat-only patch: missing ${label} in ${file}`);
+    }
+    return content;
+});
+
 await patch('transport/streaming-writer.js', '// Chat-only awaitable stream cancellation v1.', (content, file) => {
     const original = [
         '    abort() {',
@@ -2602,9 +2666,10 @@ assertOnce(finalEvents, '// Chat-only structured provider failures v1.', 'struct
 assertOnce(finalEvents, 'status: detail?.status ?? reason.status,', 'provider status extraction');
 assertOnce(finalEvents, 'type: detail?.type ?? reason.type,', 'provider type extraction');
 assertOnce(finalEvents, 'error: detail?.error,', 'provider structured error extraction');
-const friendlyOutboundImport = `import { formatProviderFailure, formatToolFailure } from '${providerErrorsPolicy}';`;
+const friendlyOutboundImport = `import { classifyProviderFailure, formatProviderFailure, formatToolFailure, resolveProviderFailureNotice } from '${providerErrorsPolicy}';`;
 assertOnce(finalOutbound, friendlyOutboundImport, 'friendly errors import');
 assertOnce(finalOutbound, '// Chat-only friendly provider errors v1.', 'friendly errors marker');
+assertOnce(finalOutbound, '// Chat-only DeepSeek timeout status notices v1.', 'DeepSeek timeout notice marker');
 assertOnce(finalOutbound, 'this.onToolResult(replyRecord, event, raw, record);', 'raw tool result binding');
 assertOnce(finalOutbound, 'onToolResult(record, event, raw, originRecord = record) {', 'safe tool result handler');
 const toolFailureTracking = [
@@ -2614,6 +2679,20 @@ const toolFailureTracking = [
 if (!toolFailureTracking.some((value) => finalOutbound.split(value).length === 2))
     throw new Error('Chat-only patch: safe tool failure notice is missing or duplicated');
 assertOnce(finalOutbound, '// Chat-only deferred tool failures v1.', 'deferred tool failures marker');
+for (const [value, label] of [
+    ['timeoutNoticeTurns = new WeakMap();', 'per-record timeout notice state'],
+    ['this.timeoutNoticeTurns.delete(startRecord);', 'accepted turn start invalidation'],
+    ["if (event.reason?.kind === 'cancelled') this.timeoutNoticeTurns.delete(originRecord);", 'turn cancellation invalidation'],
+    ['Number.isSafeInteger(turnId) && turnId > 0', 'concrete duplicate turn guard'],
+    ["classifyProviderFailure(failure) === 'timeout'", 'timeout-only public status condition'],
+    ['await resolveProviderFailureNotice(failure)', 'async timeout notice lookup'],
+    ['this.timeoutNoticeTurns.get(originRecord) !== timeoutNotice', 'late timeout token guard'],
+    ['originRecord.agent !== timeoutNotice.agent', 'late timeout agent guard'],
+    ['originRecord.sessionId !== sessionId', 'late timeout record session guard'],
+    ['record.agent !== timeoutNotice.agent', 'late timeout reply record agent guard'],
+    ['record.sessionId !== sessionId', 'late timeout reply record session guard'],
+    ['this.manager.findBySessionId(sessionId) !== originRecord', 'late session replacement guard'],
+]) assertOnce(finalOutbound, value, label);
 for (const [value, label] of [
     ['toolFailureTurns = new WeakMap();', 'per-record deferred failure state'],
     ['this.toolFailureTurns.delete(startRecord);', 'deferred failure turn start reset'],

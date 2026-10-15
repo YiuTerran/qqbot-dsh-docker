@@ -123,9 +123,22 @@ async function assertCurrentPatch(root) {
             '// Chat-only batch-bound outbound routing v1.',
             '// Chat-only generation outbound v1.',
             '// Chat-only deferred tool failures v1.',
+            '// Chat-only DeepSeek timeout status notices v1.',
             "import { captureMergeBatchReply, enqueueMergeBatchSend, noteMergeBatchTurnStart } from '/opt/qqbot-defaults/qqbot-concurrency.mjs';",
+            "import { classifyProviderFailure, formatProviderFailure, formatToolFailure, resolveProviderFailureNotice } from '/opt/qqbot-defaults/qqbot-provider-errors.mjs';",
             'captureMergeBatchReply(record, { sessionId, turnId: raw?.data?.turn, seq: raw?.seq })',
             "enqueueMergeBatchSend(originRecord, () => this.send(record, formatProviderFailure(failure), 'sendTurnEndError'));",
+            "classifyProviderFailure(failure) === 'timeout'",
+            'await resolveProviderFailureNotice(failure)',
+            'this.manager.findBySessionId(sessionId) !== originRecord',
+            'this.timeoutNoticeTurns.delete(startRecord);',
+            "if (event.reason?.kind === 'cancelled') this.timeoutNoticeTurns.delete(originRecord);",
+            'Number.isSafeInteger(turnId) && turnId > 0',
+            'this.timeoutNoticeTurns.get(originRecord) !== timeoutNotice',
+            'originRecord.agent !== timeoutNotice.agent',
+            'originRecord.sessionId !== sessionId',
+            'record.agent !== timeoutNotice.agent',
+            'record.sessionId !== sessionId',
             'this.toolFailureTurns.set(originRecord, { toolFailed: true, hasAnswer: false, streamAfterFailure: false });',
             "event.reason.kind === 'completed' && turn?.toolFailed && !turn.hasAnswer && !completedStreamAnswer",
         ],
@@ -237,12 +250,13 @@ async function downgradeVisionSchemaToV4(root) {
     await writeFile(path, vision);
 }
 
-for (const version of ['v0.12.4', 'pre-thinking', 'pre-concurrency', 'pre-recovery', 'recovery-v1', 'onebot-v10.2', 'onebot-v11.2']) {
+for (const version of ['v0.12.4', 'pre-thinking', 'pre-concurrency', 'pre-recovery', 'recovery-v1', 'v0.14.2', 'onebot-v10.2', 'onebot-v11.2']) {
     integration(`${version} adapter upgrades completely and a second patch pass changes no file hashes`, async (t) => {
         const root = await isolatedAdapter(t);
         if (version === 'v0.12.4') await run(concurrencyFixture, [root, 'mention-only']);
         else if (version === 'pre-thinking') await run(concurrencyFixture, [root, 'thinking-only']);
         else if (version === 'pre-concurrency') await run(concurrencyFixture, [root]);
+        else if (version === 'v0.14.2') await run(concurrencyFixture, [root, 'timeout-status-only']);
         else if (version === 'onebot-v10.2') await run(concurrencyFixture, [root, 'direct-only']);
         else if (version === 'onebot-v11.2') {
             await run(concurrencyFixture, [root, 'log-only']);
@@ -262,6 +276,22 @@ for (const version of ['v0.12.4', 'pre-thinking', 'pre-concurrency', 'pre-recove
         assert.deepEqual(await hashes(root), upgraded, 'the full dist is byte-for-byte unchanged on repeat startup');
     });
 }
+
+integration('a partial DeepSeek timeout status marker fails before writing any adapter file', async (t) => {
+    const root = await isolatedAdapter(t);
+    const outboundPath = join(root, 'transport/outbound.js');
+    const outbound = await readFile(outboundPath, 'utf8');
+    const timeoutState = '    timeoutNoticeTurns = new WeakMap();';
+    assert.equal(outbound.split(timeoutState).length, 2, 'fixture begins with one timeout notice state declaration');
+    await writeFile(outboundPath, outbound.replace(timeoutState, '    // fixture removed timeout notice state'));
+    const before = await hashes(root);
+    await assert.rejects(run(enforcer, [root]), (error) => {
+        assert.notEqual(error.code, 0);
+        assert.match(error.stderr, /per-record timeout notice state is missing or duplicated/u);
+        return true;
+    });
+    assert.deepEqual(await hashes(root), before, 'a marked incomplete status notice migration performs zero adapter writes');
+});
 
 integration('a persisted V4 vision schema upgrades to bundled assets and remains idempotent', async (t) => {
     const root = await isolatedAdapter(t);

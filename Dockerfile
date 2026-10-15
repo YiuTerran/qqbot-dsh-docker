@@ -111,6 +111,7 @@ COPY defaults/qqbot-quote-images.mjs /opt/qqbot-defaults/qqbot-quote-images.mjs
 COPY defaults/qqbot-web-pages.mjs /opt/qqbot-defaults/qqbot-web-pages.mjs
 COPY defaults/qqbot-document-scope.mjs /opt/qqbot-defaults/qqbot-document-scope.mjs
 COPY defaults/qqbot-session-recovery.mjs /opt/qqbot-defaults/qqbot-session-recovery.mjs
+COPY defaults/qqbot-deepseek-status.mjs /opt/qqbot-defaults/qqbot-deepseek-status.mjs
 COPY defaults/qqbot-provider-errors.mjs /opt/qqbot-defaults/qqbot-provider-errors.mjs
 COPY defaults/qqbot-text-documents.mjs /opt/qqbot-defaults/qqbot-text-documents.mjs
 COPY defaults/qqbot-documents.mjs /opt/qqbot-defaults/qqbot-documents.mjs
@@ -130,7 +131,9 @@ RUN node --check /opt/qqbot-defaults/qqbot-mention-text.mjs \
     && node --check /opt/qqbot-defaults/qqbot-questions.mjs \
     && node --check /opt/qqbot-defaults/qqbot-pending-images.mjs \
     && node --check /opt/qqbot-defaults/qqbot-sealdice-policy.mjs \
-    && node --check /opt/qqbot-defaults/qqbot-onebot-scope.mjs
+    && node --check /opt/qqbot-defaults/qqbot-onebot-scope.mjs \
+    && node --check /opt/qqbot-defaults/qqbot-deepseek-status.mjs \
+    && node --check /opt/qqbot-defaults/qqbot-provider-errors.mjs
 
 RUN node --input-type=module -e "import '/opt/qqbot-defaults/qqbot-chat-policy.mjs'; import '/opt/qqbot-defaults/qqbot-generation-scope.mjs'; import '/opt/qqbot-defaults/qqbot-memory-images.mjs'; import sharp from '/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/sharp/dist/index.cjs'; import { normalizeEditImage } from '/opt/qqbot-defaults/qqbot-image-input.mjs'; const source = await sharp({ create: { width: 1, height: 1, channels: 4, background: { r: 255, g: 0, b: 0, alpha: 1 } } }).webp({ lossless: true }).toBuffer(); const output = await normalizeEditImage(source, { inspectImage: bytes => bytes[0] === 137 ? 'image/png' : undefined }); const metadata = await sharp(output).metadata(); if (metadata.format !== 'png' || metadata.width !== 1 || metadata.height !== 1) process.exit(1)"
 

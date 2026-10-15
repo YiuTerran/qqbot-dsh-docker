@@ -8,6 +8,7 @@ model_context_test="${repo_root}/scripts/test-model-context.mjs"
 group_history_test="${repo_root}/scripts/test-group-history.mjs"
 recovery_policy_test="${repo_root}/scripts/test-session-recovery.mjs"
 provider_errors_test="${repo_root}/scripts/test-provider-errors.mjs"
+deepseek_status_test="${repo_root}/scripts/test-deepseek-status.mjs"
 concurrency_test="${repo_root}/scripts/test-concurrency.mjs"
 generation_test="${repo_root}/scripts/test-generation.mjs"
 recent_image_generation_test="${repo_root}/scripts/test-recent-image-generation.mjs"
@@ -46,6 +47,7 @@ previous_stock_agents_v0_12_9_fixture="${repo_root}/scripts/fixtures/agents-v0.1
 previous_stock_agents_v0_13_1_fixture="${repo_root}/scripts/fixtures/agents-v0.13.1-stock.md"
 previous_stock_agents_v0_14_0_fixture="${repo_root}/scripts/fixtures/agents-v0.14.0-stock.md"
 previous_stock_agents_v0_14_1_fixture="${repo_root}/scripts/fixtures/agents-v0.14.1-stock.md"
+previous_stock_agents_v0_14_2_fixture="${repo_root}/scripts/fixtures/agents-v0.14.2-stock.md"
 legacy_stock_agents_fixtures=(
     "${repo_root}/scripts/fixtures/agents-legacy-v0.3.0-stock.md"
     "${repo_root}/scripts/fixtures/agents-legacy-v0.3.1-stock.md"
@@ -68,6 +70,7 @@ legacy_stock_agents_fixtures=(
     "${repo_root}/scripts/fixtures/agents-v0.13.1-stock.md"
     "${repo_root}/scripts/fixtures/agents-v0.14.0-stock.md"
     "${repo_root}/scripts/fixtures/agents-v0.14.1-stock.md"
+    "${repo_root}/scripts/fixtures/agents-v0.14.2-stock.md"
 )
 legacy_stock_agents_hashes=(
     c249259a60d4b04c9c9c3df1a92977adf748ba4143a3639c3e85a006ad802ef5
@@ -91,6 +94,7 @@ legacy_stock_agents_hashes=(
     68e05983a4bc0615bcf04c36362ebe8818995eb8e1ebbbb696c711f107829f11
     f88404f2950486567a0cc1a347abbb650cacb141ede49a80ddcee1d5e9338135
     e95de832302aae41874d2f076e4678fa8f3e84450a7a7fe1a07f3d8113781738
+    c1fc913722d9b620c36ab245a2424e119035dcfa07e17d8f89127d4338d1276e
 )
 persistent_reset_probe="${repo_root}/scripts/test-persistent-reset.mjs"
 suffix="$(date +%s)-$$"
@@ -230,6 +234,13 @@ if [[ "$actual_v0_14_1_stock_agents_sha256" != "$expected_v0_14_1_stock_agents_s
     exit 1
 fi
 
+expected_v0_14_2_stock_agents_sha256=c1fc913722d9b620c36ab245a2424e119035dcfa07e17d8f89127d4338d1276e
+actual_v0_14_2_stock_agents_sha256="$(sha256sum "$previous_stock_agents_v0_14_2_fixture" | cut -d ' ' -f 1)"
+if [[ "$actual_v0_14_2_stock_agents_sha256" != "$expected_v0_14_2_stock_agents_sha256" ]]; then
+    echo "unexpected v0.14.2 stock AGENTS.md fixture hash: $actual_v0_14_2_stock_agents_sha256" >&2
+    exit 1
+fi
+
 expected_v0_12_8_stock_agents_sha256=1b917f9daca010d80b69185a9b4b6d7bb89792a26ae2ac79deb09647aa9c0235
 actual_v0_12_8_stock_agents_sha256="$(sha256sum "$previous_stock_agents_v0_12_8_fixture" | cut -d ' ' -f 1)"
 if [[ "$actual_v0_12_8_stock_agents_sha256" != "$expected_v0_12_8_stock_agents_sha256" ]]; then
@@ -268,6 +279,11 @@ fi
 
 if [[ ! -r "$provider_errors_test" ]]; then
     echo "missing provider errors regression script: $provider_errors_test" >&2
+    exit 66
+fi
+
+if [[ ! -r "$deepseek_status_test" ]]; then
+    echo "missing DeepSeek status regression script: $deepseek_status_test" >&2
     exit 66
 fi
 
@@ -798,6 +814,20 @@ docker run --rm --network none \
     --mount "type=bind,src=${previous_stock_agents_v0_14_1_fixture},dst=/tmp/agents-v0.14.1-stock.md,readonly" \
     "$IMAGE" sh -ec 'cmp /data/AGENTS.md /tmp/agents-v0.14.1-stock.md'
 
+docker run --rm --network none --entrypoint sh \
+    --volume "${stock_agents_data_volume}:/data" \
+    --mount "type=bind,src=${previous_stock_agents_v0_14_2_fixture},dst=/tmp/agents-v0.14.2-stock.md,readonly" \
+    "$IMAGE" -ec 'cp /tmp/agents-v0.14.2-stock.md /data/AGENTS.md; chmod 0644 /data/AGENTS.md'
+docker run --rm --network none \
+    --volume "${stock_agents_data_volume}:/data" \
+    "$IMAGE" sh -ec 'cmp /data/AGENTS.md /opt/qqbot-defaults/AGENTS.md'
+
+docker run --rm --network none \
+    --volume "${readonly_stock_agents_data_volume}:/data" \
+    --mount "type=bind,src=${previous_stock_agents_v0_14_2_fixture},dst=/data/AGENTS.md,readonly" \
+    --mount "type=bind,src=${previous_stock_agents_v0_14_2_fixture},dst=/tmp/agents-v0.14.2-stock.md,readonly" \
+    "$IMAGE" sh -ec 'cmp /data/AGENTS.md /tmp/agents-v0.14.2-stock.md'
+
 # The command is deliberately finite: fixture credentials are supplied only to
 # the local SDK probe, never real QQ credentials, so no QR login is attempted.
 log "Preparing finite first-run validation container"
@@ -813,6 +843,7 @@ docker create \
     --mount "type=bind,src=${group_history_test},dst=/tmp/test-group-history.mjs,readonly" \
     --mount "type=bind,src=${recovery_policy_test},dst=/tmp/test-session-recovery.mjs,readonly" \
     --mount "type=bind,src=${provider_errors_test},dst=/tmp/test-provider-errors.mjs,readonly" \
+    --mount "type=bind,src=${deepseek_status_test},dst=/tmp/test-deepseek-status.mjs,readonly" \
     --mount "type=bind,src=${concurrency_test},dst=/tmp/test-concurrency.mjs,readonly" \
     --mount "type=bind,src=${generation_test},dst=/tmp/test-generation.mjs,readonly" \
     --mount "type=bind,src=${recent_image_generation_test},dst=/tmp/test-recent-image-generation.mjs,readonly" \
@@ -883,6 +914,7 @@ docker create \
         node --check /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-agent-loop/lib/index.js
         node --check /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-compaction-basic/lib/index.js
         node --check /opt/qqbot-defaults/qqbot-provider-errors.mjs
+        node --check /opt/qqbot-defaults/qqbot-deepseek-status.mjs
         node --check /opt/qqbot-defaults/qqbot-concurrency.mjs
         node --check /opt/qqbot-defaults/qqbot-history-snapshot.mjs
         node --check /opt/qqbot-defaults/qqbot-generation.mjs
@@ -919,6 +951,7 @@ docker create \
         test "$(grep -A6 -F -- "- id: im-qqbot" "$dump" | grep -Fc "appId: __FROM_ENV__")" -eq 1
         test "$(grep -A6 -F -- "- id: im-qqbot" "$dump" | grep -Fc "appSecret: __FROM_ENV__")" -eq 1
         node --test /tmp/test-chat-policy.mjs
+        QQBOT_DEEPSEEK_STATUS_MODULE=/opt/qqbot-defaults/qqbot-deepseek-status.mjs node --test /tmp/test-deepseek-status.mjs
         node --test /tmp/test-qqbot-mention-text.mjs
         QQBOT_LLM_MODULE=/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm/lib/index.js QQBOT_RUNTIME_ROOT=/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-model-context.mjs
         QQBOT_HISTORY_SNAPSHOT_MODULE=/opt/qqbot-defaults/qqbot-history-snapshot.mjs node --test /tmp/test-group-history.mjs

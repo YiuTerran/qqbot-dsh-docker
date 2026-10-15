@@ -8,6 +8,7 @@ const thinkingOnly = process.argv[3] === 'thinking-only';
 const directOnly = process.argv[3] === 'direct-only';
 const logOnly = process.argv[3] === 'log-only';
 const mentionOnly = process.argv[3] === 'mention-only';
+const timeoutStatusOnly = process.argv[3] === 'timeout-status-only';
 
 function replaceOnce(source, before, after, label) {
     const parts = source.split(before);
@@ -18,6 +19,63 @@ function replaceOnce(source, before, after, label) {
 async function edit(file, operation) {
     const path = join(root, file);
     await writeFile(path, operation(await readFile(path, 'utf8')));
+}
+
+function revertDeepSeekTimeoutNotices(source) {
+    const marker = '// Chat-only DeepSeek timeout status notices v1.';
+    const newImport = "import { classifyProviderFailure, formatProviderFailure, formatToolFailure, resolveProviderFailureNotice } from '/opt/qqbot-defaults/qqbot-provider-errors.mjs';";
+    const oldImport = "import { formatProviderFailure, formatToolFailure } from '/opt/qqbot-defaults/qqbot-provider-errors.mjs';";
+    if (!source.includes(marker)) {
+        if (source.includes('timeoutNoticeTurns') || source.includes('resolveProviderFailureNotice')
+            || source.includes("classifyProviderFailure(failure) === 'timeout'")) {
+            throw new Error('pre-concurrency fixture found a partial DeepSeek timeout status migration');
+        }
+        return source;
+    }
+    source = replaceOnce(source, newImport, oldImport, 'timeout status provider import');
+    source = replaceOnce(source,
+        '    toolFailureTurns = new WeakMap();\n    // Chat-only DeepSeek timeout status notices v1.\n    timeoutNoticeTurns = new WeakMap();',
+        '    toolFailureTurns = new WeakMap();', 'timeout status turn state');
+    source = replaceOnce(source,
+        '            this.toolFailureTurns.delete(startRecord);\n            this.timeoutNoticeTurns.delete(startRecord);',
+        '            this.toolFailureTurns.delete(startRecord);', 'timeout status accepted turn start');
+    source = replaceOnce(source,
+        "    onTurnEnd(sessionId, record, event, turnId, originRecord = record) {\n        if (event.reason?.kind === 'cancelled') this.timeoutNoticeTurns.delete(originRecord);",
+        '    onTurnEnd(sessionId, record, event, turnId, originRecord = record) {', 'timeout status turn cancellation');
+    source = replaceOnce(source, [
+        "            if (classifyProviderFailure(failure) === 'timeout') {",
+        '                const existingTimeoutNotice = this.timeoutNoticeTurns.get(originRecord);',
+        '                const duplicateTimeout = Number.isSafeInteger(turnId) && turnId > 0',
+        '                    && existingTimeoutNotice?.sessionId === sessionId',
+        '                    && existingTimeoutNotice?.agent === originRecord.agent',
+        '                    && Object.is(existingTimeoutNotice?.turnId, turnId);',
+        '                if (!duplicateTimeout) {',
+        '                    const timeoutNotice = { record: originRecord, sessionId, agent: originRecord.agent, turnId };',
+        '                    this.timeoutNoticeTurns.set(originRecord, timeoutNotice);',
+        '                    enqueueMergeBatchSend(originRecord, async () => {',
+        '                        const notice = await resolveProviderFailureNotice(failure);',
+        '                        if (this.timeoutNoticeTurns.get(originRecord) !== timeoutNotice',
+        '                            || timeoutNotice.record !== originRecord',
+        '                            || this.manager.findBySessionId(sessionId) !== originRecord',
+        '                            || originRecord.agent !== timeoutNotice.agent',
+        '                            || originRecord.sessionId !== sessionId',
+        '                            || record.agent !== timeoutNotice.agent',
+        '                            || record.sessionId !== sessionId) return;',
+        "                        return this.send(record, notice, 'sendTurnEndError');",
+        '                    });',
+        '                }',
+        '            }',
+        "            else enqueueMergeBatchSend(originRecord, () => this.send(record, formatProviderFailure(failure), 'sendTurnEndError'));",
+    ].join('\n'),
+    "            enqueueMergeBatchSend(originRecord, () => this.send(record, formatProviderFailure(failure), 'sendTurnEndError'));",
+    'timeout status async notice branch');
+    return source;
+}
+
+if (timeoutStatusOnly) {
+    await edit('transport/outbound.js', revertDeepSeekTimeoutNotices);
+    process.stdout.write('Prepared v0.14.2 outbound fixture without DeepSeek timeout status notices.\n');
+    process.exit(0);
 }
 
 await edit('gateway/middleware-setup.js', (source) => {
@@ -457,6 +515,7 @@ await edit('transport/inbound.js', (source) => {
 });
 
 await edit('transport/outbound.js', (source) => {
+    source = revertDeepSeekTimeoutNotices(source);
     if (source.includes('// Chat-only deferred tool failures v1.')) {
         source = replaceOnce(source,
             '    toolCalls = new Map();\n    // Chat-only deferred tool failures v1.\n    toolFailureTurns = new WeakMap();',

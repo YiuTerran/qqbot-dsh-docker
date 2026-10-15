@@ -1,3 +1,5 @@
+import { DEEPSEEK_STATUS, readDeepSeekStatus } from './qqbot-deepseek-status.mjs';
+
 const MAX_MESSAGE_BYTES = 16 * 1024;
 
 const STABLE_CATEGORIES = new Map([
@@ -183,6 +185,18 @@ export function classifyProviderFailure(failure) {
 /** Never interpolate provider payloads, URLs, credentials or request IDs. */
 export function formatProviderFailure(failure) {
     return NOTICES[classifyProviderFailure(failure)] ?? NOTICES.generic;
+}
+
+const DEEPSEEK_TIMEOUT_NOTICE = '主人，这轮模型回复超时啦。DeepSeek 官方状态页也报了 API 服务异常。先等官方修复后再试吧，本鱼陪你蹲一会儿。';
+
+/** Check the public status page only for model timeouts; all other outcomes keep the synchronous notice. */
+export async function resolveProviderFailureNotice(failure, { statusReader = readDeepSeekStatus } = {}) {
+    if (classifyProviderFailure(failure) !== 'timeout') return formatProviderFailure(failure);
+    try {
+        if (await statusReader() === DEEPSEEK_STATUS.API_INCIDENT) return DEEPSEEK_TIMEOUT_NOTICE;
+    }
+    catch { /* The existing fixed timeout notice is the safe fallback. */ }
+    return formatProviderFailure(failure);
 }
 
 export function formatToolFailure() {

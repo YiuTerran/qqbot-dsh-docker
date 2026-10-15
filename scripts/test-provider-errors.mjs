@@ -8,7 +8,10 @@ import { pathToFileURL } from 'node:url';
 const providerErrorsUrl = process.env.QQBOT_PROVIDER_ERRORS_MODULE
     ? pathToFileURL(resolve(process.env.QQBOT_PROVIDER_ERRORS_MODULE)).href
     : new URL('../defaults/qqbot-provider-errors.mjs', import.meta.url).href;
-const { classifyProviderFailure, formatProviderFailure, formatToolFailure, logToolFailure } = await import(providerErrorsUrl);
+const {
+    classifyProviderFailure, formatProviderFailure, formatToolFailure, logToolFailure,
+    resolveProviderFailureNotice,
+} = await import(providerErrorsUrl);
 const sensitive = 'sk-test-secret request-secret-id https://private.example/token?key=secret rejected-private-prompt';
 const apiFailure = (status, detail = {}, code = 'INVALID_REQUEST') => ({
     code,
@@ -82,6 +85,28 @@ test('native stable codes receive category-specific fixed notices without raw er
         assert.equal(formatProviderFailure(failure), formatProviderFailure({ code, message: 'different raw details' }),
             `${code} uses a fixed notice, not templated provider text`);
     }
+});
+
+test('the timeout resolver checks DeepSeek only for timeouts and returns the exact combined API incident notice', async () => {
+    const exact = '主人，这轮模型回复超时啦。DeepSeek 官方状态页也报了 API 服务异常。先等官方修复后再试吧，本鱼陪你蹲一会儿。';
+    const apiIncident = async () => 'api-incident';
+    assert.equal(await resolveProviderFailureNotice({ code: 'TIMEOUT', message: sensitive }, { statusReader: apiIncident }), exact);
+    assert.equal(await resolveProviderFailureNotice({ status: 408, message: sensitive }, { statusReader: apiIncident }), exact);
+
+    let statusReads = 0;
+    const statusReader = async () => { statusReads++; return 'api-incident'; };
+    const ordinary = { code: 'SERVER', message: sensitive };
+    assert.equal(await resolveProviderFailureNotice(ordinary, { statusReader }), formatProviderFailure(ordinary));
+    assert.equal(statusReads, 0, 'non-timeout failures never request the public status page');
+
+    for (const result of ['operational', 'unknown']) {
+        const failure = { code: 'TIMEOUT', message: sensitive };
+        assert.equal(await resolveProviderFailureNotice(failure, { statusReader: async () => result }), formatProviderFailure(failure));
+    }
+    const fallbackFailure = { code: 'TIMEOUT', message: sensitive };
+    assert.equal(await resolveProviderFailureNotice(fallbackFailure, { statusReader: async () => { throw new Error(sensitive); } }),
+        formatProviderFailure(fallbackFailure));
+    assert.doesNotMatch(exact, /sk-test-secret|request-secret-id|private\.example|rejected-private-prompt|private fixture/u);
 });
 
 test('HTTP status fallbacks distinguish quota, auth, model configuration and temporary failures', () => {
@@ -233,6 +258,128 @@ integration('native turn failures use fixed notices and do not leak raw API erro
             'the outbound target snapshot preserves the original reply destination');
     }
     assert.equal(resets, 0, 'friendly presentation must not broaden automatic reset criteria');
+});
+
+integration('DeepSeek API timeout notices share one status lookup, preserve QQ targets, and reject stale turns and records', async () => {
+    await prepareAdapterPeers();
+    const [{ createOutboundHandler }, { beginMergeBatch, closeMergeBatch }] = await Promise.all([
+        import(`${resolve(adapterDist)}/transport/outbound.js`),
+        import(process.env.QQBOT_CONCURRENCY_MODULE ?? '/opt/qqbot-defaults/qqbot-concurrency.mjs'),
+    ]);
+    const combinedNotice = '主人，这轮模型回复超时啦。DeepSeek 官方状态页也报了 API 服务异常。先等官方修复后再试吧，本鱼陪你蹲一会儿。';
+    const incidentPayload = {
+        request_id: 'private-status-request-id',
+        data: {
+            page: {
+                page_id: 6410630422455,
+                custom_domain: 'status.deepseek.com',
+                components: [
+                    { component_id: 'api', name: 'API服务' },
+                    { component_id: 'web', name: 'Web App' },
+                ],
+            },
+            active_changes: [{
+                type: 'incident', status: 'investigating',
+                title: sensitive, description: sensitive,
+                affected_components: [{ component_id: 'api', status: 'partial_outage' }],
+            }],
+        },
+    };
+    const records = new Map();
+    const sent = [];
+    let releaseStatus;
+    let statusCalls = 0;
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = async (url, init) => {
+        statusCalls++;
+        assert.equal(url, 'https://status.deepseek.com/api/status-page/6410630422455/summary/active');
+        assert.equal(init.method, 'GET');
+        assert.equal(init.redirect, 'error');
+        assert.equal(init.credentials, 'omit');
+        assert.equal('headers' in init, false);
+        assert.equal('body' in init, false);
+        return new Promise((resolveResponse) => {
+            releaseStatus = () => resolveResponse(new Response(JSON.stringify(incidentPayload), {
+                headers: { 'content-type': 'application/json' },
+            }));
+        });
+    };
+
+    try {
+        const manager = {
+            findBySessionId(id) { return records.get(id); },
+            getSessionRecord() { return undefined; },
+            async remove() { return false; },
+        };
+        const handler = createOutboundHandler(manager, {
+            async sendMarkdown(target, text) { sent.push({ target, text }); },
+        }, { textChunkLimit: 2000, streaming: false, showToolResults: false }, {
+            info() {}, debug() {}, warn() {}, error() {},
+        }, {});
+        const makeBoundRecord = (name) => {
+            const record = {
+                sessionId: `timeout-${name}`,
+                agent: {},
+                replyTarget: { scope: 'group', targetId: `mutable-${name}`, msgId: `mutable-${name}` },
+            };
+            records.set(record.sessionId, record);
+            const target = { scope: 'group', targetId: `group-${name}`, msgId: `original-${name}` };
+            const batch = beginMergeBatch(record, target);
+            record.replyTarget = { scope: 'group', targetId: `changed-${name}`, msgId: `changed-${name}` };
+            return { record, target, batch };
+        };
+        const a = makeBoundRecord('a');
+        const b = makeBoundRecord('b');
+        const nextTurn = makeBoundRecord('next-turn');
+        const replaced = makeBoundRecord('replaced');
+        const agentChanged = makeBoundRecord('agent-changed');
+        const cancelled = makeBoundRecord('cancelled');
+        const emit = (record, type, turn, seq, reason) => handler({ header: { id: record.sessionId } }, {
+            type, seq, data: { turn, ...(reason ? { reason } : {}) },
+        });
+        const startAndTimeout = (entry) => {
+            emit(entry.record, 'turn/start', 1, 1);
+            emit(entry.record, 'turn/end', 1, 2, { kind: 'error', error: { code: 'TIMEOUT', message: sensitive } });
+        };
+
+        startAndTimeout(a);
+        emit(a.record, 'turn/end', 1, 3, { kind: 'error', error: { code: 'TIMEOUT', message: sensitive } });
+        startAndTimeout(b);
+        startAndTimeout(nextTurn);
+        emit(nextTurn.record, 'turn/start', 2, 3);
+        startAndTimeout(replaced);
+        records.set(replaced.record.sessionId, { ...replaced.record, agent: {}, replyTarget: { scope: 'group', targetId: 'replacement' } });
+        startAndTimeout(agentChanged);
+        agentChanged.record.agent = {};
+        startAndTimeout(cancelled);
+        emit(cancelled.record, 'turn/end', 1, 3, { kind: 'cancelled' });
+
+        await new Promise((resolvePromise) => setImmediate(resolvePromise));
+        assert.equal(statusCalls, 1, 'concurrent sessions share the in-flight status request');
+        const closing = [a, b, nextTurn, replaced, agentChanged, cancelled].map(({ batch }) => closeMergeBatch(batch));
+        releaseStatus();
+        await Promise.all(closing);
+
+        assert.deepEqual(sent, [
+            { target: a.target, text: combinedNotice },
+            { target: b.target, text: combinedNotice },
+        ]);
+        for (const notice of sent) {
+            assert.doesNotMatch(notice.text, /private-status-request-id|private fixture|sk-test-secret|request-secret-id|private\.example|rejected-private-prompt/u);
+        }
+
+        const standalone = {
+            sessionId: 'timeout-without-turn-start', agent: {},
+            replyTarget: { scope: 'c2c', targetId: 'peer-original', msgId: 'source-original' },
+        };
+        records.set(standalone.sessionId, standalone);
+        emit(standalone, 'turn/end', 9, 1, { kind: 'error', error: { code: 'TIMEOUT', message: sensitive } });
+        await new Promise((resolvePromise) => setImmediate(resolvePromise));
+        assert.deepEqual(sent.at(-1), { target: standalone.replyTarget, text: combinedNotice },
+            'a standalone native timeout works without a preceding turn/start event');
+        assert.equal(statusCalls, 1, 'the cached lookup does not poll the status page');
+    }
+    finally { globalThis.fetch = originalFetch; }
 });
 
 integration('native tool error events and isError blocks defer one safe notice until an unanswered completed turn', async () => {

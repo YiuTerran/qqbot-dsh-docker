@@ -38,6 +38,8 @@ Markdown 导出默认开启。每份 UTF-8 Markdown 文件最多 128 KiB，每�
 
 两种聊天凭据互斥：设置 `DEEPSEEK_API_KEY` 使用内置 `deepseek-official` 路由；设置 `LLM_API_KEY` 时，必须同时设置 `LLM_PROVIDER`、`LLM_MODEL` 和 `LLM_API_BASE_URL`，并清空官方密钥。第三方 `LLM_API_PROTOCOL` 支持 `openai-responses`（默认）或 `openai-completions`，不会自动探测。提供者 ID 只能使用小写字母、数字和连字符，且不能为保留 ID `deepseek-official`。路由配置写入持久化档案，密钥只通过环境变量提供。
 
+所有聊天路由仅在 LLM 回复超时（稳定错误码 `TIMEOUT` 或 HTTP 408）时读取 DeepSeek 官方状态页，最多等待 2 秒；只有状态页报告 API 服务异常时才发送一条合并提示，查询失败、状态未知或 API 正常时保留原有超时提示。状态结果在进程内缓存：已知状态 60 秒、未知结果 15 秒。状态查询不携带聊天内容、API 密钥或 Cookie；状态页仅作参考，不能确认单次请求的实际故障状态。
+
 第三方模式下的聊天、视觉共用 `LLM_API_KEY`。`QQBOT_VISION_PROVIDER`（可选）必须与当前聊天服务商 ID 相同；`QQBOT_VISION_MODEL`（可选）覆盖视觉模型。请确认所选模型本身支持图片输入。
 
 搜索默认复用聊天 API 地址。需要独立搜索端点时，可设置 `LLM_SEARCH_BASE_URL` 覆盖；留空或未设置时继续使用 `LLM_API_BASE_URL`。凭据优先使用非空 `LLM_SEARCH_API_KEY`，否则第三方模式使用 `LLM_API_KEY`，官方模式使用 `DEEPSEEK_API_KEY`。搜索密钥只通过环境变量读取，不会写入持久化档案或日志。
@@ -101,7 +103,7 @@ mkdir -p /tmp/qqbot-image-probe
 docker run --rm --entrypoint node --env-file .env \
   --mount "type=bind,src=$PWD/scripts/verify-image-route.mjs,dst=/tmp/verify-image-route.mjs,readonly" \
   --mount type=bind,src=/tmp/qqbot-image-probe,dst=/probe-output \
-  tryao/qqbot-dsh:v0.14.2 /tmp/verify-image-route.mjs /probe-output
+  tryao/qqbot-dsh:v0.15.0 /tmp/verify-image-route.mjs /probe-output
 ```
 
 探测会发起真实图片服务请求并消耗服务额度；不会发送真实 QQ 消息或修改生产额度。真实 QQ 图片和文件投递仍需用机器人账号验证。
