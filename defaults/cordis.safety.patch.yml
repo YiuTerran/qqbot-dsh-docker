@@ -78,9 +78,9 @@
     model: !!js "process.env.LLM_SEARCH_MODEL || 'deepseek-flash'"
     # Zero omits max_uses; the bundled provider supports this explicitly.
     maxUses: 0
-    # Clear any persisted literal key, then select only the active key-mode ref.
+    # Clear persisted literal keys, then resolve search credentials at runtime.
     apiKey: !!js "''"
-    apiKeyEnv: !!js "process.env.LLM_API_KEY ? 'LLM_API_KEY' : 'DEEPSEEK_API_KEY'"
+    apiKeyEnv: !!js "process.env.LLM_SEARCH_API_KEY ? 'LLM_SEARCH_API_KEY' : process.env.LLM_API_KEY ? 'LLM_API_KEY' : 'DEEPSEEK_API_KEY'"
     baseURL: !!js "process.env.LLM_API_KEY ? (process.env.LLM_SEARCH_BASE_URL || process.env.LLM_API_BASE_URL) : 'https://api.deepseek.com/anthropic/v1'"
 - id: web-fetch-http
   disabled: true

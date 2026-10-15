@@ -6,7 +6,7 @@ qq-bot 使用专用工具调用 Gensokyo-MCP；桥将请求变成虚拟 OneBot v
 
 两个 fork 固定为子模块：`third_party/gensokyo-mcp`、`third_party/sealdice-core`。初始化使用 `git submodule update --init --recursive`。海豹嵌套资源按其自己的 gitlink 检出，不改变 UI。
 
-镜像分别为 `tryao/qqbot-dsh:v0.14.1`、`tryao/gensokyo-mcp:v0.3.1`、`tryao/sealdice-core:v1.6.2-bridge.8`，只使用版本标签，没有 latest。主镜像不包含两个 Go 项目源码或运行程序。
+镜像分别为 `tryao/qqbot-dsh:v0.14.2`、`tryao/gensokyo-mcp:v0.3.1`、`tryao/sealdice-core:v1.6.2-bridge.8`，只使用版本标签，没有 latest。主镜像不包含两个 Go 项目源码或运行程序。
 
 v0.11.0 新增 Markdown 投递回执、扩展命令和连接级 Master ACL；三项镜像版本须一同升级，旧后端未协商 ACL 时仍可处理普通命令。
 
@@ -17,7 +17,7 @@ v0.11.1 增加群主／管理员的整群规则修改权限，以及单条自然
 可以直接使用仓库的 `docker-compose.qnap.yml`，或将下方完整 YAML 保存为 `docker-compose.yml`。在同一目录创建 `.env`；QQ 和聊天凭据按实际账号填写，三份 OneBot 服务密钥使用不同的随机值，不复用 QQ/LLM 密钥。已有配置可保留聊天、视觉和生图路由，只更新三个镜像版本及 OneBot 配置。
 
 ```dotenv
-IMAGE_TAG=v0.14.1
+IMAGE_TAG=v0.14.2
 QQBOT_APPID=
 QQBOT_SECRET=
 # 官方聊天模式填此项；不要同时配置 LLM_API_KEY。
@@ -28,6 +28,8 @@ LLM_PROVIDER=
 LLM_MODEL=
 LLM_API_BASE_URL=
 LLM_API_PROTOCOL=openai-responses
+# 可选独立搜索密钥；留空时使用聊天密钥。
+LLM_SEARCH_API_KEY=
 # 第三方原生搜索端点覆盖项；留空或不设置时复用 LLM_API_BASE_URL。
 LLM_SEARCH_BASE_URL=
 LLM_SEARCH_MODEL=
@@ -69,7 +71,7 @@ services:
       DSH_HOME: /data
       # Mutually exclusive with LLM_API_KEY; selects the official chat/search mode.
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
-      # Selects third-party chat mode; reused by native search when enabled.
+      # Selects third-party chat mode; reused by native search by default.
       # Optional: use this generic key name from an OpenAI-compatible dsh
       # provider configuration (apiKeyEnv: LLM_API_KEY).
       LLM_API_KEY: ${LLM_API_KEY:-}
@@ -79,6 +81,9 @@ services:
       LLM_MODEL: ${LLM_MODEL:-}
       LLM_API_BASE_URL: ${LLM_API_BASE_URL:-}
       LLM_API_PROTOCOL: ${LLM_API_PROTOCOL:-}
+      # Optional independent native-search key; otherwise search uses the
+      # active chat key (LLM_API_KEY or DEEPSEEK_API_KEY).
+      LLM_SEARCH_API_KEY: ${LLM_SEARCH_API_KEY:-}
       # Optional DeepSeek-native Messages search endpoint override. Empty or
       # unset reuses LLM_API_BASE_URL in LLM_API_KEY mode.
       LLM_SEARCH_BASE_URL: ${LLM_SEARCH_BASE_URL:-}

@@ -181,6 +181,11 @@ try {
   const expectedProvider = thirdPartyMode ? process.env.LLM_PROVIDER : 'deepseek-official';
   const expectedModel = thirdPartyMode ? process.env.LLM_MODEL : 'deepseek-flash';
   const expectedSearchModel = process.env.LLM_SEARCH_MODEL || 'deepseek-flash';
+  const expectedSearchApiKeyEnv = process.env.LLM_SEARCH_API_KEY
+    ? 'LLM_SEARCH_API_KEY'
+    : thirdPartyMode ? 'LLM_API_KEY' : 'DEEPSEEK_API_KEY';
+  const expectedSearchApiKey = process.env.LLM_SEARCH_API_KEY
+    || process.env.LLM_API_KEY || process.env.DEEPSEEK_API_KEY;
   const expectedSearchBaseUrl = process.env.QQBOT_TEST_EXPECT_SEARCH_BASE_URL
     ?? (thirdPartyMode
       ? process.env.LLM_SEARCH_BASE_URL || process.env.LLM_API_BASE_URL
@@ -211,14 +216,55 @@ try {
   const searchProvider = web.searchProviders.get('deepseek-official');
   assert.equal(typeof searchProvider?.resolveOptions, 'function', 'the native search provider options are unavailable');
   const searchOptions = searchProvider.resolveOptions();
-  assert.equal(searchOptions.apiKeyEnv, thirdPartyMode ? 'LLM_API_KEY' : 'DEEPSEEK_API_KEY', 'search must use the active mode credential');
+  assert.equal(searchOptions.apiKeyEnv, expectedSearchApiKeyEnv, 'search must use the highest-priority configured credential');
   assert.equal(searchOptions.apiKey, undefined, 'persisted literal search keys must be cleared');
   assert.equal(searchOptions.model, expectedSearchModel, 'native search model did not resolve independently from the chat model');
   assert.equal(searchOptions.baseURL, expectedSearchBaseUrl, 'native search endpoint did not resolve from deployment configuration');
-  const persistedPatch = await readFile(`${profileRoot}/cordis.patch.yml`, 'utf8').catch(() => '');
-  for (const fixtureKey of ['fixture-chat-key', 'fixture-official-key']) {
-    assert.ok(!persistedPatch.includes(fixtureKey), `persisted profile must not contain ${fixtureKey}`);
+  assert.equal(typeof searchOptions.resolveApiKey, 'function', 'native search must resolve its credential at request time');
+  const originalFetch = globalThis.fetch;
+  const searchRequests = [];
+  globalThis.fetch = async (url, init) => {
+    searchRequests.push({ url: String(url), headers: new Headers(init?.headers) });
+    return new Response(JSON.stringify({ error: 'fixture rejected request' }), {
+      status: 401,
+      headers: { 'content-type': 'application/json' },
+    });
+  };
+  try {
+    if (expectedSearchApiKey) {
+      await assert.rejects(
+        searchProvider.search({ query: 'credential routing fixture' }),
+        /HTTP 401/u,
+        'mock search endpoint should reject the selected key',
+      );
+    } else {
+      await assert.rejects(
+        searchProvider.search({ query: 'credential routing fixture' }),
+        /has no API key/u,
+        'keyless search should fail before dispatch',
+      );
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
   }
+  if (expectedSearchApiKey) {
+    assert.equal(searchRequests.length, 1, 'failed search request must not retry with another credential');
+    assert.equal(searchRequests[0].url, `${expectedSearchBaseUrl}/messages`, 'native search used an unexpected endpoint');
+    assert.equal(searchRequests[0].headers.get('x-api-key'), expectedSearchApiKey, 'native search did not transmit the selected API key');
+    assert.equal(searchRequests[0].headers.get('authorization'), `Bearer ${expectedSearchApiKey}`, 'native search authorization did not use the selected API key');
+  } else {
+    assert.equal(searchRequests.length, 0, 'keyless search must fail before sending an HTTP request');
+  }
+  const persistedPatch = await readFile(`${profileRoot}/cordis.patch.yml`, 'utf8').catch(() => '');
+  for (const fixtureKey of [
+    process.env.LLM_SEARCH_API_KEY,
+    process.env.LLM_API_KEY,
+    process.env.DEEPSEEK_API_KEY,
+  ]) {
+    if (!fixtureKey) continue;
+    assert.ok(!persistedPatch.includes(fixtureKey), 'persisted profile must not contain active credential values');
+  }
+  if (thirdPartyMode) assert.match(persistedPatch, /apiKeyEnv: LLM_API_KEY/u, 'third-party chat must keep using LLM_API_KEY');
   for (const fixtureValue of [process.env.IMAGE_API_KEY, process.env.IMAGE_API_BASE_URL]) {
     if (fixtureValue) assert.ok(!persistedPatch.includes(fixtureValue), 'image route credentials and endpoint must not be persisted in the profile patch');
   }
@@ -233,8 +279,14 @@ try {
       assert.match(logText, /\[qqbot-onebot\] backend-not-ready backends=0 available=false/, 'OneBot not-ready state log did not reach stdout');
     }
   }
-  for (const secret of [process.env.QQBOT_ONEBOT_MCP_TOKEN, process.env.QQBOT_ONEBOT_INTERNAL_TOKEN]) {
-    if (secret) assert.ok(!logText.includes(secret), 'OneBot diagnostic output leaked a configured token');
+  for (const secret of [
+    process.env.QQBOT_ONEBOT_MCP_TOKEN,
+    process.env.QQBOT_ONEBOT_INTERNAL_TOKEN,
+    process.env.LLM_SEARCH_API_KEY,
+    process.env.LLM_API_KEY,
+    process.env.DEEPSEEK_API_KEY,
+  ]) {
+    if (secret) assert.ok(!logText.includes(secret), 'startup diagnostics leaked a configured secret');
   }
   if (onebotFixtureMode) assert.doesNotMatch(logText, /127\.0\.0\.1/u, 'OneBot diagnostic output leaked the fixture endpoint');
   for (const secret of [process.env.IMAGE_API_KEY, process.env.IMAGE_API_BASE_URL]) {

@@ -151,6 +151,7 @@ previous_v0_12_8_stock_agents_sha256=1b917f9daca010d80b69185a9b4b6d7bb89792a26ae
 previous_v0_13_0_stock_agents_sha256=744b144ac1027820829b8c053d2a23e4396042fd88d5eab873285acb84ab6f9d
 previous_v0_13_1_stock_agents_sha256=68e05983a4bc0615bcf04c36362ebe8818995eb8e1ebbbb696c711f107829f11
 previous_v0_14_0_stock_agents_sha256=f88404f2950486567a0cc1a347abbb650cacb141ede49a80ddcee1d5e9338135
+previous_v0_14_1_stock_agents_sha256=e95de832302aae41874d2f076e4678fa8f3e84450a7a7fe1a07f3d8113781738
 legacy_stock_agents_sha256_list='
 c249259a60d4b04c9c9c3df1a92977adf748ba4143a3639c3e85a006ad802ef5
 9101cd863b9973e3ce7210e3d2f4e17fa23d8238564d463c18207fcf1622688d
@@ -191,6 +192,7 @@ if [ -f /data/AGENTS.md ] && [ ! -L /data/AGENTS.md ] && [ -r /data/AGENTS.md ] 
         || [ "$current_agents_sha256" = "$previous_v0_13_0_stock_agents_sha256" ] \
         || [ "$current_agents_sha256" = "$previous_v0_13_1_stock_agents_sha256" ] \
         || [ "$current_agents_sha256" = "$previous_v0_14_0_stock_agents_sha256" ] \
+        || [ "$current_agents_sha256" = "$previous_v0_14_1_stock_agents_sha256" ] \
         || [ "$legacy_stock_agents_match" = true ]; then
         agents_migration_tmp="/data/.AGENTS.md.$$"
         if install -o node -g node -m 0644 /opt/qqbot-defaults/AGENTS.md "$agents_migration_tmp" \
@@ -232,6 +234,7 @@ fi
 # generated profile patch contains only the environment-variable name, never
 # LLM_API_KEY itself. LLM_SEARCH_BASE_URL optionally overrides the native
 # DeepSeek search endpoint; without it, search reuses LLM_API_BASE_URL.
+# LLM_SEARCH_API_KEY optionally isolates search credentials from chat.
 if [ -n "$llm_api_key" ]; then
     node <<'NODE'
 const fs = require('node:fs');
@@ -271,7 +274,7 @@ if (searchBaseURL) {
     throw new Error('LLM_SEARCH_BASE_URL must be an HTTP(S) URL');
   }
   if (searchUrl.username || searchUrl.password) {
-    throw new Error('LLM_SEARCH_BASE_URL must not contain credentials; use LLM_API_KEY');
+    throw new Error('LLM_SEARCH_BASE_URL must not contain credentials; use LLM_SEARCH_API_KEY or the active chat API key');
   }
 }
 

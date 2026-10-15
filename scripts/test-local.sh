@@ -45,6 +45,7 @@ previous_stock_agents_v0_12_8_fixture="${repo_root}/scripts/fixtures/agents-v0.1
 previous_stock_agents_v0_12_9_fixture="${repo_root}/scripts/fixtures/agents-v0.12.9-stock.md"
 previous_stock_agents_v0_13_1_fixture="${repo_root}/scripts/fixtures/agents-v0.13.1-stock.md"
 previous_stock_agents_v0_14_0_fixture="${repo_root}/scripts/fixtures/agents-v0.14.0-stock.md"
+previous_stock_agents_v0_14_1_fixture="${repo_root}/scripts/fixtures/agents-v0.14.1-stock.md"
 legacy_stock_agents_fixtures=(
     "${repo_root}/scripts/fixtures/agents-legacy-v0.3.0-stock.md"
     "${repo_root}/scripts/fixtures/agents-legacy-v0.3.1-stock.md"
@@ -66,6 +67,7 @@ legacy_stock_agents_fixtures=(
     "${repo_root}/scripts/fixtures/agents-v0.13.0-stock.md"
     "${repo_root}/scripts/fixtures/agents-v0.13.1-stock.md"
     "${repo_root}/scripts/fixtures/agents-v0.14.0-stock.md"
+    "${repo_root}/scripts/fixtures/agents-v0.14.1-stock.md"
 )
 legacy_stock_agents_hashes=(
     c249259a60d4b04c9c9c3df1a92977adf748ba4143a3639c3e85a006ad802ef5
@@ -88,6 +90,7 @@ legacy_stock_agents_hashes=(
     744b144ac1027820829b8c053d2a23e4396042fd88d5eab873285acb84ab6f9d
     68e05983a4bc0615bcf04c36362ebe8818995eb8e1ebbbb696c711f107829f11
     f88404f2950486567a0cc1a347abbb650cacb141ede49a80ddcee1d5e9338135
+    e95de832302aae41874d2f076e4678fa8f3e84450a7a7fe1a07f3d8113781738
 )
 persistent_reset_probe="${repo_root}/scripts/test-persistent-reset.mjs"
 suffix="$(date +%s)-$$"
@@ -201,6 +204,10 @@ if [[ ! -r "$previous_stock_agents_v0_14_0_fixture" ]]; then
     echo "missing previous stock AGENTS.md fixture: $previous_stock_agents_v0_14_0_fixture" >&2
     exit 1
 fi
+if [[ ! -r "$previous_stock_agents_v0_14_1_fixture" ]]; then
+    echo "missing previous stock AGENTS.md fixture: $previous_stock_agents_v0_14_1_fixture" >&2
+    exit 1
+fi
 
 expected_v0_13_1_stock_agents_sha256=68e05983a4bc0615bcf04c36362ebe8818995eb8e1ebbbb696c711f107829f11
 actual_v0_13_1_stock_agents_sha256="$(sha256sum "$previous_stock_agents_v0_13_1_fixture" | cut -d ' ' -f 1)"
@@ -213,6 +220,13 @@ expected_v0_14_0_stock_agents_sha256=f88404f2950486567a0cc1a347abbb650cacb141ede
 actual_v0_14_0_stock_agents_sha256="$(sha256sum "$previous_stock_agents_v0_14_0_fixture" | cut -d ' ' -f 1)"
 if [[ "$actual_v0_14_0_stock_agents_sha256" != "$expected_v0_14_0_stock_agents_sha256" ]]; then
     echo "unexpected v0.14.0 stock AGENTS.md fixture hash: $actual_v0_14_0_stock_agents_sha256" >&2
+    exit 1
+fi
+
+expected_v0_14_1_stock_agents_sha256=e95de832302aae41874d2f076e4678fa8f3e84450a7a7fe1a07f3d8113781738
+actual_v0_14_1_stock_agents_sha256="$(sha256sum "$previous_stock_agents_v0_14_1_fixture" | cut -d ' ' -f 1)"
+if [[ "$actual_v0_14_1_stock_agents_sha256" != "$expected_v0_14_1_stock_agents_sha256" ]]; then
+    echo "unexpected v0.14.1 stock AGENTS.md fixture hash: $actual_v0_14_1_stock_agents_sha256" >&2
     exit 1
 fi
 
@@ -376,10 +390,11 @@ run_profile_probe() {
 }
 
 run_profile_probe \
-    "official route overrides stale LLM fields" \
+    "official route uses independent search credentials without changing chat mode" \
     "$official_data_volume" \
     "https://api.deepseek.com/anthropic/v1" \
     --env DEEPSEEK_API_KEY=fixture-official-key \
+    --env LLM_SEARCH_API_KEY=fixture-official-search-key \
     --env LLM_PROVIDER=stale-provider \
     --env LLM_MODEL=stale-model \
     --env LLM_API_BASE_URL=https://stale-chat.example.com/v1
@@ -406,10 +421,11 @@ run_profile_probe \
     --env LLM_API_BASE_URL=https://chat-gateway.example.com/v1 \
     --env LLM_API_PROTOCOL=openai-responses \
     --env LLM_API_KEY=fixture-chat-key \
+    --env LLM_SEARCH_API_KEY=fixture-search-key \
     --env LLM_SEARCH_BASE_URL=https://search-gateway.example.com/anthropic/v1 \
     --env LLM_SEARCH_MODEL=fixture-third-party-search-model
 run_profile_probe \
-    "third-party route falls back to chat endpoint when search override is absent" \
+    "third-party route falls back to chat credentials when search key is absent" \
     "$search_fallback_data_volume" \
     "https://chat-gateway.example.com/v1" \
     --env LLM_PROVIDER=fixture-chat \
@@ -417,6 +433,16 @@ run_profile_probe \
     --env LLM_API_BASE_URL=https://chat-gateway.example.com/v1 \
     --env LLM_API_PROTOCOL=openai-responses \
     --env LLM_API_KEY=fixture-chat-key
+run_profile_probe \
+    "third-party route adds independent search credentials on the same volume" \
+    "$search_fallback_data_volume" \
+    "https://chat-gateway.example.com/v1" \
+    --env LLM_PROVIDER=fixture-chat \
+    --env LLM_MODEL=fixture-chat-model \
+    --env LLM_API_BASE_URL=https://chat-gateway.example.com/v1 \
+    --env LLM_API_PROTOCOL=openai-responses \
+    --env LLM_API_KEY=fixture-chat-key \
+    --env LLM_SEARCH_API_KEY=fixture-search-key
 log "Seeding a stale persisted disabled search provider before the next overlay probe"
 docker run --rm --network none --volume "${search_fallback_data_volume}:/data" --entrypoint node "$IMAGE" -e '
 const fs = require("node:fs");
@@ -429,10 +455,12 @@ if (!provider) {
   entries.push(provider);
 }
 provider.disabled = true;
+provider.config ||= {};
+provider.config.apiKey = "fixture-stale-search-key";
 fs.writeFileSync(path, yaml.dump(entries));
 '
 run_profile_probe \
-    "safety overlay re-enables persisted search and empty override falls back to chat endpoint" \
+    "safety overlay clears stale literal key and empty independent key falls back to chat key" \
     "$search_fallback_data_volume" \
     "https://chat-gateway.example.com/v1" \
     --env LLM_PROVIDER=fixture-chat \
@@ -440,6 +468,7 @@ run_profile_probe \
     --env LLM_API_BASE_URL=https://chat-gateway.example.com/v1 \
     --env LLM_API_PROTOCOL=openai-responses \
     --env LLM_API_KEY=fixture-chat-key \
+    --env LLM_SEARCH_API_KEY= \
     --env LLM_SEARCH_BASE_URL= \
     --env LLM_SEARCH_MODEL=
 run_profile_probe \
@@ -754,6 +783,20 @@ docker run --rm --network none \
     --mount "type=bind,src=${previous_stock_agents_v0_14_0_fixture},dst=/data/AGENTS.md,readonly" \
     --mount "type=bind,src=${previous_stock_agents_v0_14_0_fixture},dst=/tmp/agents-v0.14.0-stock.md,readonly" \
     "$IMAGE" sh -ec 'cmp /data/AGENTS.md /tmp/agents-v0.14.0-stock.md'
+
+docker run --rm --network none --entrypoint sh \
+    --volume "${stock_agents_data_volume}:/data" \
+    --mount "type=bind,src=${previous_stock_agents_v0_14_1_fixture},dst=/tmp/agents-v0.14.1-stock.md,readonly" \
+    "$IMAGE" -ec 'cp /tmp/agents-v0.14.1-stock.md /data/AGENTS.md; chmod 0644 /data/AGENTS.md'
+docker run --rm --network none \
+    --volume "${stock_agents_data_volume}:/data" \
+    "$IMAGE" sh -ec 'cmp /data/AGENTS.md /opt/qqbot-defaults/AGENTS.md'
+
+docker run --rm --network none \
+    --volume "${readonly_stock_agents_data_volume}:/data" \
+    --mount "type=bind,src=${previous_stock_agents_v0_14_1_fixture},dst=/data/AGENTS.md,readonly" \
+    --mount "type=bind,src=${previous_stock_agents_v0_14_1_fixture},dst=/tmp/agents-v0.14.1-stock.md,readonly" \
+    "$IMAGE" sh -ec 'cmp /data/AGENTS.md /tmp/agents-v0.14.1-stock.md'
 
 # The command is deliberately finite: fixture credentials are supplied only to
 # the local SDK probe, never real QQ credentials, so no QR login is attempted.
@@ -1559,13 +1602,13 @@ if [[ "$cmd" != '["dsh","--profile","qqbot"]' ]]; then
 fi
 
 log "Scanning image configuration for injected secret names"
-if docker image inspect "$IMAGE" | grep -Eqi 'DEEPSEEK_API_KEY|LLM_API_KEY|QQBOT_SECRET'; then
+if docker image inspect "$IMAGE" | grep -Eqi 'DEEPSEEK_API_KEY|LLM_API_KEY|LLM_SEARCH_API_KEY|QQBOT_SECRET'; then
     echo "Secret variable name unexpectedly present in image configuration" >&2
     exit 1
 fi
 
 log "Scanning image history for injected secret names"
-if docker history --no-trunc "$IMAGE" | grep -Eqi 'DEEPSEEK_API_KEY|LLM_API_KEY|QQBOT_SECRET'; then
+if docker history --no-trunc "$IMAGE" | grep -Eqi 'DEEPSEEK_API_KEY|LLM_API_KEY|LLM_SEARCH_API_KEY|QQBOT_SECRET'; then
     echo "Secret variable name unexpectedly present in image history" >&2
     exit 1
 fi

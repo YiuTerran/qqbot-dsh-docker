@@ -8,7 +8,7 @@ services:
       DSH_HOME: /data
       # Mutually exclusive with LLM_API_KEY; selects the official chat/search mode.
       DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
-      # Selects third-party chat mode; reused by native search when enabled.
+      # Selects third-party chat mode; reused by native search by default.
       # Optional: use this generic key name from an OpenAI-compatible dsh
       # provider configuration (apiKeyEnv: LLM_API_KEY).
       LLM_API_KEY: ${LLM_API_KEY:-}
@@ -18,6 +18,9 @@ services:
       LLM_MODEL: ${LLM_MODEL:-}
       LLM_API_BASE_URL: ${LLM_API_BASE_URL:-}
       LLM_API_PROTOCOL: ${LLM_API_PROTOCOL:-}
+      # Optional independent native-search key; otherwise search uses the
+      # active chat key (LLM_API_KEY or DEEPSEEK_API_KEY).
+      LLM_SEARCH_API_KEY: ${LLM_SEARCH_API_KEY:-}
       # Optional DeepSeek-native Messages search endpoint override. Empty or
       # unset reuses LLM_API_BASE_URL in LLM_API_KEY mode.
       LLM_SEARCH_BASE_URL: ${LLM_SEARCH_BASE_URL:-}
