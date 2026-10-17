@@ -47,6 +47,8 @@ test('QQ manual compaction preserves the session and refreshes current capabilit
         sessionKey: (scope, peer) => `${scope}:${peer}`, getPresetsService: () => undefined,
         modelResolver: { getEffectiveRoute: () => ({ provider: 'fixture', model: 'fixture' }) }, logger: { warn() {}, error() {} } });
     assert.deepEqual(await manager.compact('c2c', 'missing'), { ok: false, reason: 'no-session' });
+    assert.equal(manager.countMessages(undefined), 0);
+    assert.ok(manager.getStatus('c2c', 'owner').messageCount >= 4, 'native session messages must not disappear from status when .events is absent');
     summarizing = true;
     const result = await manager.compact('c2c', 'owner');
     assert.equal(result.ok, true, JSON.stringify(result));
@@ -58,4 +60,5 @@ test('QQ manual compaction preserves the session and refreshes current capabilit
     assert.match(text, /COMPACT_SUMMARY_SENTINEL/u);
     assert.match(text, /"reason":"config-disabled"/u);
     assert.equal(agent.session.id, 'compact-native-fixture');
+    assert.ok(manager.getStatus('c2c', 'owner').messageCount > 0, 'compacted native conversation keeps a nonzero derived message count');
 });

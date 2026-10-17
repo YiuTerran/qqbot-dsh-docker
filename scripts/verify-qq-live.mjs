@@ -12,7 +12,7 @@ const hash = value => value ? createHash('sha256').update(process.env.QQBOT_APPI
 const redact = value => {
     let serialized = JSON.stringify(value);
     for (const secret of secrets) serialized = serialized.replaceAll(secret, '[redacted]');
-    return serialized;
+    return serialized.replace(/\b[A-Fa-f0-9]{32}\b/gu, '[redacted-id]').replace(/QQ:\d{5,}/gu, 'QQ:[redacted-id]');
 };
 writeFileSync(output, '', { mode: 0o600 });
 const record = (type, detail = {}) => appendFileSync(output, `${redact({ at: new Date().toISOString(), type, ...detail })}\n`);
@@ -61,7 +61,7 @@ globalThis.fetch = async (input, init) => {
                 messageType: payload?.msg_type, text: String(payload?.markdown?.content ?? payload?.content ?? '').slice(0, 6000),
                 media: Boolean(payload?.media), fileType: payload?.file_type };
             void response.clone().json().then(body => record('qq.response', { ...fields,
-                acknowledged: response.ok && Boolean(body.id ?? body.file_info), code: body.code }))
+                acknowledged: response.ok && Boolean(body.id ?? body.file_info ?? body.data?.id ?? body.data?.file_info), code: body.code }))
                 .catch(() => record('qq.response', { ...fields, acknowledged: false }));
         }
         return response;
@@ -83,7 +83,7 @@ boot.ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
     try { snapshot = JSON.parse(entry?.text.split('\n').at(-1)); } catch { /* Report a missing snapshot explicitly. */ }
     record('model.assembly', { agentHash: hash(context.agent?.id), tools: assembly.tools.map(tool => tool.name), snapshot });
     return assembly;
-});
+}, { prepend: true });
 boot.ctx.on('tools/execute', async (exec, next) => {
     record('tool.start', { name: exec.name, ...(exec.name === 'qqbot_create_markdown' ? { filename: exec.arguments?.filename, heading: exec.arguments?.content?.split('\n').find(line => /^# /u.test(line)) } : {}) });
     try {

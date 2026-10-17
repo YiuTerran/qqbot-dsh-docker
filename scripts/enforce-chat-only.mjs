@@ -1946,6 +1946,30 @@ await patch('model/model-resolver.js', '// Chat-only strict sessionId persistenc
     return content;
 });
 
+await patch('session/session-manager.js', '// Chat-only derived message statistics v1.', (content, file) => {
+    const original = [
+        '    countMessages(record) {',
+        '        const events = record?.agent.session.events;',
+        '        if (!events)',
+        '            return 0;',
+        '        let count = 0;',
+        '        for (const event of events) {',
+        "            if (event.type === 'user/message' || event.type === 'assistant/message') {",
+        '                count += 1;',
+        '            }',
+        '        }',
+        '        return count;',
+        '    }',
+    ].join('\n');
+    return replaceOne(content, original, [
+        '    // Chat-only derived message statistics v1.',
+        '    countMessages(record) {',
+        '        if (!record) return 0;',
+        "        return record.agent.session.deriveMessages().filter((message) => message.role === 'user' || message.role === 'assistant').length;",
+        '    }',
+    ].join('\n'), file);
+});
+
 await patch('session/session-manager.js', '// Chat-only strict automatic session reset v1.', (content, file) => {
     const original = [
         '    async remove(scope, peerId) {',
@@ -2801,6 +2825,8 @@ if (!finalResolver.includes('return this.prefs.setSessionId(sessionKey, sessionI
     throw new Error('Chat-only patch: ModelResolver does not forward strict persistence options');
 
 const finalManager = await finalText('session/session-manager.js');
+assertOnce(finalManager, '// Chat-only derived message statistics v1.', 'derived message statistics marker');
+assertOnce(finalManager, "return record.agent.session.deriveMessages().filter((message) => message.role === 'user' || message.role === 'assistant').length;", 'native derived message statistics');
 assertOnce(finalManager, '// Chat-only strict automatic session reset v1.', 'strict session manager marker');
 const strictRemoveStart = finalManager.indexOf('async remove(scope, peerId, recoveryOptions) {');
 const strictBranchStart = finalManager.indexOf('if (recoveryOptions?.requirePersisted === true) {', strictRemoveStart);
