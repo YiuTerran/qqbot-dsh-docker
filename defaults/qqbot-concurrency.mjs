@@ -1,4 +1,5 @@
 import { isRecentImageSnapshot } from './qqbot-pending-images.mjs';
+import { isImageSourceTicket } from './qqbot-image-sources.mjs';
 import { bindCurrentLogRouteSnapshot, getOnebotDirectFallback } from './qqbot-onebot-scope.mjs';
 import { captureOnebotGroupRole, captureCurrentLogSourceSnapshot } from './qqbot-sealdice-policy.mjs';
 import { transferOnebotLogHolds } from './qqbot-onebot-log.mjs';
@@ -42,9 +43,12 @@ function snapshotGenerationRequest(ctx) {
         catch { /* Diagnostics must never affect request handling. */ }
     }
     const recentImageSnapshot = ctx?.state?.qqbotRecentImages;
+    const imageSourceTicket = ctx?.state?.qqbotImageSources;
     const directFallback = getOnebotDirectFallback(ctx);
     const snapshot = Object.freeze({
         ownerId: message.senderId,
+        appId: ctx?.bot?.appId,
+        ...(isImageSourceTicket(imageSourceTicket) ? { imageSourceTicket } : {}),
         groupRole: captureOnebotGroupRole(message, message.replyTarget ?? ctx?.replyTarget) ?? 'unknown',
         replyTarget,
         ...(logCapture.source ? { currentLogSource: logCapture.source } : {}),

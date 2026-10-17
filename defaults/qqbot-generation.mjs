@@ -1,3 +1,4 @@
+import { imageSources } from './qqbot-image-sources.mjs';
 import { createGenerationQuota } from './qqbot-generation-quotas.mjs';
 import {
     generationScopeFailure,
@@ -656,8 +657,8 @@ function markdownBuffer(content) {
     return buffer.length > 0 && buffer.length <= MAX_MARKDOWN_BYTES ? buffer : undefined;
 }
 
-function result(status, notice = notices[status] ?? notices.failed) {
-    return { status, notice };
+function result(status, notice = notices[status] ?? notices.failed, extra = {}) {
+    return { status, notice, ...extra };
 }
 
 function imageFailureStatus(error, exec) {
@@ -711,7 +712,9 @@ function executionFailure(exec, args, kind, route) {
         }
         if (args.imageAttachmentId !== undefined
             && !getGenerationImageAttachment(scope, args.requestId, args.imageAttachmentId)
-            && !getGenerationRecentImageAttachment(scope, args.requestId, args.imageAttachmentId)) {
+            && !getGenerationRecentImageAttachment(scope, args.requestId, args.imageAttachmentId)
+            && !(scope.recentImageAttachments.get(args.imageAttachmentId)?.reusableSource
+                && scope.recentImageAttachments.get(args.imageAttachmentId)?.requestId === args.requestId)) {
             return 'This imageAttachmentId is not authorized for that original QQ message.';
         }
     }
@@ -786,8 +789,10 @@ async function performImageTask({ scope, request, args, exec, service, quota, se
     const imageGrant = args.imageAttachmentId
         ? getGenerationImageAttachment(scope, args.requestId, args.imageAttachmentId)
             ?? getGenerationRecentImageAttachment(scope, args.requestId, args.imageAttachmentId)
+            ?? scope.recentImageAttachments.get(args.imageAttachmentId)
         : undefined;
     const isRecentImage = imageGrant?.recent === true;
+    let releaseSource;
     let acquired;
     try {
         acquired = await quota.tryAcquire({ ownerId: request.ownerId, type: 'image' });
@@ -805,6 +810,19 @@ async function performImageTask({ scope, request, args, exec, service, quota, se
     try {
         const afterAcquire = await interrupted();
         if (afterAcquire) return afterAcquire;
+        if (imageGrant?.reusableSource) {
+            try {
+                if (Date.now() >= Date.parse(imageGrant.sourceExpiresAt)) {
+                    throw Object.assign(new Error('Image source expired'), { imageSourceReason: 'source-expired' });
+                }
+                releaseSource = imageSources.lockEdit(imageGrant.sourceTicket, imageGrant.sourceHandle);
+            }
+            catch (error) {
+                const reason = error.imageSourceReason ?? 'source-unavailable';
+                return result(reason === 'source-busy' ? 'busy' : 'failed',
+                    '当前底图不可用或正在编辑，请明确引用原图后再提出请求；本次没有重新生成或重试。', { reason });
+            }
+        }
         let imageBytes;
         if (imageGrant || args.referenceImage) {
             const maxBytes = imageGrant?.maxBytes ?? MAX_IMAGE_BYTES;
@@ -836,7 +854,7 @@ async function performImageTask({ scope, request, args, exec, service, quota, se
                 const status = imageFailureStatus(error, exec);
                 const notice = notices[status];
                 await sendOperationalNotice(sender, scope, request, notice, 'image', noticeSignal);
-                return result(status, notice);
+                return result(status, notice, error.imageSourceReason ? { reason: error.imageSourceReason } : {});
             }
             try {
                 imageBytes = await normalizeEditImage(imageBytes, { signal: operationSignal, inspectImage });
@@ -868,6 +886,9 @@ async function performImageTask({ scope, request, args, exec, service, quota, se
         }
         const afterReserve = await interrupted();
         if (afterReserve) return afterReserve;
+        if (imageGrant?.reusableSource && !imageSources.available(imageGrant.sourceTicket, imageGrant.sourceHandle)) {
+            return result('failed', '底图已过期或不可用，请明确引用原图；本次没有重试。', { reason: 'source-unavailable' });
+        }
         let generated;
         try {
             generated = await service.generate({ prompt: args.prompt, imageBytes, signal: operationSignal, assertActive });
@@ -882,6 +903,9 @@ async function performImageTask({ scope, request, args, exec, service, quota, se
         }
         const afterGeneration = await interrupted();
         if (afterGeneration) return afterGeneration;
+        if (imageGrant?.reusableSource && !imageSources.available(imageGrant.sourceTicket, imageGrant.sourceHandle)) {
+            return result('failed', '底图已过期或请求已重置，本次没有继续投递或重试。', { reason: 'source-unavailable' });
+        }
         const sendRequest = makeTrustedSenderRequest(scope, request, 'image');
         let sent;
         let sendThrew = false;
@@ -893,7 +917,13 @@ async function performImageTask({ scope, request, args, exec, service, quota, se
             logToolFailure(GENERATE_IMAGE_TOOL, 'send-image', error);
             sent = { sent: false, reason: 'failed' };
         }
-        if (sent?.sent) return result('sent');
+        if (sent?.sent) {
+            if (!assertActive()) return result('expired');
+            const editable = request.imageSourceTicket
+                ? imageSources.publish(request.imageSourceTicket, generated, request.sessionId) : undefined;
+            return result('sent', notices.sent, editable ?? (request.imageSourceTicket
+                ? { reason: 'source-cache-unavailable' } : {}));
+        }
         // The message may already be visible in QQ; do not follow an unknown
         // acknowledgement with a contradictory failure notice or another send.
         if (sent?.reason === 'unknown') {
@@ -908,6 +938,7 @@ async function performImageTask({ scope, request, args, exec, service, quota, se
         return result(status, notice);
     }
     finally {
+        releaseSource?.();
         acquired.release?.();
     }
 }
@@ -1093,6 +1124,10 @@ function registerStatusTool(ctx, definition, markdownReceiptOutput = false) {
                     status: markdownReceiptOutput ? { type: 'string' } : { type: 'string',
                         enum: ['sent', 'failed', 'timeout', 'busy', 'quota', 'state', 'image-type', 'too-large', 'expired', 'unknown'] },
                     notice: { type: 'string' },
+                    ...(!markdownReceiptOutput ? {
+                        editableHandle: { type: 'string' }, editableUntil: { type: 'string' },
+                        reason: { type: 'string', enum: ['source-unavailable', 'source-expired', 'source-busy', 'source-cache-unavailable'] },
+                    } : {}),
                     ...(markdownReceiptOutput ? {
                         filename: { type: 'string' },
                         utf8Bytes: { type: 'integer' },

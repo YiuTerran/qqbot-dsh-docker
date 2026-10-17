@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { logGenerationBatch, logGenerationDiagnostics } from './qqbot-image-diagnostics.mjs';
 import { resolveTextDocumentType } from './qqbot-text-documents.mjs';
 import { getBoundDocumentExecution } from './qqbot-document-scope.mjs';
+import { imageSources, isImageSourceTicket } from './qqbot-image-sources.mjs';
 import {
     claimRecentImageSnapshot,
     isRecentImageSnapshot,
@@ -132,6 +133,8 @@ function normalizeOriginalRequest(request) {
         currentAttachments,
         quotedAttachments,
         recentImageSnapshot: request.recentImageSnapshot,
+        appId: request.appId,
+        imageSourceTicket: request.imageSourceTicket,
     };
 }
 
@@ -225,6 +228,9 @@ export function beginGenerationTurn(agent, originalRequests, downloadedFiles, op
             imageCalls: new Map(),
             markdownCalls: new Map(),
         };
+        if (isImageSourceTicket(normalized.imageSourceTicket) && imageSources.bind(normalized.imageSourceTicket,
+            { appId: normalized.appId, scope: normalized.replyTarget.scope, peerId: normalized.replyTarget.targetId,
+                ownerId: normalized.ownerId }, request.sessionId)) request.imageSourceTicket = normalized.imageSourceTicket;
         for (const [quoted, attachments] of [
             [false, normalized.currentAttachments],
             [true, normalized.quotedAttachments],
@@ -289,9 +295,28 @@ export function beginGenerationTurn(agent, originalRequests, downloadedFiles, op
                 });
                 recentImageAttachments.set(imageAttachmentId, grant);
                 request.recentImages.push({ imageAttachmentId, filename: grant.filename,
-                    imageRef: imageReference(requestId, imageAttachmentId) });
+                    imageRef: imageReference(requestId, imageAttachmentId),
+                    ...(request.imageSourceTicket ? { source: 'direct', defaultSource: imageSources.defaultIsDirect(request.imageSourceTicket) } : {}) });
             }
         }
+        if (request.imageSourceTicket && recentImageMaxBytes !== undefined && !currentOrQuotedMayBeImage
+            && !hasExplicitRemoteSource(normalized.text) && documentScopeActive(documentScope) && !documentScope.documentMode) {
+            for (const candidate of imageSources.listed(request.imageSourceTicket)) {
+                const imageAttachmentId = opaqueId();
+                const grant = Object.freeze({ imageAttachmentId, requestId, recent: true, reusableSource: true,
+                    sourceHandle: candidate.handle, sourceTicket: request.imageSourceTicket,
+                    sourceExpiresAt: candidate.expiresAt,
+                    filename: candidate.filename, contentType: 'image', size: null, maxBytes: recentImageMaxBytes });
+                recentImageAttachments.set(imageAttachmentId, grant);
+                request.recentImages.push({ imageAttachmentId, filename: candidate.filename,
+                    source: candidate.source, sourceGroup: candidate.sourceGroup, defaultSource: candidate.defaultSource,
+                    createdAt: candidate.createdAt,
+                    ...(candidate.source === 'generated' ? { editableHandle: candidate.handle } : {}),
+                    expiresAt: candidate.expiresAt, imageRef: imageReference(requestId, imageAttachmentId) });
+            }
+        }
+        if (request.imageSourceTicket) request.recentImages = request.recentImages
+            .sort((a, b) => Number(b.defaultSource === true) - Number(a.defaultSource === true)).slice(0, 8);
         requests.set(requestId, request);
         diagnostics.images = request.images.length;
         logGenerationDiagnostics(source, normalized, diagnostics);
@@ -328,6 +353,7 @@ function revokeGenerationTurn(scope) {
     scope.controller.abort(new Error('QQ generation turn ended.'));
     for (const request of scope.requests.values()) {
         if (request.recentImageSnapshot) releaseRecentImageSnapshot(request.recentImageSnapshot);
+        if (request.imageSourceTicket) imageSources.close(request.imageSourceTicket);
     }
     scope.requests.clear();
     scope.imageAttachments.clear();
@@ -399,6 +425,9 @@ export function getGenerationRecentImageAttachment(scope, requestId, imageAttach
     if (!getGenerationRequest(scope, requestId, 'recent-image')) return undefined;
     if (generationScopeFailure(scope, 'image') || typeof imageAttachmentId !== 'string') return undefined;
     const image = scope.recentImageAttachments.get(imageAttachmentId);
+    if (image?.reusableSource) return image.requestId === requestId
+        && image.sourceTicket === scope.requests.get(requestId)?.imageSourceTicket
+        && imageSources.available(image.sourceTicket, image.sourceHandle) ? image : undefined;
     if (!image || image.requestId !== requestId || image.snapshot !== scope.requests.get(requestId)?.recentImageSnapshot
         || !recentImageSnapshotAvailable(image.snapshot)) return undefined;
     return image;
@@ -428,12 +457,25 @@ export function generationRequestMetadata(scope) {
         requestId: request.requestId,
         userRequest: request.text,
         images: request.images.map((image) => ({ ...image })),
-        recentImages: generationScopeFailure(scope, 'image') || !request.recentImageSnapshot
-            || !recentImageSnapshotAvailable(request.recentImageSnapshot)
+        recentImages: generationScopeFailure(scope, 'image')
             ? []
             : request.recentImages.filter((image) => getGenerationRecentImageAttachment(scope,
                 request.requestId, image.imageAttachmentId)).map((image) => ({ ...image })),
     }));
+}
+
+export function renderCurrentImageSources(agent) {
+    const scope = getGenerationTurn(agent);
+    const requests = scope ? generationRequestMetadata(scope).map(({ requestId, images, recentImages }) =>
+        ({ requestId, images, recentImages })) : [];
+    return '[Current QQ image sources; this snapshot replaces all historical source lists. '
+        + 'Use only tools actually provided in this step. Current attached/quoted images take precedence; '
+        + 'never fall back if they are unavailable. Without current images, use defaultSource candidates '
+        + 'from the latest associated group, unless the user explicitly selects another listed candidate. '
+        + 'If multiple candidates in that group are ambiguous, ask first. If no default remains, '
+        + 'do not guess another image. Receipt editableHandle is an identity, not a tool argument or authorization. '
+        + 'Each operation still requires the matched original user request. Ordinary chat does not authorize analysis or editing.]\n'
+        + JSON.stringify({ requests });
 }
 
 export function renderGenerationRequestMetadata(scope) {

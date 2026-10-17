@@ -21,6 +21,39 @@ async function edit(file, operation) {
     await writeFile(path, operation(await readFile(path, 'utf8')));
 }
 
+// Reverse the newer image-source layer before restoring any historical layout.
+// This preserves the old fixture bodies instead of teaching them new runtime code.
+for (const [file, marker, replacements] of [
+    ['gateway/middleware-setup.js', '// Chat-only reusable image sources v1.', [
+        ["import { createImageSourceMiddleware } from '/opt/qqbot-defaults/qqbot-image-sources.mjs';\n", ''],
+        ['    // Chat-only reusable image sources v1.\n    bot.use(createImageSourceMiddleware({ appId: config.appId }));\n', ''],
+    ]],
+    ['session/session-manager.js', '// Chat-only image source reset v1.', [
+        ["import { imageSources } from '/opt/qqbot-defaults/qqbot-image-sources.mjs';\n", ''],
+        ['            // Chat-only image source reset v1.\n', ''],
+        ['            imageSources.clearPeer({ appId: this.config.appId, scope, peerId, ownerId: peerId });\n', ''],
+        ['        imageSources.clearPeer({ appId: this.config.appId, scope, peerId, ownerId: peerId });\n', ''],
+    ]],
+    ['transport/outbound.js', '// Chat-only image handle redaction v1.', [
+        ["import { redactImageSourceHandles } from '/opt/qqbot-defaults/qqbot-image-sources.mjs';\n", ''],
+        ['        // Chat-only image handle redaction v1.\n        text = redactImageSourceHandles(text);\n', ''],
+    ]],
+    ['transport/outbound-buffer.js', '// Chat-only streaming image handle redaction v1.', [
+        ["import { createImageSourceRedactor, redactImageSourceHandles } from '/opt/qqbot-defaults/qqbot-image-sources.mjs';\n", ''],
+        ['    // Chat-only streaming image handle redaction v1.\n    sourceRedactor = createImageSourceRedactor();\n', ''],
+        ['this.writer?.append(this.sourceRedactor.push(text));', 'this.writer?.append(text);'],
+        ['                    this.writer.append(this.sourceRedactor.finish());\n', ''],
+        ['chunkMarkdownText(redactImageSourceHandles(this.buffer), this.limit)', 'chunkMarkdownText(this.buffer, this.limit)'],
+    ]],
+]) {
+    await edit(file, source => {
+        if (!source.includes(marker)) return source;
+        for (const [before, after] of replacements) source = replaceOnce(source, before, after, 'image-source ' + file);
+        return source;
+    });
+}
+if (process.argv[3] === 'image-sources-only') process.exit(0);
+
 function revertDeepSeekTimeoutNotices(source) {
     const marker = '// Chat-only DeepSeek timeout status notices v1.';
     const newImport = "import { classifyProviderFailure, formatProviderFailure, formatToolFailure, resolveProviderFailureNotice } from '/opt/qqbot-defaults/qqbot-provider-errors.mjs';";

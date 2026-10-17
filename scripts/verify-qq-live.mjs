@@ -12,7 +12,7 @@ const hash = value => value ? createHash('sha256').update(process.env.QQBOT_APPI
 const redact = value => {
     let serialized = JSON.stringify(value);
     for (const secret of secrets) serialized = serialized.replaceAll(secret, '[redacted]');
-    return serialized.replace(/\b[A-Fa-f0-9]{32}\b/gu, '[redacted-id]').replace(/QQ:\d{5,}/gu, 'QQ:[redacted-id]');
+    return serialized.replace(/imgsrc_[A-Za-z0-9_-]{32}/gu, '[image-source]').replace(/\b[A-Fa-f0-9]{32}\b/gu, '[redacted-id]').replace(/QQ:\d{5,}/gu, 'QQ:[redacted-id]');
 };
 writeFileSync(output, '', { mode: 0o600 });
 const record = (type, detail = {}) => appendFileSync(output, `${redact({ at: new Date().toISOString(), type, ...detail })}\n`);
@@ -65,6 +65,17 @@ globalThis.fetch = async (input, init) => {
     if (operation && typeof init?.body === 'string') {
         try { payload = JSON.parse(init.body); } catch { /* Never log unparsed bodies. */ }
     }
+    if (!operation && typeof init?.body === 'string') {
+        try {
+            const body = JSON.parse(init.body);
+            if (typeof body.model === 'string' && (body.input || body.messages)) {
+                record('model.request', { hasImageSourceContext: init.body.includes('[Current QQ image sources;'),
+                    hasImage: init.body.includes('data:image/'),
+                    tools: (body.tools ?? []).map(tool => tool.name ?? tool.function?.name)
+                        .filter(name => typeof name === 'string' && /^[A-Za-z0-9_]{1,80}$/u.test(name)) });
+            }
+        } catch { /* Never retain model payloads, image bytes or reasoning. */ }
+    }
     try {
         const response = await originalFetch(input, init);
         if (operation) {
@@ -93,14 +104,21 @@ boot.ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
     const entry = assembly.contexts.find(item => item.name === 'qqbot:capabilities');
     let snapshot;
     try { snapshot = JSON.parse(entry?.text.split('\n').at(-1)); } catch { /* Report a missing snapshot explicitly. */ }
-    record('model.assembly', { agentHash: hash(context.agent?.id), tools: assembly.tools.map(tool => tool.name), snapshot });
+    let imageSources;
+    try {
+        const sourceContext = assembly.contexts.find(item => item.name === 'qqbot:image-sources');
+        const sources = JSON.parse(sourceContext?.text.split('\n').at(-1));
+        imageSources = sources.requests.map(row => ({ current: row.images.length,
+            candidates: row.recentImages.map(image => ({ source: image.source ?? 'direct', defaultSource: image.defaultSource === true })) }));
+    } catch { /* Missing source context stays explicit in this diagnostic. */ }
+    record('model.assembly', { agentHash: hash(context.agent?.id), tools: assembly.tools.map(tool => tool.name), snapshot, imageSources });
     return assembly;
 }, { prepend: true });
 boot.ctx.on('tools/execute', async (exec, next) => {
     record('tool.start', { name: exec.name, ...(exec.name === 'qqbot_create_markdown' ? { filename: exec.arguments?.filename, heading: exec.arguments?.content?.split('\n').find(line => /^# /u.test(line)) } : {}) });
     try {
         const result = await next();
-        record('tool.result', { name: exec.name, isError: result?.isError === true, status: result?.value?.status, ...(exec.name === 'ask_user_question' ? { answers: result?.value?.answers } : {}), ...(exec.name === 'qqbot_create_markdown' ? { filename: result?.value?.filename } : {}) });
+        record('tool.result', { name: exec.name, isError: result?.isError === true, status: result?.value?.status, ...(exec.name === 'qqbot_generate_image' ? { editableAvailable: typeof result?.value?.editableHandle === 'string', reason: result?.value?.reason } : {}), ...(exec.name === 'ask_user_question' ? { answers: result?.value?.answers } : {}), ...(exec.name === 'qqbot_create_markdown' ? { filename: result?.value?.filename } : {}) });
         return result;
     } catch (error) { record('tool.error', { name: exec.name, errorType: error?.name }); throw error; }
 });

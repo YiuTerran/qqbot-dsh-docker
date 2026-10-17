@@ -462,3 +462,39 @@ integration('a partial capability provider fails validation without writing any 
     await assert.rejects(run(enforcer, [root]), /OneBot capability provider/u);
     assert.deepEqual(await hashes(root), before);
 });
+
+
+integration('v0.18.1 adapter gains image sources and reset/redaction guards with an idempotent upgrade', async t => {
+    const root = await isolatedAdapter(t);
+    await run(concurrencyFixture, [root, 'image-sources-only']);
+    assert.doesNotMatch(await readFile(join(root, 'gateway/middleware-setup.js'), 'utf8'), /createImageSourceMiddleware/u);
+    await run(enforcer, [root]);
+    for (const [file, marker] of [
+        ['gateway/middleware-setup.js', 'bot.use(createImageSourceMiddleware'],
+        ['session/session-manager.js', 'imageSources.clearPeer'],
+        ['transport/outbound.js', 'redactImageSourceHandles(text)'],
+        ['transport/outbound-buffer.js', 'this.sourceRedactor.push(text)'],
+    ]) {
+        assert.ok((await readFile(join(root, file), 'utf8')).includes(marker));
+        await execute(process.execPath, ['--check', join(root, file)]);
+    }
+    const before = await hashes(root);
+    await run(enforcer, [root]);
+    assert.deepEqual(await hashes(root), before);
+});
+
+for (const [file, snippet] of [
+    ['gateway/middleware-setup.js', '    bot.use(createImageSourceMiddleware({ appId: config.appId }));'],
+    ['transport/outbound.js', '        text = redactImageSourceHandles(text);'],
+    ['transport/outbound-buffer.js', '        this.writer?.append(this.sourceRedactor.push(text));'],
+    ['session/session-manager.js', '        imageSources.clearPeer({ appId: this.config.appId, scope, peerId, ownerId: peerId });'],
+]) integration(`partial image-source policy in ${file} fails closed without writing files`, async t => {
+    const root = await isolatedAdapter(t);
+    const path = join(root, file);
+    const original = await readFile(path, 'utf8');
+    assert.ok(original.includes(snippet));
+    await writeFile(path, original.replace(snippet, ''));
+    const before = await hashes(root);
+    await assert.rejects(run(enforcer, [root]));
+    assert.deepEqual(await hashes(root), before);
+});

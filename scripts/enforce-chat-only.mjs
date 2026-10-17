@@ -643,6 +643,12 @@ await patch('gateway/middleware-setup.js', '// Chat-only current-event self ment
 });
 
 const middlewareSetupPath = join(root, 'gateway/middleware-setup.js');
+await patch('gateway/middleware-setup.js', '// Chat-only reusable image sources v1.', (content, file) => {
+    if (!content.includes("import { createImageSourceMiddleware } from '/opt/qqbot-defaults/qqbot-image-sources.mjs';")) content = "import { createImageSourceMiddleware } from '/opt/qqbot-defaults/qqbot-image-sources.mjs';\n" + content;
+    return replaceOne(content, '    bot.use(createPendingImagePromptMiddleware({ appId: config.appId }));',
+        '    bot.use(createPendingImagePromptMiddleware({ appId: config.appId }));\n    // Chat-only reusable image sources v1.\n    bot.use(createImageSourceMiddleware({ appId: config.appId }));', file);
+});
+
 let patchedMiddlewareSetup = updates.get(middlewareSetupPath) ?? await readFile(middlewareSetupPath, 'utf8');
 const historySnapshotMarker = '// Chat-only history snapshot epoch guard v1.';
 const historySnapshotImport = `import { createHistorySnapshotBuffer } from '${historySnapshotPolicy}';`;
@@ -2562,6 +2568,26 @@ await patch('commands/status.js', '// Chat-only capability status v1.', (content
         '                `最后活动: ${formatRelativeTime(status.lastActivity)}`,\n                \'\',\n                capabilityText,', file);
 });
 
+await patch('session/session-manager.js', '// Chat-only image source reset v1.', (content, file) => {
+    if (!content.includes("import { imageSources } from '/opt/qqbot-defaults/qqbot-image-sources.mjs';")) content = "import { imageSources } from '/opt/qqbot-defaults/qqbot-image-sources.mjs';\n" + content;
+    const reset = "            this.modelResolver.setSessionId(key, randomUUID(), { strict: true });";
+    content = replaceOne(content, reset, reset + "\n            // Chat-only image source reset v1.\n            imageSources.clearPeer({ appId: this.config.appId, scope, peerId, ownerId: peerId });", file);
+    const manual = '        this.modelResolver.setSessionId(key, randomUUID());';
+    return replaceOne(content, manual, manual + "\n        imageSources.clearPeer({ appId: this.config.appId, scope, peerId, ownerId: peerId });", file);
+});
+await patch('transport/outbound.js', '// Chat-only image handle redaction v1.', (content, file) => {
+    if (!content.includes("import { redactImageSourceHandles } from '/opt/qqbot-defaults/qqbot-image-sources.mjs';")) content = "import { redactImageSourceHandles } from '/opt/qqbot-defaults/qqbot-image-sources.mjs';\n" + content;
+    return replaceOne(content, '    async send(record, text, tag) {',
+        '    async send(record, text, tag) {\n        // Chat-only image handle redaction v1.\n        text = redactImageSourceHandles(text);', file);
+});
+await patch('transport/outbound-buffer.js', '// Chat-only streaming image handle redaction v1.', (content, file) => {
+    if (!content.includes("import { createImageSourceRedactor, redactImageSourceHandles } from '/opt/qqbot-defaults/qqbot-image-sources.mjs';")) content = "import { createImageSourceRedactor, redactImageSourceHandles } from '/opt/qqbot-defaults/qqbot-image-sources.mjs';\n" + content;
+    content = replaceOne(content, 'export class OutboundBuffer {', 'export class OutboundBuffer {\n    // Chat-only streaming image handle redaction v1.\n    sourceRedactor = createImageSourceRedactor();', file);
+    content = replaceOne(content, '        this.writer?.append(text);', '        this.writer?.append(this.sourceRedactor.push(text));', file);
+    content = replaceOne(content, '                    await this.writer.finish();', '                    this.writer.append(this.sourceRedactor.finish());\n                    await this.writer.finish();', file);
+    return replaceOne(content, 'chunkMarkdownText(this.buffer, this.limit)', 'chunkMarkdownText(redactImageSourceHandles(this.buffer), this.limit)', file);
+});
+
 async function finalText(file) {
     const filename = join(root, file);
     return updates.get(filename) ?? await readFile(filename, 'utf8');
@@ -2878,6 +2904,14 @@ if (durableResetPosition < 0
     || strictSynchronousCommit.includes('await')
     || !finalManager.includes('return false;')) {
     throw new Error('Chat-only patch: strict session reset atomic commit ordering is incomplete');
+}
+
+assertOnce(patchedMiddlewareSetup, 'bot.use(createImageSourceMiddleware({ appId: config.appId }));', 'request image source capture');
+assertOnce(finalOutbound, 'text = redactImageSourceHandles(text);', 'static image source handle redaction');
+assertOnce(finalOutboundBuffer, 'this.sourceRedactor.push(text)', 'streaming image source handle redaction');
+assertOnce(finalOutboundBuffer, 'this.writer.append(this.sourceRedactor.finish());', 'streaming partial handle flush redaction');
+if (finalManager.split('imageSources.clearPeer({ appId: this.config.appId, scope, peerId, ownerId: peerId });').length !== 3) {
+    throw new Error('Chat-only patch: image sources must be revoked on manual and committed automatic reset');
 }
 
 for (const [file, content] of updates) await writeFile(file, content);

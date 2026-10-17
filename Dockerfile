@@ -130,6 +130,7 @@ COPY defaults/qqbot-text-documents.mjs /opt/qqbot-defaults/qqbot-text-documents.
 COPY defaults/qqbot-documents.mjs /opt/qqbot-defaults/qqbot-documents.mjs
 COPY defaults/qqbot-history-snapshot.mjs /opt/qqbot-defaults/qqbot-history-snapshot.mjs
 COPY defaults/qqbot-pending-images.mjs /opt/qqbot-defaults/qqbot-pending-images.mjs
+COPY defaults/qqbot-image-sources.mjs /opt/qqbot-defaults/qqbot-image-sources.mjs
 COPY defaults/qqbot-memory-images.mjs /opt/qqbot-defaults/qqbot-memory-images.mjs
 COPY defaults/qqbot-concurrency.mjs /opt/qqbot-defaults/qqbot-concurrency.mjs
 COPY defaults/qqbot-generation.mjs /opt/qqbot-defaults/qqbot-generation.mjs

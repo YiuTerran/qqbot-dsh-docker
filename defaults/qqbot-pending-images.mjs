@@ -1,4 +1,5 @@
 import { normalizeOwnMentionText } from './qqbot-mention-text.mjs';
+import { imageSources, imageSourceIdentity } from './qqbot-image-sources.mjs';
 
 const DEFAULT_TTL_MS = 5 * 60 * 1000;
 const DEFAULT_MAX_IMAGES = 8;
@@ -154,6 +155,7 @@ export function releaseRecentImageSnapshot(snapshot) {
 }
 
 export function createPendingImagePromptCache(options = {}) {
+    const sourceCache = options.sourceCache;
     const ttlMs = options.ttlMs ?? DEFAULT_TTL_MS;
     const maxImagesPerGroup = options.maxImagesPerGroup ?? DEFAULT_MAX_IMAGES;
     const maxGroups = options.maxGroups ?? DEFAULT_MAX_GROUPS;
@@ -182,6 +184,7 @@ export function createPendingImagePromptCache(options = {}) {
         if (pending.get(record.key) === record) pending.delete(record.key);
         liveRecords.delete(record.id);
         stopTimer(record);
+        sourceCache?.remove(record.sourceGroup);
         return true;
     }
 
@@ -231,13 +234,24 @@ export function createPendingImagePromptCache(options = {}) {
         record.lastImageAt = time;
         record.expiresAt = time + ttlMs;
         record.status = 'open';
-        expireLater(record);
+        if (sourceCache) {
+            const previous = record.sourceGroup;
+            record.sourceGroup = undefined;
+            sourceCache.remove(previous);
+            const group = sourceCache.noteDirect(record.sourceIdentity, record.expiresAt, () => {
+                if (record.sourceGroup === group) invalidate(record, 'evicted');
+            }, () => record.snapshotCount > 0);
+            record.sourceGroup = group;
+            if (!group) invalidate(record, 'evicted');
+        }
+        if (!record.invalidated) expireLater(record);
     }
 
     function makeRecord(identity, attachments, message, time) {
         const record = {
             id: ++nextRecordId,
             key: identity.key,
+            sourceIdentity: identity.sourceIdentity,
             peerKey: identity.peerKey,
             pendingByKey: pending,
             liveRecords,
@@ -255,7 +269,7 @@ export function createPendingImagePromptCache(options = {}) {
         record.stopTimer = () => stopTimer(record);
         liveRecords.set(record.id, record);
         appendTo(record, attachments, message, time);
-        pending.set(record.key, record);
+        if (!record.invalidated) pending.set(record.key, record);
         return record;
     }
 
@@ -273,6 +287,7 @@ export function createPendingImagePromptCache(options = {}) {
     function capture(message, appId) {
         const identity = identityFor(message, appId);
         if (!identity) return false;
+        identity.sourceIdentity = imageSourceIdentity(message, appId);
         pruneExpired();
         if (!isPureImageMessage(message, appId)) {
             closeCurrent(identity.key);
@@ -364,7 +379,7 @@ export function createPendingImagePromptCache(options = {}) {
     return Object.freeze({ capture, snapshot, clearForMessage, clear, inspect, size });
 }
 
-export const pendingImagePrompts = createPendingImagePromptCache();
+export const pendingImagePrompts = createPendingImagePromptCache({ sourceCache: imageSources });
 
 /** Render only request-local counts. Image URLs and peer/source IDs stay private. */
 export function renderRecentImagePromptMetadata(requests) {
@@ -418,6 +433,7 @@ export function createPendingImageNewCommandCleanup({ appId, cache = pendingImag
     return (ctx, next) => {
         if (identityFor(ctx?.message, appId) && NEW_COMMAND.test(visibleText(ctx.message, appId))) {
             cache.clearForMessage(ctx.message, appId);
+            imageSources.clearPeer(imageSourceIdentity(ctx.message, appId));
         }
         return next();
     };

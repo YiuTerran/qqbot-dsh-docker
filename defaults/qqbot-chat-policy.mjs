@@ -1,3 +1,5 @@
+import { imageSources } from './qqbot-image-sources.mjs';
+import { renderCurrentImageSources } from './qqbot-generation-scope.mjs';
 import { constants, lstatSync, realpathSync, statSync } from 'node:fs';
 import { createCapabilityRegistry, capabilityRuntimeContext } from './qqbot-capabilities.mjs';
 import { open } from 'node:fs/promises';
@@ -354,6 +356,18 @@ export async function loadChatImageBytes(image, maxBytes, exec, requestSignal) {
         if (recentImage.size !== null && recentImage.size > Math.min(limit, recentImage.maxBytes)) {
             throw new Error(`qqbot_describe_image: image too large (${recentImage.size} bytes)`);
         }
+        if (recentImage.reusableSource) {
+            const bytes = await imageSources.read(recentImage.sourceTicket, recentImage.sourceHandle,
+                (url, maxBytes, requestSignal) => runInDocumentExecution(exec,
+                    () => downloadCurrentQQImage(url, Math.min(limit, maxBytes), requestSignal)), signal);
+            if (bytes.length > Math.min(limit, recentImage.maxBytes)) {
+                throw Object.assign(new Error('The authorized image exceeds this tool byte limit.'), { kind: 'too-large' });
+            }
+            if (!isBoundDocumentExecutionActive(exec) || !getGenerationRecentImageReference(generationScope, image)) {
+                throw new Error('This image source is no longer authorized for this request.');
+            }
+            return new Uint8Array(bytes);
+        }
         if (!claimGenerationRecentImage(generationScope, recentImage.requestId, recentImage.imageAttachmentId)) {
             throw new Error('This recent image batch has expired or was claimed by another original QQ request.');
         }
@@ -372,6 +386,10 @@ export async function loadChatImageBytes(image, maxBytes, exec, requestSignal) {
         const bytes = await runInDocumentExecution(exec, () => downloadCurrentQQImage(image, limit, signal));
         if (!isBoundDocumentExecutionActive(exec)) throw new Error('This image tool call belongs to an expired QQ message.');
         throwIfAborted(signal);
+        const generationScope = getBoundGenerationTurn(exec);
+        for (const request of generationScope?.requests?.values() ?? []) {
+            if (request.imageSourceTicket) imageSources.rememberUrl(request.imageSourceTicket, image, bytes);
+        }
         return new Uint8Array(bytes);
     }
 
@@ -549,12 +567,17 @@ export function installChatPolicy(ctx) {
         order: 10252,
         text: '本机固定提供 /opt/qqbot-assets/dayu/character-standard.png（六视图）和 portrait.png（正面立绘）。qqbot_describe_image 可读取两张图核对形象；qqbot_send_asset_image 可将完整原图作为文件发送给当前请求，优先用于用户索要设定图或原图的情形，不调用生图接口。只有用户明确要求创作新图时，才将 portrait.png 作为 qqbot_generate_image 的 referenceImage。不得把图片路径传给其他工具、读取其他文件或用素材替代用户要编辑的 QQ 原图。普通生图与 QQ 图片编辑继续按各自授权执行。',
     });
+    ctx.systemPrompt.section({ name: 'qqbot:image-source-policy', order: 10256,
+        text: '生成图和当前明确引用过的图片可在后续回合看图、编辑。只用最新 qqbot:image-sources 中为本条原始请求重新签发的 imageRef 或 imageAttachmentId；普通聊天不授权图片操作。生成图保留 10 分钟，引用图和带文字附件保留 5 分钟，不因使用续期；它们的底图可在有效期内重复使用，原有连续纯图片批次仍一次认领。当前附件、明确引用、明确图片 URL 优先且失败不回退。没有当前图时用 defaultSource 的最近关联图片组，多张无法确定时先澄清；最新组不可用不擅用旧图。用户明确指定更早、且仍在本轮来源清单中的底图时可选它。回执 editableHandle 只标识生成物，不是工具入参或授权，不展示内部句柄。不要求用户在仍有可用底图时重发；来源过期或不可用时请其明确引用或重新附图，不把编辑换成重新画相似场景。source-cache-unavailable 且 status=sent 只表示未保留底图，不表示图片发送失败。任何失败、超时、未知结果都不能自动重试。',
+    });
     // Reserve a required slot so DSH retains the final snapshot even when optional runtime facts are suppressed.
     const acceptedCapabilities = new WeakMap();
     let acceptedDeploymentCapabilities = '';
     // refreshContext() must reuse the accepted tool snapshot, never probe again or share agents' state.
     ctx.systemPrompt.context({ name: 'qqbot:capabilities', order: 10254, required: true, interpolate: false,
         text: (context) => context.agent ? acceptedCapabilities.get(context.agent) ?? '' : acceptedDeploymentCapabilities });
+    ctx.systemPrompt.context({ name: 'qqbot:image-sources', order: 10255, required: true, interpolate: false,
+        text: context => renderCurrentImageSources(context.agent) });
     ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
         const assembly = await next();
         const agent = context?.agent;

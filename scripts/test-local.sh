@@ -51,6 +51,7 @@ previous_stock_agents_v0_14_2_fixture="${repo_root}/scripts/fixtures/agents-v0.1
 previous_stock_agents_v0_15_0_fixture="${repo_root}/scripts/fixtures/agents-v0.15.0-stock.md"
 previous_stock_agents_v0_16_0_fixture="${repo_root}/scripts/fixtures/agents-v0.16.0-stock.md"
 legacy_stock_agents_fixtures=(
+    "${repo_root}/scripts/fixtures/agents-v0.18.0-stock.md"
     "${repo_root}/scripts/fixtures/agents-v0.17.0-stock.md"
     "${repo_root}/scripts/fixtures/agents-v0.16.1-stock.md"
     "${repo_root}/scripts/fixtures/agents-legacy-v0.3.0-stock.md"
@@ -79,6 +80,7 @@ legacy_stock_agents_fixtures=(
     "${repo_root}/scripts/fixtures/agents-v0.16.0-stock.md"
 )
 legacy_stock_agents_hashes=(
+    ccbedd1e3662b22f16c80e8c7f5446d0175fac618eb7ce458691feeb675615e6
     1331ab3c6a3430a764f663f4bb82c19e42f80d647c639ceaf3a8db1bd05c856e
     af89bfbe1b1892d0d082fdf7de011fd63f41e38e80e76bec713896148dabd252
     c249259a60d4b04c9c9c3df1a92977adf748ba4143a3639c3e85a006ad802ef5
@@ -1047,6 +1049,8 @@ docker create \
         node --test /repo/scripts/test-capabilities-provider.mjs
         QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /repo/scripts/test-compaction-native.mjs
         node --test /repo/scripts/test-vision-response.mjs
+        node --test /repo/scripts/test-image-sources.mjs
+        QQBOT_GENERATION_MODULE=/opt/qqbot-defaults/qqbot-generation.mjs node --test /repo/scripts/test-image-source-native.mjs
         node /tmp/test-profile-boot.mjs
         QQBOT_TEST_ONEBOT_FIXTURE=true QQBOT_APPID=123456789 node /tmp/test-profile-boot.mjs
     '
