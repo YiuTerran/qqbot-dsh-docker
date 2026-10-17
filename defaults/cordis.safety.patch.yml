@@ -45,15 +45,24 @@
   disabled: true
 - id: workflow-ptc
   disabled: true
-- id: tool-ralph
-  disabled: true
 - id: tool-goal
   disabled: true
 - id: goal-round-driver
   disabled: true
 - id: tool-todo
   disabled: true
-- id: tool-ask-user
+# Keep this deployment environment-only; managed credentials must not shadow .env.
+- id: authorization
+  disabled: true
+- id: credentials
+  disabled: true
+- id: deepseek-account
+  disabled: true
+- id: llm-deepseek-account
+  disabled: true
+- id: web-deepseek-api
+  disabled: true
+- id: tool-working-directory
   disabled: true
 - id: user-questions
   disabled: false

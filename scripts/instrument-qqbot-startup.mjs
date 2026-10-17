@@ -8,6 +8,8 @@ if (!root) {
 
 const indexPath = join(root, 'index.js');
 const gatewayPath = join(root, 'gateway', 'bootstrap.js');
+const manifest = JSON.parse(await readFile(join(root, '..', 'package.json'), 'utf8'));
+if (manifest.version !== '0.5.2') throw new Error('Startup diagnostics require dsh-qqbot 0.5.2.');
 
 function replaceOne(content, expression, replacement, label, path) {
   const matches = [...content.matchAll(expression)];
@@ -68,6 +70,10 @@ if (!gateway.includes('[im-qqbot] requesting QQ gateway connection')) {
   );
 }
 
+for (const [source, markers] of [[index, ['[im-qqbot] gateway initialization failed:', '[im-qqbot] QQ credentials resolved; initializing gateway']],
+  [gateway, ['let qqbotGatewayReady = false;', 'qqbotGatewayReady = true;', '[im-qqbot] requesting QQ gateway connection', 'qqbotStartupWatchdog.unref?.();']]]) {
+  if (markers.some(marker => source.split(marker).length !== 2)) throw new Error('Incomplete or duplicated QQ startup diagnostics; refusing to start.');
+}
 await Promise.all([
   writeFile(indexPath, index),
   writeFile(gatewayPath, gateway),

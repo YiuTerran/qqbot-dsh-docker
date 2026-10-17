@@ -4,7 +4,7 @@ import { join } from 'node:path';
 const root = process.argv[2];
 if (!root) throw new Error('usage: enforce-web-search.mjs <dsh-web-search-deepseek-directory>');
 const manifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
-if (manifest.version !== '0.1.7-rc.2') throw new Error('Search patch requires dsh-web-search-deepseek 0.1.7-rc.2.');
+if (manifest.version !== '0.2.1-rc.2') throw new Error('Search patch requires dsh-web-search-deepseek 0.2.1-rc.2.');
 const path = join(root, 'lib/index.js');
 const marker = '// QQ bot: maxUses=0 omits the native search-use cap.';
 const changes = [

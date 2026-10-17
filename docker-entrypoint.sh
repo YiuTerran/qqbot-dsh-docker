@@ -114,7 +114,7 @@ fi
 
 mkdir -p /data /workspace
 
-# dsh itself resolves its state through DSH_HOME. dsh-qqbot 0.5.0 also reads
+# dsh itself resolves its state through DSH_HOME. dsh-qqbot 0.5.2 also reads
 # ~/.dsh/settings.yaml as a compatibility fallback, so point that legacy view at
 # the same persistent root instead of the image's ephemeral node home.
 mkdir -p "$HOME"
@@ -123,7 +123,9 @@ chown -h node:node "$HOME/.dsh"
 
 if [ ! -e /data/.initialized ]; then
     echo "[entrypoint] Initializing profile data"
-    cp -a /opt/dsh-seed/. /data/
+    if [ ! -e /data/profiles/qqbot ] && [ ! -L /data/profiles/qqbot ]; then
+        cp -a /opt/dsh-seed/. /data/
+    fi
     : > /data/.initialized
     # /opt/dsh-seed is already node-owned.  Do not recursively chown /data:
     # users may bind mount /data/AGENTS.md read-only to replace the default.
@@ -223,6 +225,8 @@ if [ ! -e "$media_store" ]; then
 fi
 chown node:node "$media_store"
 
+node /usr/local/lib/migrate-profile-runtime.mjs /data/profiles/qqbot /opt/dsh-seed/profiles/qqbot
+
 # Existing named volumes retain the originally seeded plugin. Apply the chat
 # policy and upgrade migrations before launch; policy errors stop startup.
 qqbot_dist=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
@@ -233,9 +237,7 @@ fi
 echo "[entrypoint] Applying qqbot runtime policy"
 node /usr/local/lib/enforce-chat-only.mjs "$qqbot_dist"
 echo "[entrypoint] qqbot runtime policy ready"
-if ! node /usr/local/lib/instrument-qqbot-startup.mjs "$qqbot_dist"; then
-    echo "[entrypoint] QQ startup diagnostics were not applied; continuing with the installed plugin" >&2
-fi
+node /usr/local/lib/instrument-qqbot-startup.mjs "$qqbot_dist"
 
 # A non-empty LLM_API_KEY selects a third-party OpenAI-compatible route. The
 # generated profile patch contains only the environment-variable name, never

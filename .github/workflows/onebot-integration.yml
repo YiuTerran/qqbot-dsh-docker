@@ -36,6 +36,8 @@ jobs:
           docker build -t qqbot-sealdice:integration third_party/sealdice-core
       - name: Verify disabled tools and existing chat behavior
         run: IMAGE=dsh-qqbot:onebot-${{ matrix.arch }} SKIP_BUILD=1 ./scripts/test-local.sh
+      - name: Verify persistent runtime upgrade from v0.17.0
+        run: IMAGE=dsh-qqbot:onebot-${{ matrix.arch }} ./scripts/test-runtime-upgrade.sh
       - name: Verify real MCP and native SeaDice behavior
         run: python3 scripts/test-onebot-integration.py --qqbot-image dsh-qqbot:onebot-${{ matrix.arch }} --evidence /tmp/onebot-integration.json
       - uses: actions/upload-artifact@v4

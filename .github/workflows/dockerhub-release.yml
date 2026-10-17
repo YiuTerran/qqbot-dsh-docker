@@ -68,6 +68,9 @@ jobs:
           docker build -t qqbot-gensokyo:integration third_party/gensokyo-mcp
           docker build -t qqbot-sealdice:integration third_party/sealdice-core
 
+      - name: Verify persistent runtime upgrade from v0.17.0
+        run: IMAGE=dsh-qqbot:test-local-${{ matrix.arch }} ./scripts/test-runtime-upgrade.sh
+
       - name: Run real MCP to SeaDice container regression
         run: python3 scripts/test-onebot-integration.py --qqbot-image dsh-qqbot:test-local-${{ matrix.arch }} --evidence /tmp/onebot-integration.json
 

@@ -4,7 +4,7 @@ import { join } from 'node:path';
 const root = process.argv[2];
 if (!root) throw new Error('usage: enforce-chat-only.mjs <dsh-qqbot-dist-directory>');
 const manifest = JSON.parse(await readFile(join(root, '..', 'package.json'), 'utf8'));
-if (manifest.version !== '0.5.0') throw new Error('Chat-only patches require dsh-qqbot 0.5.0; refusing an unverified adapter.');
+if (manifest.version !== '0.5.2') throw new Error('Chat-only patches require dsh-qqbot 0.5.2; refusing an unverified adapter.');
 const policy = '/opt/qqbot-defaults/qqbot-chat-policy.mjs';
 const historySnapshotPolicy = '/opt/qqbot-defaults/qqbot-history-snapshot.mjs';
 const pendingImagesPolicy = '/opt/qqbot-defaults/qqbot-pending-images.mjs';

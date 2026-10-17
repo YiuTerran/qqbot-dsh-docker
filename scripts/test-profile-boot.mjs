@@ -160,6 +160,10 @@ for (const level of Object.keys(originalConsole)) {
   };
 }
 
+// A stale managed store must not override the deployment's environment references.
+try {
+  await writeFile('/data/.credentials.yaml', 'DEEPSEEK_API_KEY: STALE_MANAGED_CREDENTIAL_SENTINEL\nLLM_API_KEY: STALE_MANAGED_CREDENTIAL_SENTINEL\n', { flag: 'wx', mode: 0o600 });
+} catch (error) { if (error.code !== 'EEXIST') throw error; }
 let boot;
 try {
   boot = await runProfile({
@@ -175,6 +179,9 @@ try {
   const systemPrompt = ctx.get('systemPrompt');
   const userQuestions = ctx.get('userQuestions');
   const web = ctx.get('web');
+  assert.equal(ctx.get('credentials'), undefined, 'managed credentials must stay disabled');
+  assert.equal(ctx.get('deepseekAccount'), undefined, 'account login must stay disabled');
+  assert.equal(ctx.get('webServer'), undefined, 'this image must not start a Web management server');
   const expectedImageEnabled = Boolean(process.env.IMAGE_API_KEY);
   const expectedMarkdownEnabled = process.env.QQBOT_MARKDOWN_ENABLED !== 'false';
   const thirdPartyMode = Boolean(process.env.LLM_API_KEY);

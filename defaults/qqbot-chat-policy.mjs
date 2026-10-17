@@ -549,6 +549,12 @@ export function installChatPolicy(ctx) {
         order: 10252,
         text: '本机固定提供 /opt/qqbot-assets/dayu/character-standard.png（六视图）和 portrait.png（正面立绘）。qqbot_describe_image 可读取两张图核对形象；qqbot_send_asset_image 可将完整原图作为文件发送给当前请求，优先用于用户索要设定图或原图的情形，不调用生图接口。只有用户明确要求创作新图时，才将 portrait.png 作为 qqbot_generate_image 的 referenceImage。不得把图片路径传给其他工具、读取其他文件或用素材替代用户要编辑的 QQ 原图。普通生图与 QQ 图片编辑继续按各自授权执行。',
     });
+    // Reserve a required slot so DSH retains the final snapshot even when optional runtime facts are suppressed.
+    const acceptedCapabilities = new WeakMap();
+    let acceptedDeploymentCapabilities = '';
+    // refreshContext() must reuse the accepted tool snapshot, never probe again or share agents' state.
+    ctx.systemPrompt.context({ name: 'qqbot:capabilities', order: 10254, required: true, interpolate: false,
+        text: (context) => context.agent ? acceptedCapabilities.get(context.agent) ?? '' : acceptedDeploymentCapabilities });
     ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
         const assembly = await next();
         const agent = context?.agent;
@@ -564,8 +570,11 @@ export function installChatPolicy(ctx) {
                 documentMode: Boolean(agent && getDocumentTurn(agent)?.documentMode),
             },
         });
+        const runtimeContext = capabilityRuntimeContext(snapshot);
+        if (agent) acceptedCapabilities.set(agent, runtimeContext.text);
+        else acceptedDeploymentCapabilities = runtimeContext.text;
         return { ...assembly, tools: visibleTools,
-            contexts: [...assembly.contexts.filter((item) => item.name !== 'qqbot:capabilities'), capabilityRuntimeContext(snapshot)] };
+            contexts: [...assembly.contexts.filter((item) => item.name !== 'qqbot:capabilities'), runtimeContext] };
     });
     console.log('[im-qqbot] chat-only policy installed; turn-scoped images, web search, and bounded plain-text reading');
     return capabilities;

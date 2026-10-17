@@ -965,7 +965,7 @@ async function deliverArtifactReceipts(normalized, expected, source, runtime, ex
 }
 
 async function sendWithDeadline(send, target, message, signal, beforeDispatch) {
-    // SDK 1.0.4 bounds its fetch phase, but clears that timeout before reading
+    // SDK 1.0.5 bounds its fetch phase, but clears that timeout before reading
     // response text and does not accept the QQ turn's signal. The outer race
     // therefore reports an uncertain send and blocks same-turn rerolls; it
     // never claims the already-started SDK request was cancelled or retries it.

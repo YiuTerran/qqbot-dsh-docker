@@ -20,8 +20,8 @@ RUN sed -i 's|http://deb.debian.org/debian-security|http://mirrors.aliyun.com/de
     && rm -rf /var/lib/apt/lists/*
 
 # dsh's plugin manager delegates profile installation to the pnpm executable.
-# All three runtime packages are pinned so a rebuild uses the same closure.
-# dsh-qqbot 0.5.0 accepts the dsh component APIs from 0.1.0-rc.6 upward.
+# Pin the top-level runtime packages and QQ SDK; profile peers come from DSH.
+# dsh-qqbot 0.5.2 accepts the dsh component APIs from 0.1.0-rc.6 upward.
 # dsh's default logger has no stdout sink for this profile. The following build
 # step instruments the pinned adapter's compiled entry points so failed/stalled
 # gateway startup is diagnosable without emitting secrets; it fails if that
@@ -29,12 +29,15 @@ RUN sed -i 's|http://deb.debian.org/debian-security|http://mirrors.aliyun.com/de
 RUN --mount=type=cache,target=/root/.npm \
     npm install --global --omit=dev \
         pnpm@12.6.0 \
-        @deepseek-ai/dsh@0.1.7-rc.2 \
+        @deepseek-ai/dsh@0.2.1-rc.2 \
     && pnpm --version \
     && pnpm config set store-dir /tmp/pnpm-store \
-    && DSH_HOME=/opt/dsh-seed dsh plugin --profile qqbot add @tencent-connect/dsh-qqbot@0.5.0 \
+    && DSH_HOME=/opt/dsh-seed dsh plugin --profile qqbot install \
+    && node -e "const fs=require('fs'); const p='/opt/dsh-seed/profiles/qqbot/pnpm-workspace.yaml'; fs.appendFileSync(p, '\noverrides:\n  \"@tencent-connect/qqbot-nodejs\": 1.0.5\n')" \
+    && DSH_HOME=/opt/dsh-seed dsh plugin --profile qqbot add @tencent-connect/dsh-qqbot@0.5.2 \
+    && node -e "const fs=require('fs');const p='/opt/dsh-seed/profiles/qqbot/node_modules/@tencent-connect/qqbot-nodejs/package.json';if(JSON.parse(fs.readFileSync(p)).version!=='1.0.5')throw Error('Unverified QQ SDK')" \
     && node /usr/local/lib/instrument-qqbot-startup.mjs /opt/dsh-seed/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist \
-    && node -e "const p=require('/opt/dsh-seed/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/package.json'); if (p.version !== '0.5.0') process.exit(1)"
+    && node -e "const p=require('/opt/dsh-seed/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/package.json'); if (p.version !== '0.5.2') process.exit(1)"
 
 COPY scripts/enforce-chat-only.mjs /usr/local/lib/enforce-chat-only.mjs
 RUN node /usr/local/lib/enforce-chat-only.mjs /opt/dsh-seed/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
@@ -46,6 +49,11 @@ COPY scripts/enforce-web-search.mjs /usr/local/lib/enforce-web-search.mjs
 RUN node /usr/local/lib/enforce-web-search.mjs /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-search-deepseek \
     && node /usr/local/lib/enforce-web-search.mjs /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-search-deepseek \
     && node --check /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-search-deepseek/lib/index.js
+
+COPY scripts/enforce-model-tools.mjs /usr/local/lib/enforce-model-tools.mjs
+RUN node /usr/local/lib/enforce-model-tools.mjs /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm \
+    && node /usr/local/lib/enforce-model-tools.mjs /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm \
+    && node --check /usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm/lib/index.js
 
 FROM node:24.14.0-bookworm-slim@sha256:d8e448a56fc63242f70026718378bd4b00f8c82e78d20eefb199224a4d8e33d8
 
@@ -91,6 +99,9 @@ RUN set -eu \
     && timeout 60 env HOME=/tmp/dsh-launch-check DSH_HOME=/tmp/dsh-launch-check /usr/local/bin/dsh --version >/dev/null \
     && rm -rf /tmp/dsh-launch-check
 
+RUN node -e "const fs=require('fs'); const r='/usr/local/lib/node_modules/@deepseek-ai/dsh'; for(const p of [r,...['dsh-agent','dsh-agent-loop','dsh-llm','dsh-session','dsh-system-prompt','dsh-tools'].map(n=>r+'/node_modules/@deepseek-ai/'+n)]) {if(JSON.parse(fs.readFileSync(p+'/package.json')).version!=='0.2.1-rc.2')throw Error('Mixed DSH runtime versions')} if(fs.existsSync('/opt/dsh-seed/profiles/qqbot/node_modules/@deepseek-ai'))throw Error('Unexpected profile-local DSH peers')"
+
+COPY scripts/migrate-profile-runtime.mjs /usr/local/lib/migrate-profile-runtime.mjs
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY defaults/AGENTS.md /opt/qqbot-defaults/AGENTS.md
 COPY assets/dayu/ /opt/qqbot-assets/dayu/

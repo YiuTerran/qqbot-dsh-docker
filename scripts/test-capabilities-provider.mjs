@@ -6,9 +6,9 @@ import { beginDocumentTurn, getDocumentTurn, endDocumentTurn } from '/opt/qqbot-
 import { beginOnebotTurn, endOnebotTurn, renderOnebotRequestMetadata } from '/opt/qqbot-defaults/qqbot-onebot-scope.mjs';
 const runtimeRoot = '/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai';
 const { Context } = await import(`${runtimeRoot}/cordis/lib/index.js`);
-const { createUserMessage } = await import(`${runtimeRoot}/dsh-llm/lib/index.js`);
+const { createUserMessage, LlmAdapter } = await import(`${runtimeRoot}/dsh-llm/lib/index.js`);
 
-test('actual provider requests receive current snapshots and matching tools at every model step', async (t) => {
+for (const toolUpdate of [undefined, 'addition-only', 'in-history']) test(`actual provider requests retain capability/tool alignment with ${toolUpdate ?? 'ordinary'} updates`, async (t) => {
     const ctx = new Context();
     t.after(() => ctx.fiber.dispose());
     for (const name of ['dsh-session-projection', 'dsh-session', 'dsh-agent', 'dsh-system-prompt', 'dsh-llm', 'dsh-tools', 'dsh-agent-loop', 'dsh-web']) {
@@ -19,6 +19,7 @@ test('actual provider requests receive current snapshots and matching tools at e
     }
     let capabilities;
     await ctx.plugin({ inject: ['tools', 'web', 'systemPrompt'], apply(child) { capabilities = installChatPolicy(child); } });
+    ctx.systemPrompt.suppressRuntimeContext();
     let enabled = false;
     capabilities.setOnebotProvider(() => enabled ? {
         configured: 'enabled', reason: 'ready', registered: true, available: true, verifiedAt: Date.now(),
@@ -30,7 +31,9 @@ test('actual provider requests receive current snapshots and matching tools at e
     const requests = [];
     const errors = [];
     ctx.on('agent/error', ({ error }) => errors.push(error));
-    ctx.llm.prepareCall = async (config) => ({ config, stream: async function* (request) {
+    class FixtureAdapter extends LlmAdapter {
+        async resolveModel(provider, id) { return { provider, id, name: id, toolUpdate, systemPromptUpdate: 'in-history' }; }
+        async *stream(request) {
         requests.push(request);
         if (requests.length === 3) {
             enabled = false;
@@ -38,7 +41,9 @@ test('actual provider requests receive current snapshots and matching tools at e
                 name: 'qqbot_read_document', arguments: { attachmentId: 'unavailable-fixture' } } };
         } else yield { type: 'text-delta', index: 0, text: 'fixture response' };
         yield { type: 'finish', reason: { kind: 'stop' } };
-    } });
+        }
+    }
+    ctx.llm.registerAdapter(['fixture'], new FixtureAdapter());
     const agent = await ctx.agentLoop.create('capability-provider-fixture', { provider: 'fixture', model: 'fixture' });
     const send = async (text) => {
         agent.followup(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'user' } }));

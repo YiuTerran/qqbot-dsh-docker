@@ -1043,6 +1043,7 @@ docker create \
         QQBOT_NATIVE_DEFAULTS_ROOT=/opt/qqbot-defaults QQBOT_QUESTIONS_MODULE=/opt/qqbot-defaults/qqbot-questions.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist QQBOT_SDK_ROOT=/data/profiles/qqbot/node_modules/@tencent-connect/qqbot-nodejs/dist node --test /tmp/test-questions-native.mjs
         QQBOT_CAPABILITY_ROOT=/opt/qqbot-defaults node --test /repo/scripts/test-capabilities.mjs
         node --test /repo/scripts/test-capabilities-provider.mjs
+        QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /repo/scripts/test-compaction-native.mjs
         node /tmp/test-profile-boot.mjs
         QQBOT_TEST_ONEBOT_FIXTURE=true QQBOT_APPID=123456789 node /tmp/test-profile-boot.mjs
     '
@@ -1058,7 +1059,7 @@ docker run --rm \
     "$IMAGE" \
     node -e '
         const plugin = require("/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/package.json");
-        if (plugin.version !== "0.5.0") process.exit(1);
+        if (plugin.version !== "0.5.2") process.exit(1);
         const fs = require("fs");
         if (!fs.readFileSync("/data/AGENTS.md", "utf8").includes("蓝色大肥鱼")) process.exit(1);
         if (!fs.existsSync("/workspace/.dsh-qqbot-test-writable")) process.exit(1);
@@ -1695,7 +1696,7 @@ if docker run --rm --network none --volume "${incompatible_data_volume}:/data" "
     echo "incompatible plugin unexpectedly started" >&2
     exit 1
 fi
-grep -Fq "Chat-only patches require dsh-qqbot 0.5.0" "$incompatible_log"
+grep -Fq "QQ profile manifest and installed adapter version disagree" "$incompatible_log"
 
 cmd="$(docker image inspect --format '{{json .Config.Cmd}}' "$IMAGE")"
 log "Checking default image command"

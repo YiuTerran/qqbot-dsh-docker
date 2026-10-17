@@ -2027,8 +2027,10 @@ test('native assembly and status share capabilities while concurrent requests re
     const a = {};
     const b = {};
     const snapshotOf = (assembly) => JSON.parse(assembly.contexts.find((entry) => entry.name === 'qqbot:capabilities').text.split('\n').at(-1));
+    const restoreOptionalContext = ctx.systemPrompt.suppressRuntimeContext();
     let assembly = await ctx.systemPrompt.assemble({ agent: a });
-    assert.equal(snapshotOf(assembly).capabilities.onebot.reason, 'config-disabled');
+    assert.equal(snapshotOf(assembly).capabilities.onebot.reason, 'config-disabled', 'capabilities survive optional runtime-context suppression');
+    restoreOptionalContext();
     enabled = true;
     assembly = await ctx.systemPrompt.assemble({ agent: a });
     assert.equal(snapshotOf(assembly).capabilities.onebot.reason, 'turn-not-authorized', 'mid-turn recovery must not mint credentials');

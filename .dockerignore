@@ -12,8 +12,10 @@ README.md
 # release helpers out of the Docker context.
 scripts/*
 !scripts/instrument-qqbot-startup.mjs
+!scripts/migrate-profile-runtime.mjs
 !scripts/link-global-bins.mjs
 !scripts/enforce-chat-only.mjs
 !scripts/enforce-web-search.mjs
+!scripts/enforce-model-tools.mjs
 .workbuddy/
 /third_party

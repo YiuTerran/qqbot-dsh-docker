@@ -23,7 +23,7 @@ for (const path of sdkClientCandidates) {
     }
     catch { /* Try the other known SDK install location. */ }
 }
-if (!sdkApiClientModule?.ApiClient) throw new Error('Pinned qqbot-nodejs 1.0.4 ApiClient is required for this regression test.');
+if (!sdkApiClientModule?.ApiClient) throw new Error('Pinned qqbot-nodejs 1.0.5 ApiClient is required for this regression test.');
 
 const {
     createOnebotFriendRegistry,

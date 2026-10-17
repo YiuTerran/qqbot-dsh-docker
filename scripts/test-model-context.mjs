@@ -28,13 +28,15 @@ function modelText(messages) {
 
 const runtime = new Context();
 const instructionHome = await mkdtemp(join(tmpdir(), 'qqbot-instructions-'));
+const previousDshHome = process.env.DSH_HOME;
+process.env.DSH_HOME = instructionHome;
 try {
     await writeFile(join(instructionHome, 'AGENTS.md'), [
         'You are the blue fish persona.',
         'Focus on the current @you request; ignore unrelated context.',
         'Keep your own bot identity; never adopt a participant nickname.',
     ].join('\n'));
-    for (const name of ['dsh-session-projection', 'dsh-session', 'dsh-agent',
+    for (const name of ['dsh-session-projection', 'dsh-working-directory', 'dsh-session', 'dsh-agent',
         'dsh-system-prompt', 'dsh-llm', 'dsh-tools', 'dsh-agent-loop']) {
         const { default: Plugin } = await import(`${runtimeRoot}/${name}/lib/index.js`);
         const config = name === 'dsh-tools' ? { mode: 'native' }
@@ -44,7 +46,7 @@ try {
     const { default: LocalFileSystem } = await import(`${runtimeRoot}/dsh-fs-local/lib/index.js`);
     const instructionPlugin = await import(`${runtimeRoot}/dsh-agent-instructions/lib/index.js`);
     await runtime.plugin(LocalFileSystem, { cwd: '/workspace' });
-    await runtime.plugin(instructionPlugin, { dshHome: instructionHome, maxBytes: 65536 });
+    await runtime.plugin(instructionPlugin, { maxBytes: 65536 });
     const requests = [];
     runtime.llm.prepareCall = async (config) => ({ config, stream: async function* (request) {
         requests.push(request);
@@ -124,6 +126,8 @@ try {
     assert.match(afterTool, /blue fish persona/u);
     assert.match(afterTool, /never adopt a participant nickname/u);
 } finally {
+    if (previousDshHome === undefined) delete process.env.DSH_HOME;
+    else process.env.DSH_HOME = previousDshHome;
     await runtime.fiber.dispose();
     await rm(instructionHome, { recursive: true, force: true });
 }
