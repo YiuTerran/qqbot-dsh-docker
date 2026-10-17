@@ -4,6 +4,7 @@ const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 const tickets = new WeakMap();
 const id = () => `imgsrc_${randomBytes(24).toString('base64url')}`;
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
+const messageKey = value => typeof value === 'string' && /^[\x21-\x7e]{1,1024}$/u.test(value) ? value : undefined;
 const validId = value => typeof value === 'string' && /^[A-Za-z0-9_-]{1,128}$/u.test(value);
 
 export function imageSourceIdentity(message, appId) {
@@ -113,7 +114,7 @@ export function createImageSourceCache({ now = Date.now, maxGroups = 200, maxByt
         groups.set(group.id, group);
         return group;
     }
-    function snapshot(identity) {
+    function snapshot(identity, { currentQuoteGroupId } = {}) {
         prune();
         const owner = ownerFor(identity, true);
         if (!owner) return;
@@ -121,7 +122,7 @@ export function createImageSourceCache({ now = Date.now, maxGroups = 200, maxByt
             .sort((a, b) => b.sequence - a.sequence);
         const ticket = Object.freeze({});
         tickets.set(ticket, { cache: api, owner, epoch: owner.epoch, latest: owner.latest,
-            groupIds: selected.map(group => group.id), bound: false, closed: false });
+            groupIds: selected.map(group => group.id), currentQuoteGroupId, bound: false, closed: false });
         return ticket;
     }
     function info(ticket) {
@@ -153,6 +154,8 @@ export function createImageSourceCache({ now = Date.now, maxGroups = 200, maxByt
             for (const entry of group.entries) {
                 result.push({ handle: entry.handle, source: group.source, filename: entry.filename,
                     defaultSource: group.sequence === state.latest, sourceGroup: group.id,
+                    ...(entry.origin === 'bot-generated' && entry.originSessionId === state.sessionId
+                        ? { origin: 'bot-generated' } : {}),
                     createdAt: new Date(group.createdAt).toISOString(),
                     expiresAt: new Date(group.expiresAt).toISOString() });
                 if (result.length >= 8) return result;
@@ -226,7 +229,7 @@ export function createImageSourceCache({ now = Date.now, maxGroups = 200, maxByt
             }
         };
     }
-    function publish(ticket, bytes, sessionId) {
+    function publish(ticket, bytes, sessionId, messageId, referenceId) {
         const state = info(ticket);
         if (!state?.bound || state.sessionId !== sessionId || !Buffer.isBuffer(bytes)
             || !bytes.length || bytes.length > MAX_IMAGE_BYTES) return;
@@ -234,8 +237,9 @@ export function createImageSourceCache({ now = Date.now, maxGroups = 200, maxByt
         // earlier pictures must not silently become the default editing base.
         state.owner.latest = ++sequence;
         if (!room(bytes.length, true)) return;
-        const group = add(state.owner.identity, 'generated', [{ filename: 'generated-image', size: bytes.length }], generatedTtlMs,
-            { sessionId });
+        const group = add(state.owner.identity, 'generated', [{ filename: 'generated-image', size: bytes.length,
+            origin: 'bot-generated', originSessionId: sessionId }], generatedTtlMs,
+            { sessionId, messageKeys: [messageKey(messageId), messageKey(referenceId)].filter(Boolean) });
         if (!group) return;
         group.entries[0].data = Buffer.from(bytes);
         group.entries[0].digest = hash(bytes);
@@ -272,12 +276,30 @@ export function createImageSourceCache({ now = Date.now, maxGroups = 200, maxByt
             return Boolean(state && [...groups.values()].some(group => group.owner === state.owner
                 && group.legacyDirect && group.sequence === state.latest));
         },
-        captureQuote(identity, attachments, source = 'quoted') {
+        currentOrigin(ticket, url) {
+            const state = info(ticket);
+            if (!state?.bound) return;
+            for (const groupId of state.groupIds.filter(value => value === state.currentQuoteGroupId)) {
+                const group = groups.get(groupId);
+                if (!group || group.owner !== state.owner || group.sessionId !== state.sessionId
+                    || now() >= group.expiresAt) continue;
+                const entry = group.entries.find(value => value.url === url);
+                if (entry?.origin === 'bot-generated' && entry.originSessionId === state.sessionId) return 'bot-generated';
+            }
+        },
+        captureQuote(identity, attachments, source = 'quoted', refKey) {
             const images = attachments.filter(value => /^image(?:\/|$)/iu.test(value?.content_type ?? value?.contentType ?? '')
                 || /\.(?:png|jpe?g|webp|gif)$/iu.test(value?.filename ?? ''));
             if (!images.length) return;
             const values = images.map(attachment);
             const unique = values.every(Boolean) ? [...new Map(values.map(value => [value.url, value])).values()] : [];
+            // Only an exact confirmed outbound message match can establish authorship.
+            // Keep the quote's own URL grant; never borrow the generated byte grant.
+            const owner = ownerFor(identity);
+            const generated = source === 'quoted' && unique.length === 1 && messageKey(refKey)
+                ? [...groups.values()].find(group => group.owner === owner && group.source === 'generated'
+                    && group.messageKeys?.includes(refKey) && now() < group.expiresAt) : undefined;
+            if (generated) Object.assign(unique[0], { origin: 'bot-generated', originSessionId: generated.sessionId });
             return add(identity, source, unique, quotedTtlMs);
         },
         noteDirect(identity, expiresAt, onEvict, pinned) {
@@ -341,11 +363,12 @@ export function createImageSourceMiddleware({ appId, cache = imageSources } = {}
         if (!identity || ctx.signal?.aborted) return next();
         ctx.state ??= {};
         const quote = ctx.state?.quote;
+        let currentQuoteGroup;
         if (ctx.message.refMsgIdx && quote?.refKey === ctx.message.refMsgIdx && Array.isArray(quote.attachments)) {
-            cache.captureQuote(identity, quote.attachments);
+            currentQuoteGroup = cache.captureQuote(identity, quote.attachments, 'quoted', quote.refKey);
         }
         if (Array.isArray(ctx.message.attachments)) cache.captureQuote(identity, ctx.message.attachments, 'direct');
-        ctx.state.qqbotImageSources = cache.snapshot(identity);
+        ctx.state.qqbotImageSources = cache.snapshot(identity, { currentQuoteGroupId: currentQuoteGroup?.id });
         return next();
     };
 }

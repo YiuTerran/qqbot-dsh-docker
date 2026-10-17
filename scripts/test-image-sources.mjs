@@ -136,3 +136,36 @@ test('protocol-relative QQ URLs are normalized and duplicate quoted records rema
     const ticket = bound(cache);
     assert.equal(cache.listed(ticket).length, 1);
 });
+
+
+test('quoted provenance requires an exact acknowledged message in the same owner/session and never changes byte grants', async () => {
+    let now = 0;
+    const cache = createImageSourceCache({ now: () => now, generatedTtlMs: 100, cleanup: false });
+    const receipt = cache.publish(bound(cache), bytes, 'session-a', 'ROBOT.ACK+/=', 'REFIDX_different+/=');
+    const middleware = createImageSourceMiddleware({ appId: owner.appId, cache });
+    function quote(refKey, identity = owner, attachments = [attachment], session = 'session-a') {
+        const ctx = { message: { kind: 'group', senderId: identity.ownerId, groupOpenid: identity.peerId, refMsgIdx: refKey },
+            state: { quote: { refKey, attachments } } };
+        middleware(ctx, () => {});
+        assert.equal(cache.bind(ctx.state.qqbotImageSources, identity, session), true);
+        return ctx.state.qqbotImageSources;
+    }
+    const current = quote('REFIDX_different+/=');
+    assert.equal(cache.currentOrigin(current, attachment.url), 'bot-generated');
+    const ref = cache.listed(current).find(row => row.source === 'quoted');
+    assert.equal(ref.origin, 'bot-generated');
+    assert.notEqual(ref.handle, receipt.editableHandle);
+    let loads = 0;
+    await cache.read(current, ref.handle, async () => { loads++; return bytes; });
+    assert.equal(loads, 1, 'a quote retains its own authorized download even when matching a generated output');
+    assert.equal(cache.currentOrigin(quote('another-message'), attachment.url), undefined,
+        'an identical attachment URL in an unrelated quote cannot inherit historical provenance');
+    assert.equal(cache.currentOrigin(quote('ROBOT.ACK+/=', { ...owner, ownerId: 'bob' }), attachment.url), undefined);
+    assert.equal(cache.currentOrigin(quote('ROBOT.ACK+/=', owner, [attachment], 'new-session'), attachment.url), undefined);
+    assert.equal(cache.currentOrigin(quote('ROBOT.ACK+/=', owner, [attachment, { ...attachment, url: 'https://example.test/other.png' }]), attachment.url), undefined);
+    now = 101;
+    assert.equal(cache.currentOrigin(quote('ROBOT.ACK+/='), attachment.url), undefined);
+    cache.clearPeer(owner);
+    assert.equal(cache.currentOrigin(quote('ROBOT.ACK+/='), attachment.url), undefined);
+    assert.ok(!JSON.stringify(cache.listed(bound(cache))).includes('ROBOT.ACK'));
+});

@@ -166,7 +166,7 @@ function senderHarness() {
         sender: {
             async sendImage(request, bytes) {
                 imageSends.push({ request, bytes: Buffer.from(bytes) });
-                return { sent: true };
+                return { sent: true, messageId: `native-image-${imageSends.length}` };
             },
             async sendNotice(request, text) {
                 notices.push({ request, text });
@@ -176,7 +176,7 @@ function senderHarness() {
     };
 }
 
-const { imageSources } = await import(pathToFileURL(join(defaultsDir, 'qqbot-image-sources.mjs')).href);
+const { imageSources, createImageSourceMiddleware } = await import(pathToFileURL(join(defaultsDir, 'qqbot-image-sources.mjs')).href);
 const { loadChatImageBytes } = await import(pathToFileURL(join(defaultsDir, 'qqbot-chat-policy.mjs')).href);
 const identity = { appId: APP_ID, scope: 'group', peerId: 'group-1', ownerId: 'owner-1' };
 function sourceRequest(options = {}) {
@@ -230,6 +230,7 @@ test('native generation -> next-turn vision -> editing uses exactly the generate
     meta = generationRequestMetadata(turn.generationScope)[0];
     assert.equal(meta.recentImages[0].editableHandle, originalHandle);
     assert.equal(meta.recentImages[0].defaultSource, true);
+    assert.equal(meta.recentImages[0].origin, 'bot-generated');
     const oldRef = meta.recentImages[0].imageRef;
     const vision = await executeLook(ctx, { image: oldRef, prompt: 'Describe.' }, agent, 'look-generated');
     assert.equal(vision.isError, false, JSON.stringify(vision));
@@ -249,6 +250,18 @@ test('native generation -> next-turn vision -> editing uses exactly the generate
         await finishTurn(agent, turn.documentScope, turn.generationScope);
     }
     assert.equal(sends.imageSends.length, 3);
+    const quoted = { url: IMAGE_URL, contentType: 'image/png', filename: 'original.png' };
+    const incoming = { message: { kind: 'group', senderId: identity.ownerId, groupOpenid: identity.peerId,
+        refMsgIdx: 'native-image-1' }, state: { quote: { refKey: 'native-image-1', attachments: [quoted] } } };
+    createImageSourceMiddleware({ appId: APP_ID })(incoming, () => {});
+    turn = startTurn(agent, [{ ...sourceRequest({ text: 'Is this your generated image?', quoted: [quoted] }),
+        imageSourceTicket: incoming.state.qqbotImageSources }]);
+    meta = generationRequestMetadata(turn.generationScope)[0];
+    assert.equal(meta.images[0].quoted, true);
+    assert.equal(meta.images[0].origin, 'bot-generated', 'current quote carries verified origin through real request binding');
+    assert.equal(meta.recentImages.length, 0, 'provenance cannot restore historical grants over the current quote');
+    assert.ok(!JSON.stringify(meta).includes('native-image-1'), 'raw QQ acknowledgement remains private');
+    await finishTurn(agent, turn.documentScope, turn.generationScope);
 });
 
 test('quoted sources stay lazy and can be analyzed then edited in a later request; mixed authors and document mode cannot borrow them', async t => {

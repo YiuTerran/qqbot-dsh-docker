@@ -136,6 +136,16 @@ test('native QQ chain keeps image-only messages lazy and analyzes recent images 
                     assert.ok(scope?.active, 'the real inbound handler opens a generation scope');
                     const request = [...scope.requests.values()][0];
                     assert.ok(request, 'the prompt is preserved as an original generation request');
+                    assert.ok(request.imageSourceTicket, 'the native middleware captures and binds this original request source ticket');
+                    const restoreContext = runtime.systemPrompt.suppressRuntimeContext();
+                    const assembly = await runtime.systemPrompt.assemble({ agent });
+                    restoreContext();
+                    const imageContext = assembly.contexts.find(item => item.name === 'qqbot:image-sources');
+                    assert.ok(imageContext, 'required image source context survives optional context suppression');
+                    const currentSources = JSON.parse(imageContext.text.split('\n').at(-1));
+                    assert.equal(currentSources.requests[0].requestId, request.requestId);
+                    assert.equal(currentSources.requests[0].recentImages.length, expected.recentCount);
+
                     assert.equal(request.ownerId, expected.user);
                     assert.equal(request.replyTarget.msgId, expected.promptId);
                     assert.equal(request.text, expected.text);

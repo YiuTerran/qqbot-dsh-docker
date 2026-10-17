@@ -920,7 +920,7 @@ async function performImageTask({ scope, request, args, exec, service, quota, se
         if (sent?.sent) {
             if (!assertActive()) return result('expired');
             const editable = request.imageSourceTicket
-                ? imageSources.publish(request.imageSourceTicket, generated, request.sessionId) : undefined;
+                ? imageSources.publish(request.imageSourceTicket, generated, request.sessionId, sent.messageId, sent.referenceId) : undefined;
             return result('sent', notices.sent, editable ?? (request.imageSourceTicket
                 ? { reason: 'source-cache-unavailable' } : {}));
         }

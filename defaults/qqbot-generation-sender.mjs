@@ -534,7 +534,7 @@ export function createGenerationSender({
                 Buffer.byteLength(upload.file_info, 'utf8') > MAX_QQ_RESPONSE_BYTES) {
                 throw senderError();
             }
-            await media.sendMediaMessage(
+            const acknowledgement = await media.sendMediaMessage(
                 target.scope,
                 target.targetId,
                 upload.file_info,
@@ -542,7 +542,9 @@ export function createGenerationSender({
                 { msgId: target.msgId },
             );
             if (!isActive(request, target, kind, operationSignal)) return { sent: false, reason: 'expired' };
-            return { sent: true };
+            return { sent: true, ...(kind === 'image' ? { messageId: acknowledgement.id,
+                ...(typeof acknowledgement.ext_info?.ref_idx === 'string'
+                    ? { referenceId: acknowledgement.ext_info.ref_idx } : {}) } : {}) };
         });
     }
 

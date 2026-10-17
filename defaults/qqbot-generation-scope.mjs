@@ -264,7 +264,10 @@ export function beginGenerationTurn(agent, originalRequests, downloadedFiles, op
                     maxBytes: file ? undefined : quoteMaxBytes,
                 });
                 imageAttachments.set(imageAttachmentId, grant);
-                request.images.push({ imageAttachmentId, filename: grant.filename, quoted });
+                const origin = quoted && request.imageSourceTicket
+                    ? imageSources.currentOrigin(request.imageSourceTicket, attachment.url) : undefined;
+                request.images.push({ imageAttachmentId, filename: grant.filename, quoted,
+                    ...(origin ? { origin } : {}) });
             }
         }
         const currentOrQuotedMayBeImage = [source?.currentAttachments, source?.quotedAttachments]
@@ -309,7 +312,7 @@ export function beginGenerationTurn(agent, originalRequests, downloadedFiles, op
                     filename: candidate.filename, contentType: 'image', size: null, maxBytes: recentImageMaxBytes });
                 recentImageAttachments.set(imageAttachmentId, grant);
                 request.recentImages.push({ imageAttachmentId, filename: candidate.filename,
-                    source: candidate.source, sourceGroup: candidate.sourceGroup, defaultSource: candidate.defaultSource,
+                    source: candidate.source, ...(candidate.origin ? { origin: candidate.origin } : {}), sourceGroup: candidate.sourceGroup, defaultSource: candidate.defaultSource,
                     createdAt: candidate.createdAt,
                     ...(candidate.source === 'generated' ? { editableHandle: candidate.handle } : {}),
                     expiresAt: candidate.expiresAt, imageRef: imageReference(requestId, imageAttachmentId) });
@@ -474,6 +477,8 @@ export function renderCurrentImageSources(agent) {
         + 'from the latest associated group, unless the user explicitly selects another listed candidate. '
         + 'If multiple candidates in that group are ambiguous, ask first. If no default remains, '
         + 'do not guess another image. Receipt editableHandle is an identity, not a tool argument or authorization. '
+        + 'origin=bot-generated identifies a retained generated output or a quote matched to its confirmed QQ send receipt; '
+        + 'you may acknowledge that provenance. Missing origin means unknown, not user-created. '
         + 'Each operation still requires the matched original user request. Ordinary chat does not authorize analysis or editing.]\n'
         + JSON.stringify({ requests });
 }

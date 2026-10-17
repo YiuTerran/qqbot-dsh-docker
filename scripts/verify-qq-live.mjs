@@ -38,7 +38,7 @@ export class QQBot extends sdk.QQBot {
     this.use(async (ctx, next) => {
       const message = ctx.message;
       record('qq.inbound', { scope: message.kind, messageHash: hash(message.messageId),
-        senderHash: hash(message.senderId), text: String(message.content ?? '').slice(0, 4000),
+        senderHash: hash(message.senderId), quoteHash: hash(message.refMsgIdx), text: String(message.content ?? '').slice(0, 4000),
         attachmentCount: message.attachments?.length ?? 0 });
       if (globalThis.__qqbotLiveQuoteFixture && message.kind === 'c2c'
         && message.content?.trim() === '发送引用测试图'
@@ -84,6 +84,7 @@ globalThis.fetch = async (input, init) => {
                 messageType: payload?.msg_type, text: String(payload?.markdown?.content ?? payload?.content ?? '').slice(0, 6000),
                 media: Boolean(payload?.media), fileType: payload?.file_type };
             void response.clone().json().then(body => record('qq.response', { ...fields,
+                outgoingHash: hash(body.id ?? body.data?.id), referenceHash: hash(body.ext_info?.ref_idx), responseFields: Object.keys(body).filter(key => /^[a-z_]{1,40}$/iu.test(key)),
                 acknowledged: response.ok && Boolean(body.id ?? body.file_info ?? body.data?.id ?? body.data?.file_info), code: body.code }))
                 .catch(() => record('qq.response', { ...fields, acknowledged: false }));
         }
@@ -108,8 +109,8 @@ boot.ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
     try {
         const sourceContext = assembly.contexts.find(item => item.name === 'qqbot:image-sources');
         const sources = JSON.parse(sourceContext?.text.split('\n').at(-1));
-        imageSources = sources.requests.map(row => ({ current: row.images.length,
-            candidates: row.recentImages.map(image => ({ source: image.source ?? 'direct', defaultSource: image.defaultSource === true })) }));
+        imageSources = sources.requests.map(row => ({ current: row.images.length, currentOrigins: row.images.map(image => image.origin ?? 'unknown'),
+            candidates: row.recentImages.map(image => ({ source: image.source ?? 'direct', origin: image.origin ?? 'unknown', defaultSource: image.defaultSource === true })) }));
     } catch { /* Missing source context stays explicit in this diagnostic. */ }
     record('model.assembly', { agentHash: hash(context.agent?.id), tools: assembly.tools.map(tool => tool.name), snapshot, imageSources });
     return assembly;

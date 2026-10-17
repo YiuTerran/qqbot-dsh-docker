@@ -2906,6 +2906,11 @@ if (durableResetPosition < 0
     throw new Error('Chat-only patch: strict session reset atomic commit ordering is incomplete');
 }
 
+assertOnce(patchedMiddlewareSetup, "import { createImageSourceMiddleware } from '/opt/qqbot-defaults/qqbot-image-sources.mjs';", 'image source middleware import');
+assertOnce(finalManager, "import { imageSources } from '/opt/qqbot-defaults/qqbot-image-sources.mjs';", 'image source reset import');
+assertOnce(finalOutbound, "import { redactImageSourceHandles } from '/opt/qqbot-defaults/qqbot-image-sources.mjs';", 'image source redaction import');
+assertOnce(finalOutboundBuffer, "import { createImageSourceRedactor, redactImageSourceHandles } from '/opt/qqbot-defaults/qqbot-image-sources.mjs';", 'streaming image source redaction import');
+assertOnce(finalOutboundBuffer, 'chunkMarkdownText(redactImageSourceHandles(this.buffer), this.limit)', 'static buffer image source redaction');
 assertOnce(patchedMiddlewareSetup, 'bot.use(createImageSourceMiddleware({ appId: config.appId }));', 'request image source capture');
 assertOnce(finalOutbound, 'text = redactImageSourceHandles(text);', 'static image source handle redaction');
 assertOnce(finalOutboundBuffer, 'this.sourceRedactor.push(text)', 'streaming image source handle redaction');

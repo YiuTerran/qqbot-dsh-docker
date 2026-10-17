@@ -150,7 +150,7 @@ function makeSdkHarness({
         const path = new URL(String(url)).pathname;
         const value = path.endsWith('/files')
             ? { file_uuid: 'fixture-file-uuid', file_info: 'fixture-file-info', ttl: 60 }
-            : { id: 'fixture-ack-id' };
+            : { id: 'fixture-ack-id', ext_info: { ref_idx: 'REFIDX_fixture+/' } };
         return new Response(JSON.stringify(value), { status: 200, headers: { 'content-type': 'application/json' } });
     });
     class MediaApi {
@@ -811,7 +811,7 @@ test('QQ sender uses only the fixed upload/message routes, original reply target
     const harness = makeSdkHarness();
     const result = await harness.sender.sendImage(harness.request, png, new AbortController().signal);
 
-    assert.deepEqual(result, { sent: true });
+    assert.deepEqual(result, { sent: true, messageId: 'fixture-ack-id', referenceId: 'REFIDX_fixture+/' });
     assert.equal(harness.requests.length, 2);
     assert.deepEqual(harness.requests.map((request) => new URL(request.url).pathname), [
         '/v2/groups/group-original/files', '/v2/groups/group-original/messages',
@@ -835,7 +835,7 @@ test('QQ sender preserves visible punctuation in opaque msgId for image and Mark
     const msgId = 'ROBOT1.0.AB+/cd==';
     harness.request.replyTarget.msgId = msgId;
 
-    assert.deepEqual(await harness.sender.sendImage(harness.request, png, new AbortController().signal), { sent: true });
+    assert.deepEqual(await harness.sender.sendImage(harness.request, png, new AbortController().signal), { sent: true, messageId: 'fixture-ack-id', referenceId: 'REFIDX_fixture+/' });
     assert.deepEqual(await harness.sender.sendMarkdownFile(
         harness.request, Buffer.from('# Whale edit result\n', 'utf8'), 'result.md', new AbortController().signal,
     ), { sent: true });
@@ -878,7 +878,7 @@ test('QQ sender serializes attachment delivery with an ordinary reply on the sam
     const resultPromise = harness.sender.sendImage(harness.request, png, new AbortController().signal);
     let requestCountAtOrdinarySend = -1;
     const ordinaryPromise = harness.enqueueSend(async () => { requestCountAtOrdinarySend = harness.requests.length; });
-    assert.deepEqual(await resultPromise, { sent: true });
+    assert.deepEqual(await resultPromise, { sent: true, messageId: 'fixture-ack-id', referenceId: 'REFIDX_fixture+/' });
     await ordinaryPromise;
     assert.equal(requestCountAtOrdinarySend, 2, 'the ordinary reply starts after upload and attachment send finish');
     assert.equal(harness.requests.length, 2, 'ordinary queue entries do not become extra generation HTTP requests');

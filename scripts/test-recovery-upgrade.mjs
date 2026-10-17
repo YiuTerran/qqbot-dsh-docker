@@ -484,6 +484,7 @@ integration('v0.18.1 adapter gains image sources and reset/redaction guards with
 });
 
 for (const [file, snippet] of [
+    ['session/session-manager.js', "import { imageSources } from '/opt/qqbot-defaults/qqbot-image-sources.mjs';"],
     ['gateway/middleware-setup.js', '    bot.use(createImageSourceMiddleware({ appId: config.appId }));'],
     ['transport/outbound.js', '        text = redactImageSourceHandles(text);'],
     ['transport/outbound-buffer.js', '        this.writer?.append(this.sourceRedactor.push(text));'],
