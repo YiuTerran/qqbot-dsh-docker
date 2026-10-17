@@ -116,14 +116,14 @@ mkdir -p /tmp/qqbot-image-probe
 docker run --rm --entrypoint node --env-file .env \
   --mount "type=bind,src=$PWD/scripts/verify-image-route.mjs,dst=/tmp/verify-image-route.mjs,readonly" \
   --mount type=bind,src=/tmp/qqbot-image-probe,dst=/probe-output \
-  tryao/qqbot-dsh:v0.18.0 /tmp/verify-image-route.mjs /probe-output
+  tryao/qqbot-dsh:v0.18.1 /tmp/verify-image-route.mjs /probe-output
 ```
 
 探测会发起真实图片服务请求并消耗服务额度；不会发送真实 QQ 消息或修改生产额度。真实 QQ 图片和文件投递仍需用机器人账号验证。
 
 ## 升级、回滚与备份
 
-持久化状态位于 `dsh-qqbot-data` 和 `dsh-qqbot-workspace` 命名卷。**操作员在升级前停止机器人并备份两个卷及部署配置**；升级使用明确版本标签，继续挂载相同的卷。本文源码对应 dsh `0.2.1-rc.2`、QQ 插件 `0.5.2` 和 SDK `1.0.5`，对应本次 `v0.18.0` 镜像。
+持久化状态位于 `dsh-qqbot-data` 和 `dsh-qqbot-workspace` 命名卷。**操作员在升级前停止机器人并备份两个卷及部署配置**；升级使用明确版本标签，继续挂载相同的卷。本文源码对应 dsh `0.2.1-rc.2`、QQ 插件 `0.5.2` 和 SDK `1.0.5`，对应本次 `v0.18.1` 镜像。
 
 启动器识别由本项目管理的 `0.5.0` 或 `0.5.2` QQ profile，使用镜像内置依赖离线迁移到 `0.5.2`，不在启动时联网安装。只替换 `node_modules`、`package.json` 的托管依赖版本、`pnpm-lock.yaml` 和 `pnpm-workspace.yaml`；用户的 `cordis.patch.yml`、AGENTS、人设、模型偏好、会话、媒体和额度数据继续保留。配置关闭、凭据选择及模型路由沿用现有环境变量；新版本的账户登录、持久凭据、扫码管理界面和原生 Search/Fetch API 不会自动启用。
 
