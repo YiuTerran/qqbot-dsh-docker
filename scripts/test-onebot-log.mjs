@@ -60,8 +60,8 @@ function accepted() {
     });
 }
 
-async function waitFor(predicate, messageText = 'condition not reached') {
-    const end = Date.now() + 3000;
+async function waitFor(predicate, messageText = 'condition not reached', timeoutMs = 3000) {
+    const end = Date.now() + timeoutMs;
     while (Date.now() < end) {
         if (await predicate()) return;
         await new Promise((resolve) => setTimeout(resolve, 10));
@@ -264,6 +264,9 @@ test('invalid optional display metadata in a persisted queue is discarded withou
         assert.ok(posted, `invalid-display queue did not post: ${JSON.stringify(service.diagnostics())}`);
         assert.equal(posted.text, event.text);
         assert.equal(Object.hasOwn(posted, 'display'), false);
+        // The send callback precedes ACK handling and its atomic queue write.
+        await waitFor(async () => JSON.parse(await readFile(filePath, 'utf8')).pending.length === 0,
+            'invalid-display queue ACK was not persisted');
         const state = JSON.parse(await readFile(filePath, 'utf8'));
         assert.equal(state.pending.length, 0);
     }
@@ -416,6 +419,9 @@ test('large raw messages stop at the serialized state byte limit', async () => {
         assert.equal(stored.gaps.length, 1);
         assert.equal(service.diagnostics().initError, false);
         service.setBackends(groupBackend);
+        // This checks byte bounds and ordering, not the production barrier deadline.
+        await waitFor(() => service.diagnostics().pending === 0 && service.diagnostics().gaps === 0,
+            'large log queue did not drain', 60000);
         assert.equal(await service.barrier({ backendId, groupKey: `${appId}:group-a`, timeoutMs: 60000 }), true);
         assert.deepEqual(posted, [...Array(acceptedCount).fill('message'), 'gap']);
     }

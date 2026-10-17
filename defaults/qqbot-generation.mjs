@@ -449,7 +449,16 @@ function parseGeminiImageResponse(body) {
     const parts = candidate?.content?.parts;
     if (!Array.isArray(parts)) throw new Error('provider-response');
     const imagePart = parts.find((part) => part && typeof part === 'object' && !Array.isArray(part)
-        && part.thought !== true && Object.hasOwn(part, 'inlineData'));
+        && part.thought !== true && (Object.hasOwn(part, 'inlineData') || Object.hasOwn(part, 'fileData')));
+    if (imagePart && !Object.hasOwn(imagePart, 'inlineData')) {
+        const file = imagePart.fileData;
+        if (!file || typeof file !== 'object' || Array.isArray(file)
+            || !['image/png', 'image/jpeg'].includes(file.mimeType)
+            || typeof file.fileUri !== 'string') throw new Error('provider-response');
+        const url = safePublicHttpsUrl(file.fileUri);
+        if (!url) throw new Error('provider-response');
+        return { url: url.href, mimeType: file.mimeType };
+    }
     const inlineData = imagePart?.inlineData;
     if (!inlineData || typeof inlineData !== 'object' || Array.isArray(inlineData)
         || typeof inlineData.data !== 'string' || typeof inlineData.mimeType !== 'string'
@@ -602,7 +611,9 @@ export function createImageService({ route, transport, resolvePublic, fetchImpl 
                 }
                 result = downloaded.body;
             }
-            if (signal?.aborted || (typeof assertActive === 'function' && assertActive() !== true) || !inspectImage(result)) throw new Error('provider-image');
+            const resultMime = inspectImage(result);
+            if (signal?.aborted || (typeof assertActive === 'function' && assertActive() !== true)
+                || !resultMime || (parsed.mimeType && parsed.mimeType !== resultMime)) throw new Error('provider-image');
             return Buffer.from(result);
         },
     });

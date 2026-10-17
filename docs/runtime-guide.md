@@ -25,6 +25,8 @@ IMAGE_API_BASE_URL=https://sub.callai.one/v1beta
 IMAGE_MODEL=<中转站提供的模型名称>
 ```
 
+Gemini 生图响应支持 `inlineData` 图片数据和 `fileData.fileUri` HTTPS 图片地址；不会从响应正文中的 Markdown 链接提取图片。地址型结果复用受限下载链路，不向图片站点转发生图密钥，并校验公网 DNS、同源重定向、10 MiB 上限及 PNG/JPEG 内容。若日志提示域名解析到非公网地址，需检查部署环境的 DNS／Fake-IP 配置。
+
 生图／改图工具会向 LLM 返回结构化 `status` 和固定 `notice`：`sent` 表示 QQ 发送已确认，`failed` 表示操作失败，`timeout` 表示超时，`unknown` 表示投递确认未知；其他状态说明额度、格式、过期或并发限制。模型按回执说明结果，不自动重试或重复发送；回执不证明用户已阅读。QQ 直接投递图片，工具回执不会额外刷成状态消息。
 
 ## 互动澄清
@@ -112,7 +114,7 @@ mkdir -p /tmp/qqbot-image-probe
 docker run --rm --entrypoint node --env-file .env \
   --mount "type=bind,src=$PWD/scripts/verify-image-route.mjs,dst=/tmp/verify-image-route.mjs,readonly" \
   --mount type=bind,src=/tmp/qqbot-image-probe,dst=/probe-output \
-  tryao/qqbot-dsh:v0.16.0 /tmp/verify-image-route.mjs /probe-output
+  tryao/qqbot-dsh:v0.16.1 /tmp/verify-image-route.mjs /probe-output
 ```
 
 探测会发起真实图片服务请求并消耗服务额度；不会发送真实 QQ 消息或修改生产额度。真实 QQ 图片和文件投递仍需用机器人账号验证。

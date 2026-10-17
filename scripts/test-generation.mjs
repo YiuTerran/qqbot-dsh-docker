@@ -520,6 +520,69 @@ test('Gemini response selects the first non-thought image from the first candida
     assert.deepEqual(await service.generate({ prompt: 'Return the first image.' }), png);
 });
 
+test('Gemini fileData images use the bounded download route without forwarding API credentials', async () => {
+    const requests = [];
+    const imageUrl = 'https://cdn.example.test/generated.jpg?signature=fixture';
+    const service = createImageService({ route: route('gemini'), transport: async (request) => {
+        requests.push(request);
+        if (request.method === 'POST') return responseGemini(png, 'image/png', {
+            candidates: [{ finishReason: 'STOP', content: { parts: [
+                { thought: true, fileData: { mimeType: 'image/jpeg', fileUri: 'https://cdn.example.test/thought.jpg' } },
+                { fileData: { mimeType: 'image/jpeg', fileUri: imageUrl }, thoughtSignature: 'ignored' },
+                { text: '![image](https://untrusted.example.test/ignored.jpg)' },
+            ] } }],
+        });
+        assert.equal(requestUrl(request), imageUrl);
+        assert.equal(header(request.headers, 'x-goog-api-key'), undefined);
+        assert.equal(header(request.headers, 'authorization'), undefined);
+        assert.equal(request.maxResponseBytes, 10 * 1024 * 1024);
+        assert.equal(request.maxRedirects, 3);
+        assert.equal(request.sameOrigin, true);
+        return { status: 200, headers: new Headers({ 'content-type': 'image/jpeg' }), body: jpeg };
+    } });
+    assert.deepEqual(await service.generate({ prompt: 'Draw a whale.' }), jpeg);
+    assert.equal(requests.length, 2);
+});
+
+test('Gemini fileData rejects malformed, blocked, thought-only and unsafe image references before download', async () => {
+    const filePart = { fileData: { mimeType: 'image/png', fileUri: 'https://cdn.example.test/image.png' } };
+    const invalidParts = [
+        { fileData: null },
+        { fileData: { mimeType: 'text/plain', fileUri: filePart.fileData.fileUri } },
+        { fileData: { mimeType: 'image/png', fileUri: 123 } },
+        ...['http://cdn.example.test/image.png', 'file:///tmp/image.png', 'https://user:secret@cdn.example.test/image.png']
+            .map((fileUri) => ({ fileData: { mimeType: 'image/png', fileUri } })),
+        { ...filePart, thought: true },
+        { ...filePart, inlineData: null },
+    ];
+    const payloads = [
+        ...invalidParts.map((part) => ({ candidates: [{ content: { parts: [part] } }] })),
+        { promptFeedback: { blockReason: 'SAFETY' }, candidates: [{ content: { parts: [filePart] } }] },
+        { candidates: [{ finishReason: 'SAFETY', content: { parts: [filePart] } }] },
+    ];
+    for (const payload of payloads) {
+        let calls = 0;
+        const service = createImageService({ route: route('gemini'), transport: async () => {
+            calls += 1;
+            return { status: 200, body: Buffer.from(JSON.stringify(payload)) };
+        } });
+        await assert.rejects(service.generate({ prompt: 'Reject invalid files.' }), { message: 'provider-response' });
+        assert.equal(calls, 1);
+    }
+});
+
+test('Gemini fileData validates downloaded image bytes against the declared MIME', async () => {
+    for (const body of [png, Buffer.from('not an image')]) {
+        const service = createImageService({ route: route('gemini'), transport: async (request) => request.method === 'POST'
+            ? { status: 200, body: Buffer.from(JSON.stringify({ candidates: [{ content: { parts: [
+                { fileData: { mimeType: 'image/jpeg', fileUri: 'https://cdn.example.test/image.jpg' } },
+            ] } }] })) }
+            : { status: 200, headers: new Headers({ 'content-type': 'image/jpeg' }), body },
+        });
+        await assert.rejects(service.generate({ prompt: 'Reject mismatched files.' }), { message: 'provider-image' });
+    }
+});
+
 test('Gemini fails closed for blocked, text-only, wrong-MIME, malformed, and oversized results', async () => {
     const imagePart = { inlineData: { mimeType: 'image/png', data: png.toString('base64') } };
     const cases = [
