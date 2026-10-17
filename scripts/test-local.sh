@@ -1046,6 +1046,7 @@ docker create \
         QQBOT_CAPABILITY_ROOT=/opt/qqbot-defaults node --test /repo/scripts/test-capabilities.mjs
         node --test /repo/scripts/test-capabilities-provider.mjs
         QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /repo/scripts/test-compaction-native.mjs
+        node --test /repo/scripts/test-vision-response.mjs
         node /tmp/test-profile-boot.mjs
         QQBOT_TEST_ONEBOT_FIXTURE=true QQBOT_APPID=123456789 node /tmp/test-profile-boot.mjs
     '

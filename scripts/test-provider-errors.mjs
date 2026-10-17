@@ -75,6 +75,7 @@ test('native stable codes receive category-specific fixed notices without raw er
         AUTH: 'auth', MISSING_CREDENTIAL: 'auth', INVALID_CREDENTIAL: 'auth',
         RATE_LIMIT: 'rate-limit', SERVER: 'server', TIMEOUT: 'timeout', TRANSPORT: 'network',
         CONTEXT_WINDOW_EXCEEDED: 'context', EMPTY_RESPONSE: 'empty',
+        VISION_OUTPUT_LIMIT: 'output-limit', VISION_EMPTY_RESPONSE: 'empty',
         NO_ADAPTER: 'config', NO_PROVIDER: 'config', NO_MODEL: 'config',
         INVALID_REQUEST: 'invalid', UNKNOWN: 'generic',
     };

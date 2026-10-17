@@ -7,6 +7,7 @@ const STABLE_CATEGORIES = new Map([
     ['AUTH', 'auth'], ['MISSING_CREDENTIAL', 'auth'], ['INVALID_CREDENTIAL', 'auth'],
     ['RATE_LIMIT', 'rate-limit'], ['SERVER', 'server'], ['TIMEOUT', 'timeout'],
     ['TRANSPORT', 'network'], ['CONTEXT_WINDOW_EXCEEDED', 'context'],
+    ['VISION_OUTPUT_LIMIT', 'output-limit'], ['VISION_EMPTY_RESPONSE', 'empty'],
     ['EMPTY_RESPONSE', 'empty'], ['NO_ADAPTER', 'config'], ['NO_PROVIDER', 'config'],
     ['NO_MODEL', 'config'], ['INVALID_REQUEST', 'invalid'],
 ]);
@@ -126,6 +127,7 @@ const NOTICES = Object.freeze({
     timeout: '主人，模型服务这次等得有点久，本鱼没能及时收到回复，稍后再试吧。',
     network: '主人，本鱼暂时连不上模型服务啦，稍后再试；一直这样的话，麻烦管理员检查一下网络。',
     context: '主人，这段对话有点太长啦，可以发一下 `/new` 开个新对话，记得补上需要的背景。',
+    'output-limit': '主人，视觉模型这次达到输出上限，没能完成分析；图片已读取，不代表引用图片缺失。请重新提出更具体的问题。',
     empty: '主人，模型服务这次没有送来完整回复，本鱼没接住，稍后再试吧。',
     config: '主人，当前模型或接口好像还没配置好，麻烦联系管理员检查一下。',
     invalid: '主人，模型服务没能接受这次请求，麻烦联系管理员检查模型和接口配置。',

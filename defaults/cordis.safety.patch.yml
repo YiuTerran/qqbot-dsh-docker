@@ -422,7 +422,7 @@
       provider: !!js "process.env.QQBOT_VISION_PROVIDER || (process.env.LLM_API_KEY ? process.env.LLM_PROVIDER : 'deepseek-official')"
       model: !!js "process.env.QQBOT_VISION_MODEL || (process.env.LLM_API_KEY ? process.env.LLM_MODEL : 'deepseek-flash')"
       maxBytes: 10485760
-      maxTokens: 1024
+      maxTokens: 4096
       timeoutMs: 120000
     sendFile:
       restrictPaths: true

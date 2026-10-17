@@ -2492,8 +2492,28 @@ await patch('media/vision-tool.js', memoryVisionImageMarker, (content, file) => 
     return replaceOne(content, nativeAttachmentSave, scopedSave, file);
 });
 
+await patch('media/vision-tool.js', '// Chat-only complete vision response v1.', (content, file) => {
+    const helper = "import { readVisionResponse } from '/opt/qqbot-defaults/qqbot-vision-response.mjs';";
+    if (!content.includes(helper)) content = helper + '\n' + content;
+    const original = [
+        '    const text = assembler.blocks()',
+        "        .filter((block) => block.type === 'text')",
+        '        .map((block) => block.text)',
+        "        .join(' ')",
+        '        .trim();',
+        '    if (text.length === 0)',
+        "        throw new Error('qqbot_describe_image: vision model returned no text');",
+        '    return text;',
+    ].join('\n');
+    return replaceOne(content, original, '    // Chat-only complete vision response v1.\n    return readVisionResponse(assembler, imageRef);', file);
+});
+
 const visionPath = join(root, 'media/vision-tool.js');
 const patchedVision = updates.get(visionPath) ?? await readFile(visionPath, 'utf8');
+if (patchedVision.split('// Chat-only complete vision response v1.').length !== 2
+    || !patchedVision.includes('return readVisionResponse(assembler, imageRef);')) {
+    throw new Error('Chat-only patch: complete vision response handling is missing');
+}
 if (patchedVision.split(imageToolPolicyImport).length !== 2
     || patchedVision.split(`import { withMemoryVisionImage } from '${memoryImagesPolicy}';`).length !== 2
     || patchedVision.split(imageLoaderV3Marker).length !== 2

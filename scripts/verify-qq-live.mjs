@@ -18,11 +18,14 @@ writeFileSync(output, '', { mode: 0o600 });
 const record = (type, detail = {}) => appendFileSync(output, `${redact({ at: new Date().toISOString(), type, ...detail })}\n`);
 globalThis.__qqbotLiveRecord = record;
 globalThis.__qqbotLiveHash = hash;
+// Explicit test-only fixture; never loaded by the production entrypoint.
+globalThis.__qqbotLiveQuoteFixture = process.argv.includes('--quote-fixture');
 
 const sdkRoot = '/data/profiles/qqbot/node_modules/@tencent-connect/qqbot-nodejs/dist';
 const wrapper = `/tmp/qqbot-live-sdk-${process.pid}.mjs`;
 await writeFile(wrapper, `
 import * as sdk from '${sdkRoot}/index.js';
+import { readFile } from 'node:fs/promises';
 export * from '${sdkRoot}/index.js';
 export class QQBot extends sdk.QQBot {
   constructor(options) {
@@ -37,6 +40,15 @@ export class QQBot extends sdk.QQBot {
       record('qq.inbound', { scope: message.kind, messageHash: hash(message.messageId),
         senderHash: hash(message.senderId), text: String(message.content ?? '').slice(0, 4000),
         attachmentCount: message.attachments?.length ?? 0 });
+      if (globalThis.__qqbotLiveQuoteFixture && message.kind === 'c2c'
+        && message.content?.trim() === '发送引用测试图'
+        && message.raw?.id === message.messageId && message.raw?.author?.user_openid === message.senderId) {
+        const result = await this.sendImage({ scope: 'c2c', targetId: message.senderId, msgId: message.messageId },
+          { buffer: await readFile('/opt/qqbot-assets/dayu/portrait.png') },
+          { content: '引用测试图。素材作者 YunYueSama；来源及许可：https://github.com/YiuTerran/qqbot-dsh-docker/blob/v0.18.0/assets/dayu/ASSET_LICENSE.md' });
+        record('qq.quote-fixture', { acknowledged: Boolean(result.message?.id) });
+        return;
+      }
       return next();
     });
   }
