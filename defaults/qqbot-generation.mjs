@@ -1073,7 +1073,7 @@ function markdownToolSchema() {
         type: 'object',
         properties: {
             requestId: { type: 'string', minLength: 1, maxLength: 64, description: 'Opaque requestId from the original QQ message metadata.' },
-            filename: { type: 'string', minLength: 1, maxLength: 512 },
+            filename: { type: 'string', minLength: 1, maxLength: 512, description: 'Attachment filename ending in .md. Use the user-specified or clarification-selected document title verbatim as its stem, unless the user separately specifies a filename. Chinese filenames are supported; do not translate or replace the chosen title.' },
             content: { type: 'string', minLength: 1, maxLength: MAX_MARKDOWN_BYTES },
         },
         required: ['requestId', 'filename', 'content'],

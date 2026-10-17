@@ -51,6 +51,7 @@ previous_stock_agents_v0_14_2_fixture="${repo_root}/scripts/fixtures/agents-v0.1
 previous_stock_agents_v0_15_0_fixture="${repo_root}/scripts/fixtures/agents-v0.15.0-stock.md"
 previous_stock_agents_v0_16_0_fixture="${repo_root}/scripts/fixtures/agents-v0.16.0-stock.md"
 legacy_stock_agents_fixtures=(
+    "${repo_root}/scripts/fixtures/agents-v0.17.0-stock.md"
     "${repo_root}/scripts/fixtures/agents-v0.16.1-stock.md"
     "${repo_root}/scripts/fixtures/agents-legacy-v0.3.0-stock.md"
     "${repo_root}/scripts/fixtures/agents-legacy-v0.3.1-stock.md"
@@ -78,6 +79,7 @@ legacy_stock_agents_fixtures=(
     "${repo_root}/scripts/fixtures/agents-v0.16.0-stock.md"
 )
 legacy_stock_agents_hashes=(
+    1331ab3c6a3430a764f663f4bb82c19e42f80d647c639ceaf3a8db1bd05c856e
     af89bfbe1b1892d0d082fdf7de011fd63f41e38e80e76bec713896148dabd252
     c249259a60d4b04c9c9c3df1a92977adf748ba4143a3639c3e85a006ad802ef5
     9101cd863b9973e3ce7210e3d2f4e17fa23d8238564d463c18207fcf1622688d

@@ -172,14 +172,16 @@ function renderQuestion(question, requireMention, buttonsAvailable = true) {
     return lines.join('\n');
 }
 
-function questionKeyboard(question, token, ownerId) {
+function questionKeyboard(question, token) {
     if (question.multiSelect || !question.options?.length) return undefined;
     const buttons = question.options.map((option, index) => ({
         id: `q-${token.slice(0, 16)}-${index}`,
         render_data: { label: buttonLabel(option.label), visited_label: '✓ 已选', style: 1 },
         action: {
             type: 1,
-            permission: { type: 0, specify_user_ids: [ownerId] },
+            // QQ v2 OpenIDs are not keyboard platform user IDs. The callback
+            // authenticates the original owner, chat and one-time question token.
+            permission: { type: 2 },
             data: JSON.stringify({ t: 'question', q: question.id, token, i: index }),
             unsupport_tips: '请回复题号和选项编号',
         },
@@ -547,7 +549,7 @@ export class QuestionChannel {
         const question = entry.questions[entry.index];
         if (!question) return this.finish(entry, 'failed');
         const token = entry.token;
-        const keyboard = questionKeyboard(question, token, entry.source.ownerId);
+        const keyboard = questionKeyboard(question, token);
         const content = renderQuestion(question, entry.record.scope === 'group');
         let result;
         try {

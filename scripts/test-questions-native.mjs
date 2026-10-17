@@ -42,7 +42,7 @@ const { beginMergeBatch, closeMergeBatch, bindMergeBatchQuestionReply, noteMerge
 const logger = { info() {}, warn() {}, debug() {}, error() {} };
 const appId = '123456789';
 
-function questionKeyboard(ownerId = 'owner-a') {
+function questionKeyboard() {
     return {
         content: {
             rows: [{
@@ -51,7 +51,7 @@ function questionKeyboard(ownerId = 'owner-a') {
                     render_data: { label: 'A', visited_label: 'A', style: 0 },
                     action: {
                         type: 1,
-                        permission: { type: 0, specify_user_ids: [ownerId] },
+                        permission: { type: 2 },
                         data: JSON.stringify({ t: 'question', q: 'pick', token: 'opaque-token-a', i: 0 }),
                         unsupport_tips: '请回复选项文字',
                     },
@@ -137,7 +137,7 @@ async function waitFor(predicate, label) {
     }
 }
 
-test('pinned QQ MessageApi sends one owner-bound question keyboard and returns only its ACK', async () => {
+test('pinned QQ MessageApi sends a v2-compatible callback keyboard and returns only its ACK', async () => {
     const harness = makeSender({ fetchImpl: async () => ack() });
     assert.equal(typeof MessageApi, 'function', 'test imports the pinned QQ SDK MessageApi');
     const result = await harness.sender.sendQuestionMarkdown(
@@ -153,7 +153,7 @@ test('pinned QQ MessageApi sends one owner-bound question keyboard and returns o
     assert.deepEqual(body.markdown, { content: '请选择一个选项。' });
     assert.equal(body.msg_id, 'message-a');
     assert.deepEqual(body.keyboard.content.rows[0].buttons[0].action.permission,
-        { type: 0, specify_user_ids: ['owner-a'] });
+        { type: 2 });
     const limiterRecords = harness.limiterEvents.filter(([kind]) => kind === 'record');
     assert.deepEqual(limiterRecords, [['record', 'message-a']], 'one acknowledged message records the original reply limit once');
     assert.ok(harness.limiterEvents.filter(([kind]) => kind === 'check')
@@ -332,7 +332,7 @@ test('pinned UserQuestionService and native Tools runtime deliver a real bound q
     assert.match(fetchRequests[0].body.markdown.content, /Question one/u);
     assert.match(fetchRequests[0].body.markdown.content, /1\. A[\s\S]*2\. B/u, 'option order is retained in the rendered question');
     assert.deepEqual(fetchRequests[0].body.keyboard.content.rows[0].buttons[0].action.permission,
-        { type: 0, specify_user_ids: ['owner-a'] });
+        { type: 2 });
     await dispatchGroupText(qqBot, makeRawGroupEvent({ id: 'foreign-question-text', senderId: 'foreign-member', text: '2', mention: true }));
     assert.equal(channel.pending.size, 1, 'a same-group member cannot answer the original owner\'s question');
     assert.equal(modelMessages.length, 1, 'foreign ordinary chat continues through the native QQ middleware chain');
@@ -355,17 +355,23 @@ test('pinned UserQuestionService and native Tools runtime deliver a real bound q
     await waitFor(() => fetchRequests.length >= 2, 'the sequential native question send');
     assert.equal(fetchRequests.length, 2);
     assert.equal(fetchRequests[1].body.msg_id, 'raw-owner-answer', 'the accepted raw QQ message becomes the next reply credential');
-    assert.equal(fetchRequests[1].body.keyboard.content.rows[0].buttons[0].action.permission.specify_user_ids[0], 'owner-a');
+    assert.deepEqual(fetchRequests[1].body.keyboard.content.rows[0].buttons[0].action.permission, { type: 2 });
     const secondButton = JSON.parse(fetchRequests[1].body.keyboard.content.rows[0].buttons[0].action.data);
     const interaction = {
         id: 'interaction-2', scene: 'group', chat_type: 1, group_openid: 'group-a',
         group_member_openid: 'owner-a', data: { resolved: { button_data: JSON.stringify(secondButton) } },
     };
+    for (const foreign of [{ ...interaction, id: 'foreign-button-user', group_member_openid: 'foreign-member' },
+        { ...interaction, id: 'foreign-button-chat', group_openid: 'other-group' }]) {
+        const dispatched = dispatchEvent('INTERACTION_CREATE', foreign, appId, logger);
+        await qqBot.emit('interaction', { bot: qqBot, event: dispatched.event, state: {} }, dispatched.event);
+    }
+    assert.equal(channel.pending.size, 1, 'platform-clickable buttons still reject another sender or chat');
     const dispatchedInteraction = dispatchEvent('INTERACTION_CREATE', interaction, appId, logger);
     assert.equal(dispatchedInteraction.action, 'interaction');
     assert.equal(dispatchedInteraction.event, interaction);
     await qqBot.emit('interaction', { bot: qqBot, event: dispatchedInteraction.event, state: {} }, dispatchedInteraction.event);
-    assert.deepEqual(interactions, [true], 'the pinned dispatcher and QQBot callback deliver the raw owner button');
+    assert.deepEqual(interactions, [false, false, true], 'the pinned dispatcher and QQBot callback deliver the raw owner button');
     assert.deepEqual(toolValue(await resultPromise), { status: 'answered', answers: [
         { id: 'pick', selected: ['B'] }, { id: 'next', selected: ['X'] },
     ] });

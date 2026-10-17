@@ -48,7 +48,7 @@ registerHooks({ resolve(specifier, context, next) {
 const originalFetch = globalThis.fetch;
 globalThis.fetch = async (input, init) => {
     const url = new URL(typeof input === 'string' || input instanceof URL ? input : input.url);
-    const operation = url.hostname === 'api.bot.qq.com' && url.pathname.match(/^\/v2\/(users|groups)\/[^/]+\/(messages|files)$/u);
+    const operation = ['api.bot.qq.com', 'api.sgroup.qq.com'].includes(url.hostname) && url.pathname.match(/^\/v2\/(users|groups)\/[^/]+\/(messages|files)$/u);
     let payload;
     if (operation && typeof init?.body === 'string') {
         try { payload = JSON.parse(init.body); } catch { /* Never log unparsed bodies. */ }
@@ -85,10 +85,10 @@ boot.ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
     return assembly;
 });
 boot.ctx.on('tools/execute', async (exec, next) => {
-    record('tool.start', { name: exec.name });
+    record('tool.start', { name: exec.name, ...(exec.name === 'qqbot_create_markdown' ? { filename: exec.arguments?.filename, heading: exec.arguments?.content?.split('\n').find(line => /^# /u.test(line)) } : {}) });
     try {
         const result = await next();
-        record('tool.result', { name: exec.name, isError: result?.isError === true, status: result?.value?.status });
+        record('tool.result', { name: exec.name, isError: result?.isError === true, status: result?.value?.status, ...(exec.name === 'ask_user_question' ? { answers: result?.value?.answers } : {}), ...(exec.name === 'qqbot_create_markdown' ? { filename: result?.value?.filename } : {}) });
         return result;
     } catch (error) { record('tool.error', { name: exec.name, errorType: error?.name }); throw error; }
 });

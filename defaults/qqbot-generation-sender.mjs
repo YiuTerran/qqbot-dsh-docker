@@ -138,7 +138,7 @@ function validateRawMessageBody(body, msgId, expectedContent) {
     return true;
 }
 
-function validateQuestionMessageBody(body, target, ownerId, expectedContent) {
+function validateQuestionMessageBody(body, target, expectedContent) {
     const credentialKey = target.msgId ? 'msg_id' : 'event_id';
     const credential = target.msgId ?? target.eventId;
     if (!exactKeys(body, ['msg_type', 'markdown', credentialKey], ['keyboard', 'msg_seq'])
@@ -160,11 +160,8 @@ function validateQuestionMessageBody(body, target, ownerId, expectedContent) {
         && typeof button.render_data.visited_label === 'string' && Number.isSafeInteger(button.render_data.style)
         && exactKeys(button.action, ['type', 'permission', 'data', 'unsupport_tips'])
         && button.action.type === 1
-        && exactKeys(button.action.permission, ['type', 'specify_user_ids'])
-        && button.action.permission.type === 0
-        && Array.isArray(button.action.permission.specify_user_ids)
-        && button.action.permission.specify_user_ids.length === 1
-        && button.action.permission.specify_user_ids[0] === ownerId
+        && exactKeys(button.action.permission, ['type'])
+        && button.action.permission.type === 2
         && typeof button.action.data === 'string' && button.action.data.length > 0 && button.action.data.length <= 256
         && typeof button.action.unsupport_tips === 'string' && button.action.unsupport_tips.length > 0
         && button.action.unsupport_tips.length <= 60);
@@ -339,7 +336,7 @@ export function createGenerationSender({
                 const validBody = upload
                     ? validateUploadBody(body, kind === 'image' ? 1 : 4, kind)
                     : kind === 'question'
-                        ? validateQuestionMessageBody(body, target, request.ownerId, expectedRawContent)
+                        ? validateQuestionMessageBody(body, target, expectedRawContent)
                     : expectedRawContent === undefined
                         ? validateMediaMessageBody(body, target.msgId)
                         : validateRawMessageBody(body, target.msgId, expectedRawContent);
