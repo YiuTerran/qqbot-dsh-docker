@@ -18,6 +18,7 @@ import { recoverQuotedImageAttachments } from '/opt/qqbot-defaults/qqbot-quote-i
 import { beginGenerationTurn, endGenerationTurn, getGenerationTurn, generationRequestMetadata } from '/opt/qqbot-defaults/qqbot-generation-scope.mjs';
 import { resolveTextDocumentType, decodeTextDocumentBytes, isBinaryDocumentBytes } from '/opt/qqbot-defaults/qqbot-text-documents.mjs';
 import { DAYU_ASSET_ROOT, isDayuAssetImagePath, isSafeBundledImagePath, loadDayuAssetImage } from '/opt/qqbot-defaults/qqbot-assets.mjs';
+import { beginOnebotTurn, endOnebotTurn, blockOnebotRequest, onebotRequestMetadata } from '/opt/qqbot-defaults/qqbot-onebot-scope.mjs';
 
 const dshRoot = '/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/';
 // The profile plugin is deliberately installed without its peer dependencies.
@@ -37,6 +38,7 @@ const { default: WebRuntime } = await import(`${dshRoot}dsh-web/lib/index.js`);
 const { applyWebFetchTool, applyWebSearchTool } = await import(`${dshRoot}dsh-tool-web/lib/index.js`);
 const { DeepSeekSearchProvider } = await import(`${dshRoot}dsh-web-search-deepseek/lib/index.js`);
 const adapter = '/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/';
+const { statusCommand } = await import(`${adapter}commands/status.js`);
 const { registerDescribeImageTool } = await import(`${adapter}media/vision-tool.js`);
 const { MEDIA_ROOT, cleanupExpiredMedia } = await import(`${adapter}media/media-cleaner.js`);
 const { handleInbound } = await import(`${adapter}transport/inbound.js`);
@@ -2003,4 +2005,65 @@ test('current QQ image downloader validates bytes, bounds, redirects, and quoted
     }, async () => {});
     assert.deepEqual(mergedState.downloadedGenerationQuoteFiles, [], 'merged quote metadata also stays lazy');
     assert.equal(requestCount, beforeQuote);
+});
+
+test('native assembly and status share capabilities while concurrent requests retain independent authorization', async (t) => {
+    const ctx = new Context();
+    t.after(() => ctx.fiber.dispose());
+    await ctx.plugin(SystemPrompt, {});
+    await ctx.plugin(ToolRuntime, { mode: 'native' });
+    await ctx.plugin(WebRuntime, { fetchProvider: 'qqbot-pages' });
+    let capabilities;
+    await ctx.plugin({ inject: ['tools', 'web', 'systemPrompt'], apply(child) { capabilities = installChatPolicy(child); } });
+    let enabled = false;
+    capabilities.setOnebotProvider(() => enabled ? {
+        configured: 'enabled', reason: 'ready', available: true, registered: true, verifiedAt: Date.now(),
+        bridge: { readiness: 'ready', checkedAt: Date.now() }, mcp: { readiness: 'ready', checkedAt: Date.now() },
+        backends: [{ id: 'sealdice', ready: true, supported: true, capabilities: [] }],
+    } : { configured: 'disabled', reason: 'config-disabled' });
+    let calls = 0;
+    ctx.tools.register({ name: 'qqbot_onebot_command', description: 'test', parameters: { type: 'object' },
+        output: { schema: { type: 'object' }, render: () => [] }, execute() { calls++; return {}; } });
+    const a = {};
+    const b = {};
+    const snapshotOf = (assembly) => JSON.parse(assembly.contexts.find((entry) => entry.name === 'qqbot:capabilities').text.split('\n').at(-1));
+    let assembly = await ctx.systemPrompt.assemble({ agent: a });
+    assert.equal(snapshotOf(assembly).capabilities.onebot.reason, 'config-disabled');
+    enabled = true;
+    assembly = await ctx.systemPrompt.assemble({ agent: a });
+    assert.equal(snapshotOf(assembly).capabilities.onebot.reason, 'turn-not-authorized', 'mid-turn recovery must not mint credentials');
+    beginDocumentTurn(a, { content: '.userid' });
+    const doc = getDocumentTurn(a);
+    const turn = beginOnebotTurn(a, [
+        { ownerId: 'owner', text: '.userid', replyTarget: { scope: 'c2c', targetId: 'owner', msgId: 'm1' } },
+        { ownerId: 'other', text: '.r', replyTarget: { scope: 'group', targetId: 'group', msgId: 'm2' } },
+    ], { appId: '123', documentScope: doc });
+    t.after(async () => { await endOnebotTurn(a, turn); endDocumentTurn(a, doc); });
+    const [forA, forB] = await Promise.all([ctx.systemPrompt.assemble({ agent: a }), ctx.systemPrompt.assemble({ agent: b })]);
+    assert.equal(snapshotOf(forA).capabilities.onebot.toolAvailable, true);
+    assert.equal(snapshotOf(forB).capabilities.onebot.toolAvailable, false);
+    blockOnebotRequest(turn, onebotRequestMetadata(turn)[0].requestId);
+    assert.equal(snapshotOf(await ctx.systemPrompt.assemble({ agent: a })).capabilities.onebot.toolAvailable, true,
+        'one blocked batch member does not revoke another original');
+    blockOnebotRequest(turn, onebotRequestMetadata(turn)[1].requestId);
+    assert.equal(snapshotOf(await ctx.systemPrompt.assemble({ agent: a })).capabilities.onebot.toolAvailable, false);
+    doc.documentMode = true;
+    assert.equal(snapshotOf(await ctx.systemPrompt.assemble({ agent: a })).capabilities.onebot.reason, 'document-protection');
+    const manager = {
+        getStatus: () => ({ active: false }),
+        getOrCreate() { throw new Error('status must not create a session'); },
+        qqbotCapabilitySnapshot: () => capabilities.getSnapshot({ toolSchemas: ctx.tools.schemas(), requestContext: { view: 'deployment' } }).snapshot,
+    };
+    const command = statusCommand({ manager });
+    const cmdCtx = { message: { kind: 'c2c', senderId: 'owner' } };
+    const text = command.handler(cmdCtx);
+    assert.match(text, /当前无活跃会话/u);
+    assert.match(text, /部署能力/u);
+    assert.match(text, /OneBot: 可调用/u);
+    assert.equal(manager.qqbotCapabilitySnapshot().capabilities.onebot.readiness, snapshotOf(forA).capabilities.onebot.readiness);
+    manager.getStatus = () => ({ active: true, sessionId: 'session-123', model: 'model', provider: 'provider', messageCount: 2, lastActivity: Date.now() });
+    assert.match(command.handler(cmdCtx), /消息数: 2/u);
+    enabled = false;
+    assert.match(command.handler(cmdCtx), /OneBot: 未启用/u);
+    assert.equal(calls, 0);
 });

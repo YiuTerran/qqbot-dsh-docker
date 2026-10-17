@@ -296,6 +296,17 @@ try {
   const registryNames = tools.schemas().map((tool) => tool.name).sort();
   const assembly = await systemPrompt.assemble();
   const modelNames = assembly.tools.map((tool) => tool.name).sort();
+  const capabilityContext = assembly.contexts.filter((entry) => entry.name === 'qqbot:capabilities');
+  assert.equal(capabilityContext.length, 1, 'each model assembly must have exactly one current capability snapshot');
+  const capabilitySnapshot = JSON.parse(capabilityContext[0].text.split('\n').at(-1));
+  const { CAPABILITY_TOOLS } = await import('/opt/qqbot-defaults/qqbot-capabilities.mjs');
+  for (const [id, name] of Object.entries(CAPABILITY_TOOLS)) {
+    assert.equal(capabilitySnapshot.capabilities[id].toolAvailable, modelNames.includes(name), `${id} capability disagrees with the actual model tools`);
+  }
+  if (!onebotProbeEnabled) assert.equal(capabilitySnapshot.capabilities.onebot.reason, 'config-disabled');
+  for (const secret of [process.env.QQBOT_ONEBOT_MCP_TOKEN, process.env.QQBOT_ONEBOT_INTERNAL_TOKEN, process.env.IMAGE_API_KEY]) {
+    if (secret) assert.ok(!capabilityContext[0].text.includes(secret), 'capability context leaked a credential');
+  }
   assert.equal(registryNames.includes('qqbot_generate_image'), expectedImageEnabled, 'image generation registration does not match the dedicated image route');
   assert.equal(registryNames.includes('qqbot_create_markdown'), expectedMarkdownEnabled, 'Markdown export registration does not match QQBOT_MARKDOWN_ENABLED');
   assert.ok(registryNames.includes('qqbot_send_asset_image'), 'original setting images must be sendable without image API configuration');

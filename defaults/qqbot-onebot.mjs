@@ -4,6 +4,7 @@ import { dirname } from 'node:path';
 import { logToolFailure } from './qqbot-provider-errors.mjs';
 import { inspectSeaDiceCommand, readOnebotMasterUsers, SEALDICE_TOOL_GUIDANCE } from './qqbot-sealdice-policy.mjs';
 import { createOnebotLogCapture } from './qqbot-onebot-log.mjs';
+import { ONEBOT_CAPABILITIES, onebotRuntimeStatus } from './qqbot-capabilities.mjs';
 import {
     bindOnebotExecution,
     getBoundOnebotRequest,
@@ -1113,6 +1114,7 @@ async function executeCommand(args, exec, runtime) {
     if (source.onebotDirectFallback) {
         return safeToolResult('failed', [], 'This original QQ message is a direct-command fallback; explain its error without running another OneBot command.');
     }
+    if (!runtime.isAvailable()) return safeToolResult('failed', [], 'The OneBot backend state is unavailable or stale.', undefined, 'backend_not_ready');
     const initialLogFailure = logCommandFailure(policy, source, args.backend, runtime, scope);
     if (initialLogFailure) {
         logToolFailure(ONEBOT_COMMAND_TOOL, 'authorize', { kind: 'failed', code: initialLogFailure });
@@ -1141,7 +1143,7 @@ async function executeCommand(args, exec, runtime) {
         }
         const queuedLogFailure = logCommandFailure(policy, source, args.backend, runtime, scope);
         if (queuedLogFailure) return logCommandFailureResult(queuedLogFailure);
-        if (!runtime.readyBackends.has(args.backend)) return safeToolResult('failed', [], 'The selected OneBot backend is unavailable.');
+        if (!runtime.isAvailable() || !runtime.readyBackends.has(args.backend)) return safeToolResult('failed', [], 'The selected OneBot backend is unavailable.');
         const queuedGroupStateFailure = policy?.kind === 'log' ? undefined
             : groupStateFailure(policy, source, args.backend, runtime.groupRoleBackends, scope);
         if (queuedGroupStateFailure) {
@@ -1201,7 +1203,7 @@ async function executeCommand(args, exec, runtime) {
                 if (source.audience === 'group' && source.groupRole !== 'unknown'
                     && runtime.groupRoleBackends.has(args.backend)) callArgs.group_role = source.groupRole;
                 result = await runtime.session.callWs(callArgs, signal, async () => {
-                    if (onebotExecutionFailure(exec) || signal.aborted || !runtime.readyBackends.has(args.backend)) return false;
+                    if (onebotExecutionFailure(exec) || signal.aborted || !runtime.isAvailable() || !runtime.readyBackends.has(args.backend)) return false;
                     const dispatchLogFailure = logCommandFailure(policy, source, args.backend, runtime, scope);
                     if (dispatchLogFailure) {
                         preDispatchGroupStateFailure = dispatchLogFailure;
@@ -1363,10 +1365,34 @@ export function registerOnebotCommandTool(ctx, options = {}) {
         lastProbeErrorKey: undefined,
         refreshController: new AbortController(),
         refreshTask: undefined,
+        verifiedAt: undefined,
+        bridgeProbe: undefined,
+        mcpProbe: undefined,
+        backendObservations: [],
+        bridgeCapabilities: [],
         inFlightByBackend: new Map(),
         onAvailability: typeof options.onAvailability === 'function' ? options.onAvailability : () => {},
         fetchImpl: options.fetchImpl ?? globalThis.fetch,
     };
+    const clock = options.now ?? Date.now;
+    const capabilityState = () => ({
+        configured: config.invalid ? 'invalid' : config.enabled ? 'enabled' : 'disabled',
+        registered: runtime.registered,
+        available: runtime.available,
+        reason: runtime.reason ?? 'probe-pending',
+        verifiedAt: runtime.verifiedAt,
+        bridge: runtime.bridgeProbe,
+        mcp: runtime.mcpProbe,
+        bridgeCapabilities: [...runtime.bridgeCapabilities],
+        logEnabled: config.logEnabled === true,
+        managementConfigured: !config.masterConfigInvalid && (config.masterUsers?.length ?? 0) > 0,
+        backends: (config.backendIds ?? []).map((id) => {
+            const backend = runtime.backendObservations.find((item) => item.id === id);
+            return { id, ready: backend?.ready === true, supported: backend?.supported === true,
+                capabilities: [...(backend?.capabilities ?? [])] };
+        }),
+    });
+    runtime.isAvailable = () => onebotRuntimeStatus(capabilityState(), clock()).toolAvailable;
     runtime.execute = async (args, exec) => directExecutionResult(await executeCommand(args, exec, runtime), exec);
     const updateAvailability = (available, reason, backendCount = runtime.readyBackends.size) => {
         const nextAvailable = available === true && runtime.registered;
@@ -1384,7 +1410,7 @@ export function registerOnebotCommandTool(ctx, options = {}) {
         enabled: config.enabled,
         readyBackendCount: runtime.readyBackends.size,
         registered: runtime.registered,
-        toolAvailable: runtime.available,
+        toolAvailable: runtime.isAvailable(),
         reason: runtime.reason ?? 'probe-pending',
         hiddenEnabled: config.hiddenEnabled,
         proactivePermission: 'unsupported-by-platform',
@@ -1401,6 +1427,7 @@ export function registerOnebotCommandTool(ctx, options = {}) {
             },
             stop() {},
             diagnostics,
+            capabilityState,
         });
     }
     if (config.masterConfigInvalid) console.warn('[qqbot-onebot] master-config-invalid; management commands disabled');
@@ -1418,6 +1445,7 @@ export function registerOnebotCommandTool(ctx, options = {}) {
             },
             stop() {},
             diagnostics,
+            capabilityState,
         });
     }
     runtime.options.appId = options.appId ?? '';
@@ -1466,6 +1494,7 @@ export function registerOnebotCommandTool(ctx, options = {}) {
             },
             stop() {},
             diagnostics,
+            capabilityState,
         });
     }
 
@@ -1522,15 +1551,38 @@ export function registerOnebotCommandTool(ctx, options = {}) {
         if (runtime.refreshTask) return runtime.refreshTask;
         runtime.refreshTask = (async () => {
             try {
-                const [result, tools] = await Promise.all([
+                const [backendProbe, toolProbe] = await Promise.allSettled([
                     internalRequest(config, '/internal/backends', {
                         fetchImpl: runtime.fetchImpl,
                         signal: runtime.refreshController.signal,
                         timeoutMs: 2500,
+                    }).then((value) => {
+                        if (!Array.isArray(value?.backends)
+                            || new Set(value.backends.map((backend) => backend?.id)).size !== value.backends.length) {
+                            throw new Error('The OneBot backend catalog is invalid.');
+                        }
+                        return value;
                     }),
                     runtime.session.listTools(runtime.refreshController.signal),
                 ]);
                 if (runtime.stopped) return false;
+                const checkedAt = clock();
+                runtime.bridgeProbe = { readiness: backendProbe.status === 'fulfilled' ? 'ready' : 'unknown', checkedAt };
+                runtime.mcpProbe = { readiness: toolProbe.status === 'fulfilled'
+                    ? toolProbe.value.some((tool) => tool?.name === 'call_ws') ? 'ready' : 'not_ready' : 'unknown', checkedAt };
+                if (backendProbe.status === 'fulfilled') {
+                    const value = backendProbe.value;
+                    runtime.bridgeCapabilities = ONEBOT_CAPABILITIES.filter((name) => Array.isArray(value?.capabilities) && value.capabilities.includes(name));
+                    runtime.backendObservations = (Array.isArray(value?.backends) ? value.backends : [])
+                        .filter((backend) => config.backendIds.includes(backend?.id))
+                        .map((backend) => ({ id: backend.id, ready: backend.ready === true, supported: backend.version === 1,
+                            capabilities: ONEBOT_CAPABILITIES.filter((name) => Array.isArray(backend.capabilities) && backend.capabilities.includes(name)) }));
+                }
+                if (backendProbe.status === 'rejected') throw backendProbe.reason;
+                if (toolProbe.status === 'rejected') throw toolProbe.reason;
+                const result = backendProbe.value;
+                const tools = toolProbe.value;
+                runtime.verifiedAt = checkedAt;
                 runtime.lastProbeErrorKey = undefined;
                 const listedBackends = Array.isArray(result?.backends) ? result.backends : [];
                 runtime.logCaptureBackends = new Set(listedBackends
@@ -1600,6 +1652,7 @@ export function registerOnebotCommandTool(ctx, options = {}) {
         refresh,
         stop,
         diagnostics,
+        capabilityState,
         execute: runtime.execute,
         runtime,
         captureRaw(ctx) { return runtime.logCapture.captureRaw(ctx); },

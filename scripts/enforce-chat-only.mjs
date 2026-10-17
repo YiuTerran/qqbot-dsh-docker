@@ -2491,6 +2491,33 @@ if (patchedVision.split(imageToolPolicyImport).length !== 2
 // Validate the final staged text on every run, including volumes where a
 // marker already existed. This catches partial or manually altered patches
 // before any file is written.
+// Run after the historical migrations so both stock and persisted adapters
+// receive the same gateway-owned capability source.
+await patch('gateway/bootstrap.js', '// Chat-only capability registry v1.', (content, file) => {
+    content = replaceOne(content, '    installChatPolicy(ctx);',
+        '    // Chat-only capability registry v1.\n    const capabilities = installChatPolicy(ctx);', file);
+    content = replaceOne(content, '    const capabilities = installChatPolicy(ctx);',
+        "    const capabilities = installChatPolicy(ctx);\n    capabilities.setConfigured('vision', config.vision.enabled ? 'enabled' : 'disabled');\n    capabilities.setConfigured('questions', 'enabled');\n    capabilities.setConfigured('asset_images', 'enabled');", file);
+    const manager = '    const manager = new SessionManager(ctx, agents, config, logger);';
+    content = replaceOne(content, manager, `${manager}\n    manager.qqbotCapabilities = capabilities;\n    manager.qqbotCapabilitySnapshot = () => capabilities.getSnapshot({\n        toolSchemas: ctx.get('tools')?.schemas() ?? [],\n        requestContext: { view: 'deployment' },\n    }).snapshot;`, file);
+    return replaceOne(content, '    detachOnebotDeliveryObserver = attachOnebotDeliveryObserver(bot, onebotService);',
+        '    capabilities.setOnebotProvider(() => onebotService.capabilityState());\n    detachOnebotDeliveryObserver = attachOnebotDeliveryObserver(bot, onebotService);', file);
+});
+
+await patch('transport/inbound.js', '// Chat-only capability admission v1.', (content, file) => {
+    return replaceOne(content, '        const onebotToolAvailable = isOnebotToolAvailable();',
+        '        // Chat-only capability admission v1.\n        const onebotToolAvailable = manager.qqbotCapabilities?.isOnebotAvailable() ?? isOnebotToolAvailable();', file);
+});
+
+await patch('commands/status.js', '// Chat-only capability status v1.', (content, file) => {
+    content = `import { createCapabilityRegistry, renderCapabilityStatus } from '/opt/qqbot-defaults/qqbot-capabilities.mjs';\n${content}`;
+    content = replaceOne(content, '            const { scope, peerId } = getScopePeer(cmdCtx);',
+        `            // Chat-only capability status v1.\n            const snapshot = manager.qqbotCapabilitySnapshot?.() ?? createCapabilityRegistry().getSnapshot({ requestContext: { view: 'deployment' } }).snapshot;\n            const capabilityText = renderCapabilityStatus(snapshot);\n            const { scope, peerId } = getScopePeer(cmdCtx);`, file);
+    content = replaceOne(content, "                return '当前无活跃会话';", "                return ['当前无活跃会话', capabilityText].join('\\n\\n');", file);
+    return replaceOne(content, '                `最后活动: ${formatRelativeTime(status.lastActivity)}`,',
+        '                `最后活动: ${formatRelativeTime(status.lastActivity)}`,\n                \'\',\n                capabilityText,', file);
+});
+
 async function finalText(file) {
     const filename = join(root, file);
     return updates.get(filename) ?? await readFile(filename, 'utf8');
@@ -2559,7 +2586,7 @@ assertOnce(finalInbound, 'await finishContentRiskRecovery(documentTurn);', 'inbo
 assertOnce(finalInbound, `import { beginOnebotTurn, endOnebotTurn, renderOnebotRequestMetadata } from '${onebotScopePolicy}';`, 'OneBot scope import');
 assertOnce(finalInbound, `import { setCurrentImages, clearCurrentImages, isOnebotToolAvailable } from '${policy}';`, 'OneBot availability import');
 assertOnce(finalInbound, '// Chat-only OneBot provenance v1.', 'OneBot provenance marker');
-assertOnce(finalInbound, 'const onebotToolAvailable = isOnebotToolAvailable();', 'single OneBot tool availability snapshot');
+assertOnce(finalInbound, 'const onebotToolAvailable = manager.qqbotCapabilities?.isOnebotAvailable() ?? isOnebotToolAvailable();', 'single OneBot tool availability snapshot');
 assertOnce(finalInbound, 'if (onebotToolAvailable) onebotTurn = beginOnebotTurn(', 'OneBot availability-gated turn binding');
 assertOnce(finalInbound, "const onebotMetadata = onebotTurn ? renderOnebotRequestMetadata(onebotTurn) : '';", 'OneBot request metadata');
 assertOnce(finalInbound, `import { renderCurrentLogSourceDiagnostics } from '${onebotScopePolicy}';`, 'current log diagnostic import');
@@ -2598,6 +2625,19 @@ if (historyGuardPosition > finalInbound.indexOf('const agentBody = assembleAgent
     throw new Error(`Chat-only patch: inbound recovery wiring is outside the safe turn lifecycle (history=${historyGuardPosition}/${historyFilterPosition}, idle=${inboundIdlePosition}, image=${inboundImageClearPosition}, end=${inboundDocumentEndPosition}, recovery=${inboundRecoveryFinishPosition}, close=${finalInbound.indexOf('await closeMergeBatch(replyBatch);')}, registration=${finalInbound.indexOf(recoveryInboundRegistration)}, binding=${finalInbound.indexOf('documentTurn = getDocumentTurn(chatOnlyAgent);')}, followup=${finalInbound.indexOf('chatOnlyAgent.followup(message);')})`);
 }
 const finalBootstrap = await finalText('gateway/bootstrap.js');
+assertOnce(finalBootstrap, 'const capabilities = installChatPolicy(ctx);', 'gateway capability registry');
+assertOnce(finalBootstrap, "capabilities.setConfigured('vision', config.vision.enabled ? 'enabled' : 'disabled');", 'vision capability configuration');
+assertOnce(finalBootstrap, "toolSchemas: ctx.get('tools')?.schemas() ?? [],", 'status effective tool schemas');
+assertOnce(finalBootstrap, "requestContext: { view: 'deployment' },", 'status deployment view');
+assertOnce(finalBootstrap, 'manager.qqbotCapabilities = capabilities;', 'gateway capability admission');
+assertOnce(finalBootstrap, 'manager.qqbotCapabilitySnapshot = () => capabilities.getSnapshot({', 'status capability source');
+assertOnce(finalBootstrap, 'capabilities.setOnebotProvider(() => onebotService.capabilityState());', 'OneBot capability provider');
+const finalStatus = await finalText('commands/status.js');
+assertOnce(finalStatus, '// Chat-only capability status v1.', 'status capability marker');
+assertOnce(finalStatus, 'const capabilityText = renderCapabilityStatus(snapshot);', 'status capability rendering');
+assertOnce(finalStatus, 'const snapshot = manager.qqbotCapabilitySnapshot?.() ??', 'status shared capability source');
+assertOnce(finalStatus, '                capabilityText,', 'active status capability output');
+assertOnce(finalStatus, "return ['当前无活跃会话', capabilityText].join('\\n\\n');", 'inactive status capability output');
 assertOnce(finalBootstrap, '// Chat-only merge batch reply adapter v1.', 'early merge sender adapter');
 assertOnce(finalBootstrap, 'setupMiddlewares(bot, config, manager, logger, sender, directRouter, onebotService);', 'merge sender, direct router, and log capture injection');
 assertOnce(finalBootstrap, '// Chat-only QQ delivery logging v1.', 'native QQ delivery logging hook');

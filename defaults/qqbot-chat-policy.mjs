@@ -1,4 +1,5 @@
 import { constants, lstatSync, realpathSync, statSync } from 'node:fs';
+import { createCapabilityRegistry, capabilityRuntimeContext } from './qqbot-capabilities.mjs';
 import { open } from 'node:fs/promises';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { imageDiagnosticsEnabled, logQuoteDiagnostics } from './qqbot-image-diagnostics.mjs';
@@ -36,6 +37,7 @@ import { ONEBOT_COMMAND_TOOL, validateOnebotCommand } from './qqbot-onebot.mjs';
 import { QQ_QUESTION_TOOL, validateQuestionToolCall } from './qqbot-questions.mjs';
 import {
     getBoundOnebotExecution,
+    getOnebotTurn,
     getOnebotRequestSignal,
     onebotExecutionFailure,
     runInOnebotExecution,
@@ -249,10 +251,10 @@ export function clearCurrentImages(agent, expectedTurn) {
     currentImageTurns.delete(agent);
 }
 
-export function denyUnsafeTool(exec) {
+export function denyUnsafeTool(exec, capabilities) {
     if (exec.name === QQ_QUESTION_TOOL) return validateQuestionToolCall(exec);
     if (exec.name === ONEBOT_COMMAND_TOOL) {
-        if (!onebotToolAvailable) return 'The optional OneBot command backend is unavailable.';
+        if (!(capabilities ? capabilities.isOnebotAvailable() : onebotToolAvailable)) return 'The optional OneBot command backend is unavailable.';
         const args = exec.arguments;
         if (!args || typeof args !== 'object' || Object.keys(args).length !== 3
             || typeof args.requestId !== 'string' || !/^[A-Za-z0-9_-]{16,64}$/u.test(args.requestId)
@@ -431,6 +433,10 @@ export async function loadChatImageBytes(image, maxBytes, exec, requestSignal) {
 export function installChatPolicy(ctx) {
     generationRoute = readImageRouteConfig();
     onebotToolAvailable = false;
+    const capabilities = createCapabilityRegistry();
+    capabilities.setConfigured('image_generation', generationRoute ? 'enabled' : 'disabled');
+    capabilities.setConfigured('markdown', process.env.QQBOT_MARKDOWN_ENABLED === 'false' ? 'disabled' : 'enabled');
+    capabilities.setConfigured('text_documents', 'enabled');
     const tools = ctx.get('tools');
     if (typeof tools?.guard !== 'function') {
         throw new Error('Chat-only policy requires the pinned dsh tools.guard API; refusing to start QQ.');
@@ -441,11 +447,11 @@ export function installChatPolicy(ctx) {
     registerReadDocumentTool(ctx);
     // Early denial prevents approval buttons from becoming an escape hatch.
     ctx.on('tools/pre-execute', async (exec, next) => {
-        const reason = denyUnsafeTool(exec);
+        const reason = denyUnsafeTool(exec, capabilities);
         return reason ? { kind: 'deny', reason } : next();
     });
     // The monotonic guard still denies if another pre-execute listener allows.
-    tools.guard(denyUnsafeTool);
+    tools.guard((exec) => denyUnsafeTool(exec, capabilities));
     // Capture the same native execution object at preparation and dispatch.
     // AsyncLocalStorage carries its immutable turn binding into the actual
     // provider request, even when different QQ conversations run concurrently.
@@ -454,7 +460,7 @@ export function installChatPolicy(ctx) {
             let result;
             if (exec.name === QQ_QUESTION_TOOL) {
                 result = await runInDocumentExecution(exec, async () => {
-                    const reason = denyUnsafeTool(exec);
+                    const reason = denyUnsafeTool(exec, capabilities);
                     if (reason) throw new Error(reason);
                     // The controlled channel combines all turn and execution
                     // signals and reports cancellation as a terminal result.
@@ -463,7 +469,7 @@ export function installChatPolicy(ctx) {
             }
             else if (exec.name === ONEBOT_COMMAND_TOOL) {
                 result = await runInOnebotExecution(exec, async () => {
-                    const reason = denyUnsafeTool(exec);
+                    const reason = denyUnsafeTool(exec, capabilities);
                     if (reason) throw new Error(reason);
                     const scope = getBoundOnebotExecution(exec);
                     const originalSignal = exec.signal;
@@ -482,7 +488,7 @@ export function installChatPolicy(ctx) {
             }
             else {
                 result = await runInDocumentExecution(exec, async () => {
-                    const reason = denyUnsafeTool(exec);
+                    const reason = denyUnsafeTool(exec, capabilities);
                     if (reason) throw new Error(reason);
                     const scope = getBoundDocumentExecution(exec);
                     const originalSignal = exec.signal;
@@ -543,10 +549,24 @@ export function installChatPolicy(ctx) {
         order: 10252,
         text: '本机固定提供 /opt/qqbot-assets/dayu/character-standard.png（六视图）和 portrait.png（正面立绘）。qqbot_describe_image 可读取两张图核对形象；qqbot_send_asset_image 可将完整原图作为文件发送给当前请求，优先用于用户索要设定图或原图的情形，不调用生图接口。只有用户明确要求创作新图时，才将 portrait.png 作为 qqbot_generate_image 的 referenceImage。不得把图片路径传给其他工具、读取其他文件或用素材替代用户要编辑的 QQ 原图。普通生图与 QQ 图片编辑继续按各自授权执行。',
     });
-    ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {
+    ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
         const assembly = await next();
-        return { ...assembly, tools: assembly.tools.filter((tool) => allowedTools.has(tool.name)
-            && (tool.name !== ONEBOT_COMMAND_TOOL || onebotToolAvailable)) };
+        const agent = context?.agent;
+        const turn = agent ? getOnebotTurn(agent) : undefined;
+        const onebotAuthorized = Boolean(turn?.active && !turn.externalSignal?.aborted
+            && (!turn.isCurrentRecord || turn.isCurrentRecord())
+            && [...turn.requests.keys()].some((id) => !turn.blockedRequests.has(id)));
+        const { tools: visibleTools, snapshot } = capabilities.getSnapshot({
+            toolSchemas: assembly.tools,
+            requestContext: {
+                view: agent ? 'request' : 'deployment',
+                onebotAuthorized,
+                documentMode: Boolean(agent && getDocumentTurn(agent)?.documentMode),
+            },
+        });
+        return { ...assembly, tools: visibleTools,
+            contexts: [...assembly.contexts.filter((item) => item.name !== 'qqbot:capabilities'), capabilityRuntimeContext(snapshot)] };
     });
     console.log('[im-qqbot] chat-only policy installed; turn-scoped images, web search, and bounded plain-text reading');
+    return capabilities;
 }

@@ -285,7 +285,7 @@ test('disabled registration makes no requests and produces no request metadata',
     assert.equal(requests, 0);
     assert.equal(registrations, 0);
     const inboundPatch = await readFile(patcherSource, 'utf8');
-    assert.match(inboundPatch, /const onebotToolAvailable = isOnebotToolAvailable\(\);/u);
+    assert.match(inboundPatch, /const onebotToolAvailable = manager\.qqbotCapabilities\?\.isOnebotAvailable\(\) \?\? isOnebotToolAvailable\(\);/u);
     assert.match(inboundPatch, /if \(onebotToolAvailable\) onebotTurn = beginOnebotTurn\(/u);
     assert.match(inboundPatch, /const onebotMetadata = onebotTurn \? renderOnebotRequestMetadata\(onebotTurn\) : '';/u);
     assert.match(inboundPatch, /renderCurrentLogSourceDiagnostics\(getMergedGenerationRequests\(ctx\), \{ appId: config\.appId, logger, toolAvailable: onebotToolAvailable \}\)/u);

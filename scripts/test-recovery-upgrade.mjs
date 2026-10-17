@@ -102,7 +102,7 @@ async function assertCurrentPatch(root) {
             "import { beginOnebotTurn, endOnebotTurn, renderOnebotRequestMetadata } from '/opt/qqbot-defaults/qqbot-onebot-scope.mjs';",
             "import { setCurrentImages, clearCurrentImages, isOnebotToolAvailable } from '/opt/qqbot-defaults/qqbot-chat-policy.mjs';",
             '// Chat-only OneBot provenance v1.',
-            'const onebotToolAvailable = isOnebotToolAvailable();',
+            'const onebotToolAvailable = manager.qqbotCapabilities?.isOnebotAvailable() ?? isOnebotToolAvailable();',
             'if (onebotToolAvailable) onebotTurn = beginOnebotTurn(',
             "const onebotMetadata = onebotTurn ? renderOnebotRequestMetadata(onebotTurn) : '';",
             "const currentLogDiagnosticMetadata = renderCurrentLogSourceDiagnostics(getMergedGenerationRequests(ctx), { appId: config.appId, logger, toolAvailable: onebotToolAvailable });",
@@ -250,10 +250,11 @@ async function downgradeVisionSchemaToV4(root) {
     await writeFile(path, vision);
 }
 
-for (const version of ['v0.12.4', 'pre-thinking', 'pre-concurrency', 'pre-recovery', 'recovery-v1', 'v0.14.2', 'onebot-v10.2', 'onebot-v11.2']) {
+for (const version of ['pre-capabilities', 'v0.12.4', 'pre-thinking', 'pre-concurrency', 'pre-recovery', 'recovery-v1', 'v0.14.2', 'onebot-v10.2', 'onebot-v11.2']) {
     integration(`${version} adapter upgrades completely and a second patch pass changes no file hashes`, async (t) => {
         const root = await isolatedAdapter(t);
-        if (version === 'v0.12.4') await run(concurrencyFixture, [root, 'mention-only']);
+        if (version === 'pre-capabilities') await run(concurrencyFixture, [root, 'capabilities-only']);
+        else if (version === 'v0.12.4') await run(concurrencyFixture, [root, 'mention-only']);
         else if (version === 'pre-thinking') await run(concurrencyFixture, [root, 'thinking-only']);
         else if (version === 'pre-concurrency') await run(concurrencyFixture, [root]);
         else if (version === 'v0.14.2') await run(concurrencyFixture, [root, 'timeout-status-only']);
@@ -450,4 +451,14 @@ integration('a marked but incomplete OneBot /new hook fails closed without chang
         return true;
     });
     assert.deepEqual(await hashes(root), before, 'strict rejection performs zero adapter writes');
+});
+
+integration('a partial capability provider fails validation without writing any adapter file', async (t) => {
+    const root = await isolatedAdapter(t);
+    const path = join(root, 'gateway/bootstrap.js');
+    const source = await readFile(path, 'utf8');
+    await writeFile(path, source.replace('    capabilities.setOnebotProvider(() => onebotService.capabilityState());\n', ''));
+    const before = await hashes(root);
+    await assert.rejects(run(enforcer, [root]), /OneBot capability provider/u);
+    assert.deepEqual(await hashes(root), before);
 });

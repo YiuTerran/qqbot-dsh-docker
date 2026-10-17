@@ -6,7 +6,7 @@ qq-bot 使用专用工具调用 Gensokyo-MCP；桥将请求变成虚拟 OneBot v
 
 两个 fork 固定为子模块：`third_party/gensokyo-mcp`、`third_party/sealdice-core`。初始化使用 `git submodule update --init --recursive`。海豹嵌套资源按其自己的 gitlink 检出，不改变 UI。
 
-镜像分别为 `tryao/qqbot-dsh:v0.16.1`、`tryao/gensokyo-mcp:v0.3.1`、`tryao/sealdice-core:v1.6.2-bridge.8`，只使用版本标签，没有 latest。主镜像不包含两个 Go 项目源码或运行程序。
+镜像分别为 `tryao/qqbot-dsh:v0.17.0`、`tryao/gensokyo-mcp:v0.3.1`、`tryao/sealdice-core:v1.6.2-bridge.8`，只使用版本标签，没有 latest。主镜像不包含两个 Go 项目源码或运行程序。
 
 v0.11.0 新增 Markdown 投递回执、扩展命令和连接级 Master ACL；三项镜像版本须一同升级，旧后端未协商 ACL 时仍可处理普通命令。
 
@@ -17,7 +17,7 @@ v0.11.1 增加群主／管理员的整群规则修改权限，以及单条自然
 可以直接使用仓库的 `docker-compose.qnap.yml`，或将下方完整 YAML 保存为 `docker-compose.yml`。在同一目录创建 `.env`；QQ 和聊天凭据按实际账号填写，三份 OneBot 服务密钥使用不同的随机值，不复用 QQ/LLM 密钥。已有配置可保留聊天、视觉和生图路由，只更新三个镜像版本及 OneBot 配置。
 
 ```dotenv
-IMAGE_TAG=v0.16.1
+IMAGE_TAG=v0.17.0
 QQBOT_APPID=
 QQBOT_SECRET=
 # 官方聊天模式填此项；不要同时配置 LLM_API_KEY。
@@ -339,3 +339,13 @@ python3 scripts/test-onebot-integration.py
 未来平台重新支持时，还需用测试账号加好友，验证同一人的群/私聊身份、实际收到暗骰、好友删除、明确拒收及网络不确定结果；群模型输入与日志均不得出现私密正文，失败不得重新掷骰。这些步骤当前不宣称已通过。
 
 普通调用和群聊暗骰分别记录验收结果。平台接受发送的 HTTP 响应与测试账号实际收到消息是两项证据；只看到工具返回成功不足以证明送达。
+
+## 部署能力与模型感知
+
+只部署 qq-bot 并保持 `QQBOT_ONEBOT_ENABLED=false` 时，模型和 `/bot-status` 都会明确报告 OneBot 未启用，`.userid` 等命令仍交给模型解释，不能编造身份或后端结果。无需安装桥或海豹来获取这个状态。
+
+启用后，状态分别报告桥接口、MCP 调用工具和已配置的后端别名。桥探测失败表示“当前无法连接或验证”，不能据此判断未部署；桥可达但后端未就绪时明确报告后端状态。缺少 `call_ws`、本地工具注册失败、配置无效和探测过期也有独立原因。后台每 10 秒更新，30 秒没有成功验证的可用状态失效；恢复后新消息可直接使用，无需重建会话。
+
+每个后端的普通命令、日志采集、日志导出、群规则和管理功能，按本地配置及已协商能力报告；只覆盖本项目已接入的能力，不代表海豹内部所有扩展或脚本均可调用。群规则仍需原始群事件中的 owner/admin，管理仍需已配置身份在私聊发送完整原生命令，日志仍需匹配的原始命令。暗骰仍不可用。
+
+模型每步看到的 `qqbot:capabilities` 快照与本次实际工具过滤同源，覆盖历史能力描述。OneBot 请求 ID 和角色元数据只用于对应原始消息的授权，不表示部署状态。回合开始时未建立凭据的请求在后端中途恢复后也不会获得工具；失败兜底、超时或结果未知的原始命令不得自动重试。

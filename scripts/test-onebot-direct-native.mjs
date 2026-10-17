@@ -718,6 +718,7 @@ test('bootstrap executes with stubs and passes the registered service and sender
     const observedDeliveries = [];
 
     const service = {
+        capabilityState() { return { configured: 'disabled', reason: 'config-disabled' }; },
         observeBotDelivery(event) { observedDeliveries.push(event); },
         async stop() {
             assert.equal(bootBot.send, FakeBot.prototype.send, 'the QQ send observer detaches before service stop');
@@ -769,7 +770,8 @@ test('bootstrap executes with stubs and passes the registered service and sender
     class FakeReplyLimiter { constructor() {} }
 
     imports.set(`${defaultsRoot}/qqbot-chat-policy.mjs`, {
-        installChatPolicy() {}, setOnebotToolAvailable() {},
+        installChatPolicy() { return { setConfigured() {}, setOnebotProvider() {}, getSnapshot() { return { snapshot: {} }; } }; },
+        setOnebotToolAvailable() {},
     });
     imports.set(`${defaultsRoot}/qqbot-onebot.mjs`, {
         registerOnebotCommandTool(_ctx, options) {

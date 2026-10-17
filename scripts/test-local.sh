@@ -51,6 +51,7 @@ previous_stock_agents_v0_14_2_fixture="${repo_root}/scripts/fixtures/agents-v0.1
 previous_stock_agents_v0_15_0_fixture="${repo_root}/scripts/fixtures/agents-v0.15.0-stock.md"
 previous_stock_agents_v0_16_0_fixture="${repo_root}/scripts/fixtures/agents-v0.16.0-stock.md"
 legacy_stock_agents_fixtures=(
+    "${repo_root}/scripts/fixtures/agents-v0.16.1-stock.md"
     "${repo_root}/scripts/fixtures/agents-legacy-v0.3.0-stock.md"
     "${repo_root}/scripts/fixtures/agents-legacy-v0.3.1-stock.md"
     "${repo_root}/scripts/fixtures/agents-legacy-v0.3.10-stock.md"
@@ -77,6 +78,7 @@ legacy_stock_agents_fixtures=(
     "${repo_root}/scripts/fixtures/agents-v0.16.0-stock.md"
 )
 legacy_stock_agents_hashes=(
+    af89bfbe1b1892d0d082fdf7de011fd63f41e38e80e76bec713896148dabd252
     c249259a60d4b04c9c9c3df1a92977adf748ba4143a3639c3e85a006ad802ef5
     9101cd863b9973e3ce7210e3d2f4e17fa23d8238564d463c18207fcf1622688d
     c1240f192f24ab877e30a5314bbaa5cb0f84856a16e2561fbf00c5040cf6f2d9
@@ -917,6 +919,7 @@ docker create \
     --mount "type=bind,src=${pending_images_test},dst=/tmp/test-pending-images.mjs,readonly" \
     --mount "type=bind,src=${pending_images_native_test},dst=/tmp/test-pending-images-native.mjs,readonly" \
     --mount "type=bind,src=${memory_images_test},dst=/tmp/test-memory-images.mjs,readonly" \
+    --mount "type=bind,src=${repo_root},dst=/repo,readonly" \
     --mount "type=bind,src=${onebot_native_test},dst=/tmp/test-onebot-native.mjs,readonly" \
     --mount "type=bind,src=${onebot_log_test},dst=/tmp/test-onebot-log.mjs,readonly" \
     --mount "type=bind,src=${onebot_direct_test},dst=/tmp/test-onebot-direct.mjs,readonly" \
@@ -1038,6 +1041,8 @@ docker create \
         QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist QQBOT_ENFORCER_SCRIPT=/usr/local/lib/enforce-chat-only.mjs node --test /tmp/test-recovery-upgrade.mjs
         QQBOT_NATIVE_DEFAULTS_ROOT=/opt/qqbot-defaults QQBOT_QUESTIONS_MODULE=/opt/qqbot-defaults/qqbot-questions.mjs node --test /tmp/test-questions.mjs
         QQBOT_NATIVE_DEFAULTS_ROOT=/opt/qqbot-defaults QQBOT_QUESTIONS_MODULE=/opt/qqbot-defaults/qqbot-questions.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist QQBOT_SDK_ROOT=/data/profiles/qqbot/node_modules/@tencent-connect/qqbot-nodejs/dist node --test /tmp/test-questions-native.mjs
+        QQBOT_CAPABILITY_ROOT=/opt/qqbot-defaults node --test /repo/scripts/test-capabilities.mjs
+        node --test /repo/scripts/test-capabilities-provider.mjs
         node /tmp/test-profile-boot.mjs
         QQBOT_TEST_ONEBOT_FIXTURE=true QQBOT_APPID=123456789 node /tmp/test-profile-boot.mjs
     '

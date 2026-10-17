@@ -72,6 +72,25 @@ function revertDeepSeekTimeoutNotices(source) {
     return source;
 }
 
+// Strip the newest layer before constructing any historical fixture.
+await edit('gateway/bootstrap.js', (source) => source
+    .replace('    // Chat-only capability registry v1.\n    const capabilities = installChatPolicy(ctx);', '    installChatPolicy(ctx);')
+    .replace("    manager.qqbotCapabilities = capabilities;\n    manager.qqbotCapabilitySnapshot = () => capabilities.getSnapshot({\n        toolSchemas: ctx.get('tools')?.schemas() ?? [],\n        requestContext: { view: 'deployment' },\n    }).snapshot;\n", '')
+    .replace('    capabilities.setOnebotProvider(() => onebotService.capabilityState());\n', '')
+    .replace("    capabilities.setConfigured('vision', config.vision.enabled ? 'enabled' : 'disabled');\n    capabilities.setConfigured('questions', 'enabled');\n    capabilities.setConfigured('asset_images', 'enabled');\n", ''));
+await edit('transport/inbound.js', (source) => source.replace(
+    '        // Chat-only capability admission v1.\n        const onebotToolAvailable = manager.qqbotCapabilities?.isOnebotAvailable() ?? isOnebotToolAvailable();',
+    '        const onebotToolAvailable = isOnebotToolAvailable();'));
+await edit('commands/status.js', (source) => source
+    .replace("import { createCapabilityRegistry, renderCapabilityStatus } from '/opt/qqbot-defaults/qqbot-capabilities.mjs';\n", '')
+    .replace("            // Chat-only capability status v1.\n            const snapshot = manager.qqbotCapabilitySnapshot?.() ?? createCapabilityRegistry().getSnapshot({ requestContext: { view: 'deployment' } }).snapshot;\n            const capabilityText = renderCapabilityStatus(snapshot);\n", '')
+    .replace("return ['当前无活跃会话', capabilityText].join('\\n\\n');", "return '当前无活跃会话';")
+    .replace("\n                '',\n                capabilityText,", ''));
+if (process.argv[3] === 'capabilities-only') {
+    process.stdout.write('Prepared pre-capability adapter fixture.\n');
+    process.exit(0);
+}
+
 if (timeoutStatusOnly) {
     await edit('transport/outbound.js', revertDeepSeekTimeoutNotices);
     process.stdout.write('Prepared v0.14.2 outbound fixture without DeepSeek timeout status notices.\n');

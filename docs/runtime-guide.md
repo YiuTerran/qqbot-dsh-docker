@@ -114,7 +114,7 @@ mkdir -p /tmp/qqbot-image-probe
 docker run --rm --entrypoint node --env-file .env \
   --mount "type=bind,src=$PWD/scripts/verify-image-route.mjs,dst=/tmp/verify-image-route.mjs,readonly" \
   --mount type=bind,src=/tmp/qqbot-image-probe,dst=/probe-output \
-  tryao/qqbot-dsh:v0.16.1 /tmp/verify-image-route.mjs /probe-output
+  tryao/qqbot-dsh:v0.17.0 /tmp/verify-image-route.mjs /probe-output
 ```
 
 探测会发起真实图片服务请求并消耗服务额度；不会发送真实 QQ 消息或修改生产额度。真实 QQ 图片和文件投递仍需用机器人账号验证。
@@ -126,3 +126,23 @@ docker run --rm --entrypoint node --env-file .env \
 新版启动异常时，先停止容器，再同时恢复升级前的数据卷备份并使用旧镜像标签。不要用空卷替换现有卷，也不要把缺少 `/opt/qqbot-defaults/{chat-policy,web-pages}.mjs` 的旧镜像用于已升级的卷。保留完整快照可恢复会话及旧镜像需要的配置档案。
 
 v0.10.0 移除了旧的群聊历史过滤补丁并恢复 SDK 原生上下文；`QQBOT_GROUP_CURRENT_ONLY` 与 `QQBOT_CONTEXT_DEBUG` 已不再生效。已有会话不会自动清空；需重置时在对应对话使用 `/new`。自定义人设若仍描述已移除的行为，请自行更新。
+
+## 能力状态
+
+`/bot-status` 保留当前会话状态，并列出部署能力；没有活跃会话也可查询，不会创建对话或调用模型。看图、生图/改图、角色原图、网页搜索/读取、文本附件、Markdown、互动澄清和 OneBot 都有显式状态。普通工具“可调用”表示允许按策略尝试，外部服务和 QQ 投递结果仍以工具回执为准。
+
+每个模型步骤附带独立的 `qqbot:capabilities` 运行快照，与实际工具过滤共用状态源。`configured` 区分启用、关闭、无效和未知，`readiness` 表示已知运行状态，`toolAvailable` 表示本次请求实际提供工具。部署能力不等于当前请求授权；文档保护、群权限、原始请求绑定和禁止重试继续生效。历史回复及请求元数据缺失都不能证明某个插件已被卸载。
+
+OneBot 沿用 10 秒后台探测；超过 30 秒未成功验证的可用状态会过期，停止开放工具。桥与后端恢复后，新消息自动重新检查，无需 `/new`。回合开始时没有建立 OneBot 凭据的旧请求不会因为中途恢复突然获得调用权限。状态查询不扫描海豹内部任意插件，不显示密钥、服务地址或原始身份。
+
+真实聊天模型的能力理解可单独做付费烟测（仅支持第三方 `LLM_*` 聊天路由）：
+
+```sh
+mkdir -p /tmp/qqbot-capability-probe
+docker run --rm --env-file .env --user "$(id -u):$(id -g)" --entrypoint node \
+  --mount "type=bind,src=$PWD/scripts/verify-capability-route.mjs,dst=/tmp/verify-capability-route.mjs,readonly" \
+  --mount "type=bind,src=/tmp/qqbot-capability-probe,dst=/evidence" \
+  dsh-qqbot:test-local /tmp/verify-capability-route.mjs /evidence/results.json
+```
+
+该探测使用合成对话，故意加入旧的错误能力声明，再检查未启用 OneBot 时的命令、能力和用法回答；不发送 QQ 消息、不执行后端命令。它验证模型理解显式快照的能力，不代替真实 QQ 或桥、海豹骰端到端验收。
