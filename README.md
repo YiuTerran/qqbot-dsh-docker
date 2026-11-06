@@ -8,6 +8,7 @@
 | --- | --- |
 | Node.js | `24.22.2`（Debian bookworm slim） |
 | pnpm | `12.18.0` |
+| 公网 IP 校验 | `ipaddr.js@2.5.0` |
 | dsh | `@deepseek-ai/dsh@0.2.2-rc.1` |
 | QQ 插件 | `@tencent-connect/dsh-qqbot@0.5.5` |
 | QQ Bot SDK | `@tencent-connect/qqbot-nodejs@1.0.5` |

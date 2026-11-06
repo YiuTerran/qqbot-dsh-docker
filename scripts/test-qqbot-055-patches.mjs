@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import vm from 'node:vm';
 
-// Supply an unpatched @tencent-connect/dsh-qqbot@0.5.5 package directory.
+// Supply an unpatched or already-patched @tencent-connect/dsh-qqbot@0.5.5 package directory.
 const source = process.argv[2];
 assert.ok(source, 'usage: test-qqbot-055-patches.mjs <qqbot-package-directory>');
 const scripts = fileURLToPath(new URL('.', import.meta.url));
@@ -19,12 +19,12 @@ try {
         for (const script of ['enforce-chat-only.mjs', 'instrument-qqbot-startup.mjs'])
             execFileSync(process.execPath, [join(scripts, script), lib]);
     };
-    const snapshot = async () => {
-        const files = await readdir(lib, { recursive: true });
+    const snapshot = async (directory = lib) => {
+        const files = await readdir(directory, { recursive: true });
         const result = {};
         for (const file of files.filter(file => file.endsWith('.js')).sort()) {
-            result[file] = await readFile(join(lib, file), 'utf8');
-            execFileSync(process.execPath, ['--check', join(lib, file)]);
+            result[file] = await readFile(join(directory, file), 'utf8');
+            execFileSync(process.execPath, ['--check', join(directory, file)]);
         }
         return result;
     };
@@ -32,6 +32,12 @@ try {
     const first = await snapshot();
     apply();
     assert.deepEqual(await snapshot(), first, 'patches must be byte-idempotent');
+    const reversePkg = join(temp, 'instrument-first');
+    await cp(resolve(source), reversePkg, { recursive: true });
+    const reverseLib = join(reversePkg, 'lib');
+    for (const script of ['instrument-qqbot-startup.mjs', 'enforce-chat-only.mjs'])
+        execFileSync(process.execPath, [join(scripts, script), reverseLib]);
+    assert.deepEqual(await snapshot(reverseLib), first, 'Docker instrumentation-first order must produce identical output');
     const gateway = first['gateway/bootstrap.js'];
     const outbound = first['transport/outbound.js'];
     assert.ok(!gateway.includes('DeliverablesDeliverer'));

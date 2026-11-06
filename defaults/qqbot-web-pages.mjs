@@ -1,3 +1,6 @@
+import { lookup } from 'node:dns/promises';
+import { isIP } from 'node:net';
+import ipaddr from '/usr/local/lib/node_modules/ipaddr.js/lib/ipaddr.js';
 import { HttpFetchProvider } from '/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-web-fetch-http/lib/index.js';
 import {
     activateCurrentDocumentMode,
@@ -74,6 +77,72 @@ export class PublicHttpProvider extends HttpFetchProvider {
         return runWithProviderAuthorization(authorization, () => super.fetch(request, scopedSignal));
     }
 
+    // dsh 0.2.2 delegates DNS/proxy handling to its process-wide dispatcher.
+    // QQ's stricter public-only transport must keep this policy locally.
+    async resolveAddresses(hostname, signal) {
+        signal?.throwIfAborted();
+        const host = hostname.replace(/^\[|\]$/g, '');
+        let addresses;
+        if (isIP(host)) addresses = [{ address: host, family: isIP(host) }];
+        else {
+            let onAbort;
+            try {
+                const aborted = new Promise((_resolve, reject) => {
+                    onAbort = () => reject(signal.reason ?? new Error('DNS lookup aborted'));
+                    signal?.addEventListener('abort', onAbort, { once: true });
+                });
+                addresses = await Promise.race([lookup(host, { all: true, verbatim: true }), aborted]);
+            }
+            finally { signal?.removeEventListener('abort', onAbort); }
+        }
+        signal?.throwIfAborted();
+        if (!addresses.length || addresses.some(({ address, family }) => {
+            if (!isIP(address) || isIP(address) !== family) return true;
+            const parsed = ipaddr.parse(address);
+            // Reject mapped/tunneled IPv6 as well as private, special-purpose,
+            // multicast, documentation and reserved ranges. Mixed DNS answer
+            // sets fail closed rather than silently dropping private answers.
+            return parsed.range() !== 'unicast'
+                || (family === 6 && !parsed.match(ipaddr.parse('2000::'), 3));
+        })) throw new Error('Refusing non-public HTTP destination.');
+        return addresses;
+    }
+
+    // Preserve explicit per-hop dispatcher ownership. Upstream requestOnce now
+    // returns a bare Response and no longer closes our isolated dispatchers.
+    async followAndRead(initialUrl, signal) {
+        const validate = (input) => {
+            if (typeof input !== 'string' || input.length > 2048) throw new Error('Invalid or oversized HTTP URL.');
+            const parsed = new URL(input);
+            if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
+                throw new Error('Only anonymous HTTP(S) URLs are allowed.');
+            }
+            return parsed;
+        };
+        let currentUrl = validate(initialUrl);
+        for (let hops = 0; ; hops++) {
+            signal?.throwIfAborted();
+            assertProviderRequestUrl(currentUrl);
+            const { response, close } = await this.requestOnce(currentUrl, signal);
+            try {
+                if ([301, 302, 303, 307, 308].includes(response.status)) {
+                    try {
+                        if (hops >= this.limits.maxRedirects) throw new Error(`exceeded the maximum of ${this.limits.maxRedirects} redirects`);
+                        const location = response.headers.get('location');
+                        if (location === null) throw new Error('Redirect response has no Location header.');
+                        const target = validate(new URL(location, currentUrl).href);
+                        if (target.origin !== currentUrl.origin) throw new Error('Cross-origin redirect is not allowed.');
+                        currentUrl = target;
+                    }
+                    finally { await response.body?.cancel(); }
+                    continue;
+                }
+                return await this.readBody(response, currentUrl, signal);
+            }
+            finally { await close(); }
+        }
+    }
+
     async requestOnce(url, signal) {
         assertProviderRequestUrl(url);
         const headers = {
@@ -124,8 +193,8 @@ export async function resolvePublicHttpAddresses(hostname, signal) {
     return provider.resolveAddresses(hostname, signal);
 }
 
-// Reuse dsh's public-IP validation, DNS connection pinning, bounded reads,
-// cancellation, and same-origin redirect policy; add a webpage-only boundary.
+// Reuse dsh's bounded reads and deadline while keeping public-IP validation,
+// pinned connections and same-origin redirect policy in our transport.
 export class WebPageProvider extends PublicHttpProvider {
     id = 'qqbot-pages';
 

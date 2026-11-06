@@ -29,6 +29,7 @@ RUN sed -i 's|http://deb.debian.org/debian-security|http://mirrors.aliyun.com/de
 RUN --mount=type=cache,target=/root/.npm \
     npm install --global --omit=dev \
         pnpm@12.18.0 \
+        ipaddr.js@2.5.0 \
         @deepseek-ai/dsh@0.2.2-rc.1 \
     && pnpm --version \
     && pnpm config set store-dir /tmp/pnpm-store \

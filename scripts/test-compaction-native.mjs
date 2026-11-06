@@ -8,6 +8,7 @@ const { LlmAdapter, createUserMessage } = await import(`${root}/dsh-llm/lib/inde
 await mkdir('/data/profiles/qqbot/node_modules', { recursive: true });
 try { await symlink(root, '/data/profiles/qqbot/node_modules/@deepseek-ai', 'dir'); }
 catch (error) { if (error.code !== 'EEXIST') throw error; }
+const { createHostAdapter } = await import(`${process.env.QQBOT_ADAPTER_DIST}/host/adapter.js`);
 const { SessionManager } = await import(`${process.env.QQBOT_ADAPTER_DIST}/session/session-manager.js`);
 
 test('QQ manual compaction preserves the session and refreshes current capabilities afterwards', async t => {
@@ -43,7 +44,7 @@ test('QQ manual compaction preserves the session and refreshes current capabilit
     await send('A historical topic. '.repeat(100));
     await send('More historical context. '.repeat(100));
     const manager = Object.create(SessionManager.prototype);
-    Object.assign(manager, { ctx, sessions: new Map([['c2c:owner', { agent }]]),
+    Object.assign(manager, { ctx, host: createHostAdapter(ctx, { warn() {}, debug() {} }), sessions: new Map([['c2c:owner', { agent }]]),
         sessionKey: (scope, peer) => `${scope}:${peer}`, getPresetsService: () => undefined,
         modelResolver: { getEffectiveRoute: () => ({ provider: 'fixture', model: 'fixture' }) }, logger: { warn() {}, error() {} } });
     assert.deepEqual(await manager.compact('c2c', 'missing'), { ok: false, reason: 'no-session' });

@@ -112,7 +112,7 @@ async function webSearchRuntime(t, provider) {
     await ctx.plugin({
         inject: ['tools', 'web', 'systemPrompt'],
         apply(child) {
-            applyWebSearchTool(child, 8, 4, 60000, true);
+            applyWebSearchTool(child, 8, 4, 800, 60000, true);
             applyWebFetchTool(child, 30000, 100000);
             installChatPolicy(child);
         },
@@ -1791,6 +1791,32 @@ test('QQ document byte limit rejects an overflowing stream rather than returning
     assert.equal(cancelled, 1, 'overflowing body is cancelled rather than downloaded fully');
 });
 
+test('public DNS validation rejects special ranges, mixed answers, and cancellation', async (t) => {
+    const provider = new WebPageProvider();
+    for (const address of [
+        '0.0.0.0', '10.0.0.1', '100.64.0.1', '127.0.0.1', '169.254.169.254',
+        '172.16.0.1', '192.168.0.1', '192.0.2.1', '198.18.0.1', '224.0.0.1', '240.0.0.1',
+        '[::]', '[::1]', '[::ffff:127.0.0.1]', '[64:ff9b::7f00:1]', '[2002:7f00:1::]',
+        '[fc00::1]', '[fe80::1]', '[ff02::1]', '[2001:db8::1]', '[3fff::1]', '[4000::1]',
+    ]) await assert.rejects(() => provider.resolveAddresses(address), /non-public/, address);
+    assert.deepEqual(await provider.resolveAddresses('93.184.216.34'), [{ address: '93.184.216.34', family: 4 }]);
+    assert.deepEqual(await provider.resolveAddresses('[2606:4700:4700::1111]'), [{ address: '2606:4700:4700::1111', family: 6 }]);
+    const original = dnsPromises.lookup;
+    t.after(() => { dnsPromises.lookup = original; syncBuiltinESMExports(); });
+    dnsPromises.lookup = async () => [{ address: '93.184.216.34', family: 4 }, { address: '10.0.0.1', family: 4 }];
+    syncBuiltinESMExports();
+    await assert.rejects(() => provider.resolveAddresses('mixed.example.com'), /non-public/);
+    dnsPromises.lookup = async () => [];
+    syncBuiltinESMExports();
+    await assert.rejects(() => provider.resolveAddresses('empty.example.com'), /non-public/);
+    dnsPromises.lookup = () => new Promise(() => {});
+    syncBuiltinESMExports();
+    const controller = new AbortController();
+    const resolution = provider.resolveAddresses('slow.example.com', controller.signal);
+    controller.abort(new Error('fixture DNS cancellation'));
+    await assert.rejects(() => resolution, /fixture DNS cancellation/);
+});
+
 test('actual public transport blocks private DNS and pins the validated answer against rebinding', async (t) => {
     const originalLookup = dns.lookup;
     const originalPromiseLookup = dnsPromises.lookup;
@@ -1946,6 +1972,26 @@ test('webpage redirect loops stop at three hops and close every response', async
     assert.equal(requests, 4);
 });
 
+test('public redirects reject origin changes and malformed targets while releasing transport', async () => {
+    for (const location of ['https://other.example.com/', 'http://example.com/', 'https://example.com:444/', 'https://user:pass@example.com/', 'file:///etc/passwd', 'http://[invalid', null]) {
+        const provider = new WebPageProvider();
+        let cancelled = 0, closed = 0, requests = 0;
+        provider.requestOnce = async () => {
+            requests++;
+            return {
+                response: new Response(new ReadableStream({ cancel() { cancelled++; } }), {
+                    status: 302, headers: location === null ? {} : { location },
+                }),
+                close: async () => { closed++; },
+            };
+        };
+        await assert.rejects(() => provider.fetch({ url: 'https://example.com/' }));
+        assert.equal(requests, 1);
+        assert.equal(cancelled, 1);
+        assert.equal(closed, 1);
+    }
+});
+
 test('current QQ image downloader validates bytes, bounds, redirects, and quoted images', async (t) => {
     await assert.rejects(() => downloadCurrentQQImage('http://example.com/image.png', 1024), /Only HTTPS allowed/);
     await assert.rejects(() => downloadCurrentQQImage('https://user:pass@example.com/image.png', 1024), /Credentials/);
@@ -2079,6 +2125,9 @@ test('native assembly and status share capabilities while concurrent requests re
 
 // Exercise the native executor's real single-call batch contract.
 async function executeSingleTool(ctx, { name, arguments: args, callId, ...input }) {
-    const batch = await ctx.tools.execute({ ...input, calls: [{ type: 'tool-call', id: callId, name, arguments: args }] });
-    return batch.results[0].result;
+    const toolSet = await ctx.tools.resolve({ agent: input.agent, signal: input.signal, modelSelection: { provider: 'fixture' } });
+    try {
+        const batch = await ctx.tools.execute({ ...input, toolSet, calls: [{ type: 'tool-call', id: callId, name, arguments: args }] });
+        return batch.results[0].result;
+    } finally { toolSet.dispose(); }
 }

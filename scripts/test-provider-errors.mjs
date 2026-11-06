@@ -248,7 +248,7 @@ integration('native turn failures use fixed notices and do not leak raw API erro
     ];
     for (const failure of failures) {
         const before = sent.length;
-        handler({ header: { id: record.sessionId } }, {
+        handler.routeSessionEvent({ header: { id: record.sessionId } }, {
             type: 'turn/end', data: { turn: 1, reason: { kind: 'error', error: failure } },
         });
         await new Promise((resolvePromise) => setImmediate(resolvePromise));
@@ -335,7 +335,7 @@ integration('DeepSeek API timeout notices share one status lookup, preserve QQ t
         const replaced = makeBoundRecord('replaced');
         const agentChanged = makeBoundRecord('agent-changed');
         const cancelled = makeBoundRecord('cancelled');
-        const emit = (record, type, turn, seq, reason) => handler({ header: { id: record.sessionId } }, {
+        const emit = (record, type, turn, seq, reason) => handler.routeSessionEvent({ header: { id: record.sessionId } }, {
             type, seq, data: { turn, ...(reason ? { reason } : {}) },
         });
         const startAndTimeout = (entry) => {
@@ -400,10 +400,10 @@ integration('native tool error events and isError blocks defer one safe notice u
         ];
         for (const [index, shape] of errorShapes.entries()) {
             const callId = `unsafe-error-${index}`;
-            handler({ header: { id: record.sessionId } }, {
+            handler.routeSessionEvent({ header: { id: record.sessionId } }, {
                 type: 'tool/call', data: { callId, name: 'web_search', arguments: JSON.stringify({ query: sensitive }) },
             });
-            handler({ header: { id: record.sessionId } }, {
+            handler.routeSessionEvent({ header: { id: record.sessionId } }, {
                 type: 'tool/result', data: {
                     error: shape.error,
                     message: { source: { callId }, content: shape.content ?? [{ type: 'text', text: sensitive }] },
@@ -412,7 +412,7 @@ integration('native tool error events and isError blocks defer one safe notice u
             await new Promise((resolvePromise) => setImmediate(resolvePromise));
             assert.equal(sent.length, 0, 'tool failure is pending until the turn finishes');
         }
-        handler({ header: { id: record.sessionId } }, {
+        handler.routeSessionEvent({ header: { id: record.sessionId } }, {
             type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } },
         });
         await new Promise((resolvePromise) => setImmediate(resolvePromise));
@@ -433,18 +433,18 @@ integration('a tool retry followed by the final answer suppresses the pending fa
             info() {}, debug() {}, warn() {}, error() {},
         }, {});
         const sendResult = (callId, error) => {
-            handler({ header: { id: record.sessionId } }, { type: 'tool/call', data: { callId, name: 'web_search', arguments: '{}' } });
-            handler({ header: { id: record.sessionId } }, { type: 'tool/result', data: {
+            handler.routeSessionEvent({ header: { id: record.sessionId } }, { type: 'tool/call', data: { callId, name: 'web_search', arguments: '{}' } });
+            handler.routeSessionEvent({ header: { id: record.sessionId } }, { type: 'tool/result', data: {
                 error,
                 message: { source: { callId }, content: [{ type: 'tool-result', isError: !!error, content: [{ type: 'text', text: error ? sensitive : 'found' }] }] },
             } });
         };
         sendResult('first', { code: 'UNKNOWN', message: sensitive });
         sendResult('retry', undefined);
-        handler({ header: { id: record.sessionId } }, {
+        handler.routeSessionEvent({ header: { id: record.sessionId } }, {
             type: 'assistant/message', data: { message: { content: [{ type: 'text', text: '最终回答' }] } },
         });
-        handler({ header: { id: record.sessionId } }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } });
+        handler.routeSessionEvent({ header: { id: record.sessionId } }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } });
         await new Promise((resolvePromise) => setImmediate(resolvePromise));
         assert.equal(sent.at(-1), '最终回答');
         assert.equal(sent.filter((text) => text === formatToolFailure()).length, 0);
@@ -462,28 +462,28 @@ integration('tool-call preamble and earlier stream chunks do not hide an unanswe
     }, { textChunkLimit: 2000, streaming: false, showToolResults: false }, {
         info() {}, debug() {}, warn() {}, error() {},
     }, {});
-    handler({ header: { id: record.sessionId } }, { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: '先查一下' } } });
-    handler({ header: { id: record.sessionId } }, { type: 'assistant/message', data: { message: { content: [
+    handler.routeSessionEvent({ header: { id: record.sessionId } }, { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: '先查一下' } } });
+    handler.routeSessionEvent({ header: { id: record.sessionId } }, { type: 'assistant/message', data: { message: { content: [
         { type: 'text', text: '先查一下' }, { type: 'tool-call', name: 'web_search' },
     ] } } });
-    handler({ header: { id: record.sessionId } }, { type: 'tool/call', data: { callId: 'failed', name: 'web_search' } });
-    handler({ header: { id: record.sessionId } }, { type: 'tool/result', data: {
+    handler.routeSessionEvent({ header: { id: record.sessionId } }, { type: 'tool/call', data: { callId: 'failed', name: 'web_search' } });
+    handler.routeSessionEvent({ header: { id: record.sessionId } }, { type: 'tool/result', data: {
         error: { code: 'UNKNOWN', message: sensitive }, message: { source: { callId: 'failed' }, content: [] },
     } });
-    handler({ header: { id: record.sessionId } }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } });
+    handler.routeSessionEvent({ header: { id: record.sessionId } }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } });
     await new Promise((resolvePromise) => setImmediate(resolvePromise));
     assert.equal(sent.length, 2);
     assert.deepEqual(new Set(sent), new Set(['先查一下', formatToolFailure()]));
     sent.length = 0;
-    handler({ header: { id: record.sessionId } }, { type: 'tool/call', data: { callId: 'second', name: 'web_search' } });
-    handler({ header: { id: record.sessionId } }, { type: 'tool/result', data: {
+    handler.routeSessionEvent({ header: { id: record.sessionId } }, { type: 'tool/call', data: { callId: 'second', name: 'web_search' } });
+    handler.routeSessionEvent({ header: { id: record.sessionId } }, { type: 'tool/result', data: {
         error: { code: 'UNKNOWN', message: sensitive }, message: { source: { callId: 'second' }, content: [] },
     } });
-    handler({ header: { id: record.sessionId } }, { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: '再查一次' } } });
-    handler({ header: { id: record.sessionId } }, { type: 'assistant/message', data: { message: { content: [
+    handler.routeSessionEvent({ header: { id: record.sessionId } }, { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: '再查一次' } } });
+    handler.routeSessionEvent({ header: { id: record.sessionId } }, { type: 'assistant/message', data: { message: { content: [
         { type: 'text', text: '再查一次' }, { type: 'tool-call', name: 'web_search' },
     ] } } });
-    handler({ header: { id: record.sessionId } }, { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } });
+    handler.routeSessionEvent({ header: { id: record.sessionId } }, { type: 'turn/end', data: { turn: 2, reason: { kind: 'completed' } } });
     await new Promise((resolvePromise) => setImmediate(resolvePromise));
     assert.equal(sent.filter((text) => text === formatToolFailure()).length, 1,
         'a streamed tool-call preamble is not a final answer');
@@ -500,14 +500,14 @@ integration('terminal streamed answer suppresses a pending failure; provider err
         }, { textChunkLimit: 2000, streaming: false, showToolResults: false }, {
             info() {}, debug() {}, warn() {}, error() {},
         }, {});
-        handler({ header: { id: record.sessionId } }, { type: 'tool/call', data: { callId: 'failed', name: 'web_search' } });
-        handler({ header: { id: record.sessionId } }, { type: 'tool/result', data: {
+        handler.routeSessionEvent({ header: { id: record.sessionId } }, { type: 'tool/call', data: { callId: 'failed', name: 'web_search' } });
+        handler.routeSessionEvent({ header: { id: record.sessionId } }, { type: 'tool/result', data: {
             error: { code: 'UNKNOWN', message: sensitive }, message: { source: { callId: 'failed' }, content: [] },
         } });
-        if (ending === 'completed') handler({ header: { id: record.sessionId } }, {
+        if (ending === 'completed') handler.routeSessionEvent({ header: { id: record.sessionId } }, {
             type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: '稍后重试即可' } },
         });
-        handler({ header: { id: record.sessionId } }, { type: 'turn/end', data: { turn: 1, reason:
+        handler.routeSessionEvent({ header: { id: record.sessionId } }, { type: 'turn/end', data: { turn: 1, reason:
             ending === 'error' ? { kind: 'error', error: apiFailure(503) } : { kind: ending },
         } });
         await new Promise((resolvePromise) => setImmediate(resolvePromise));
@@ -536,7 +536,7 @@ integration('bound turns isolate pending failures by record, target, and accepte
     const targetB = { scope: 'group', targetId: 'group-b', msgId: 'message-b' };
     const batchA = beginMergeBatch(recordA, targetA);
     const batchB = beginMergeBatch(recordB, targetB);
-    const send = (record, type, turn, seq, data = {}) => handler({ header: { id: record.sessionId } }, {
+    const send = (record, type, turn, seq, data = {}) => handler.routeSessionEvent({ header: { id: record.sessionId } }, {
         type, seq, data: { turn, ...data },
     });
     send(recordA, 'turn/start', 1, 1);
@@ -583,17 +583,17 @@ integration('streaming writer sends a final answer without generic notice, while
         }, { textChunkLimit: 2000, streaming: true, showToolResults: false }, {
             info() {}, debug() {}, warn() {}, error() {},
         }, {});
-        handler({ header: { id: record.sessionId } }, { type: 'tool/call', data: { callId: 'failed', name: 'web_search' } });
-        handler({ header: { id: record.sessionId } }, { type: 'tool/result', data: {
+        handler.routeSessionEvent({ header: { id: record.sessionId } }, { type: 'tool/call', data: { callId: 'failed', name: 'web_search' } });
+        handler.routeSessionEvent({ header: { id: record.sessionId } }, { type: 'tool/result', data: {
             error: { code: 'UNKNOWN', message: sensitive }, message: { source: { callId: 'failed' }, content: [] },
         } });
-        handler({ header: { id: record.sessionId } }, { type: 'assistant/chunk', data: {
+        handler.routeSessionEvent({ header: { id: record.sessionId } }, { type: 'assistant/chunk', data: {
             chunk: { type: 'text-delta', text: preamble ? '再查一次' : '最终回答' },
         } });
-        if (preamble) handler({ header: { id: record.sessionId } }, { type: 'assistant/message', data: { message: { content: [
+        if (preamble) handler.routeSessionEvent({ header: { id: record.sessionId } }, { type: 'assistant/message', data: { message: { content: [
             { type: 'text', text: '再查一次' }, { type: 'tool-call', name: 'web_search' },
         ] } } });
-        handler({ header: { id: record.sessionId } }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } });
+        handler.routeSessionEvent({ header: { id: record.sessionId } }, { type: 'turn/end', data: { turn: 1, reason: { kind: 'completed' } } });
         await new Promise((resolvePromise) => setImmediate(resolvePromise));
         assert.deepEqual(updates, [preamble ? '再查一次' : '最终回答']);
         assert.equal(completions, 1);
@@ -612,7 +612,7 @@ integration('native successful assistant text remains unchanged instead of being
         info() {}, debug() {}, warn() {}, error() {},
     }, {});
     const text = '主人，答案是 18。你刚才提到的是 insufficient_quota 错误。';
-    handler({ header: { id: record.sessionId } }, {
+    handler.routeSessionEvent({ header: { id: record.sessionId } }, {
         type: 'assistant/message', data: { message: { content: [{ type: 'text', text }] } },
     });
     await new Promise((resolvePromise) => setImmediate(resolvePromise));
@@ -632,10 +632,10 @@ integration('native successful tool results retain their existing display behavi
         }, {});
         const callId = 'successful-call';
         const text = 'Example page text';
-        handler({ header: { id: record.sessionId } }, {
+        handler.routeSessionEvent({ header: { id: record.sessionId } }, {
             type: 'tool/call', data: { callId, name: 'web_fetch', arguments: '{"url":"https://example.com/"}' },
         });
-        handler({ header: { id: record.sessionId } }, {
+        handler.routeSessionEvent({ header: { id: record.sessionId } }, {
             type: 'tool/result', data: { message: {
                 source: { callId }, content: [{ type: 'tool-result', isError: false, content: [{ type: 'text', text }] }],
             } },
@@ -659,10 +659,10 @@ integration('image and Markdown model receipts never produce a separate public t
                     info() {}, debug() {}, warn() {}, error() {},
                 }, {});
                 const callId = `${name}-${status}`;
-                handler({ header: { id: record.sessionId } }, {
+                handler.routeSessionEvent({ header: { id: record.sessionId } }, {
                     type: 'tool/call', data: { callId, name, arguments: '{}' },
                 });
-                handler({ header: { id: record.sessionId } }, {
+                handler.routeSessionEvent({ header: { id: record.sessionId } }, {
                     type: 'tool/result', data: { message: { source: { callId }, content: [
                         { type: 'tool-result', isError: false, content: [{ type: 'text',
                             text: JSON.stringify({ status, notice: 'Fixed receipt' }) }] },
@@ -686,7 +686,7 @@ integration('native outbound send failures log fixed diagnostics instead of raw 
     }, { textChunkLimit: 2000, streaming: false, showToolResults: false }, {
         info() {}, debug() {}, warn(...args) { diagnostics.push(args); }, error(...args) { diagnostics.push(args); },
     }, {});
-    handler({ header: { id: record.sessionId } }, {
+    handler.routeSessionEvent({ header: { id: record.sessionId } }, {
         type: 'turn/end', data: { turn: 1, reason: { kind: 'error', error: apiFailure(503) } },
     });
     await new Promise((resolvePromise) => setImmediate(resolvePromise));
@@ -732,7 +732,7 @@ integration('an unbound exact moderation event stays silent and cannot reset a c
     }, { async sendMarkdown(_target, text) { sent.push(text); } }, {
         textChunkLimit: 2000, streaming: false, showToolResults: false,
     }, { info() {}, debug() {}, warn() {}, error() {} }, {});
-    handler({ header: { id: record.sessionId } }, {
+    handler.routeSessionEvent({ header: { id: record.sessionId } }, {
         type: 'turn/end', data: { turn: 1, reason: { kind: 'error', error: {
             code: 'INVALID_REQUEST',
             message: `OpenAI API error (400): ${JSON.stringify({ message: `Content Exists Risk (requestid: ${sensitive})` })}`,

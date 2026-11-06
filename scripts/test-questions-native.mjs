@@ -396,8 +396,8 @@ test('pinned UserQuestionService and native Tools runtime deliver a real bound q
             return sendResolvedMarkdown(qqBot, resolveReplyTarget(target, finalLimiter, true), content);
         },
     }, { appId, streaming: false, textChunkLimit: 21, showToolResults: false }, logger, {});
-    outbound({ header: { id: record.sessionId } }, { type: 'turn/start', seq: 1, data: { turn: 1 } });
-    outbound({ header: { id: record.sessionId } }, {
+    outbound.routeSessionEvent({ header: { id: record.sessionId } }, { type: 'turn/start', seq: 1, data: { turn: 1 } });
+    outbound.routeSessionEvent({ header: { id: record.sessionId } }, {
         type: 'assistant/message', seq: 2,
         data: { turn: 1, message: { content: [{ type: 'text', text: 'Final answer part one\nFinal answer part two' }] } },
     });
@@ -422,7 +422,7 @@ test('pinned UserQuestionService and native Tools runtime deliver a real bound q
 
     await closeMergeBatch(batch);
     const sendsBeforeLateEvent = finalPosts.length;
-    outbound({ header: { id: record.sessionId } }, {
+    outbound.routeSessionEvent({ header: { id: record.sessionId } }, {
         type: 'assistant/message', seq: 20,
         data: { turn: 1, message: { content: [{ type: 'text', text: 'Late final reply after stop' }] } },
     });
@@ -551,7 +551,7 @@ test('native outbound hides question answers and errors even when tool results a
             async sendMarkdown(actualTarget, content) { sent.push({ target: actualTarget, content }); },
         }, { appId, streaming: false, textChunkLimit: 2000, showToolResults: true }, logger, {});
         const session = { header: { id: record.sessionId } };
-        const emit = (type, seq, data) => handler(session, { type, seq, data: { turn: 1, ...data } });
+        const emit = (type, seq, data) => handler.routeSessionEvent(session, { type, seq, data: { turn: 1, ...data } });
         const callId = `question-receipt-${outcome}`;
         const value = outcome === 'answered'
             ? { status: 'answered', answers: [{ id: 'private-choice', selected: ['B'], custom: 'private user answer' }] }
@@ -569,11 +569,11 @@ test('native outbound hides question answers and errors even when tool results a
         emit('turn/end', 4, { reason: { kind: 'completed' } });
         await new Promise((resolve) => setImmediate(resolve));
         assert.deepEqual(sent, [], `${outcome}: question errors do not trigger an extra generic tool-failure notice`);
-        handler(session, { type: 'turn/start', seq: 5, data: { turn: 2 } });
-        handler(session, { type: 'assistant/message', seq: 6, data: { turn: 2,
+        handler.routeSessionEvent(session, { type: 'turn/start', seq: 5, data: { turn: 2 } });
+        handler.routeSessionEvent(session, { type: 'assistant/message', seq: 6, data: { turn: 2,
             message: { content: [{ type: 'text', text: '普通最终回复' }] },
         } });
-        handler(session, { type: 'turn/end', seq: 7, data: { turn: 2, reason: { kind: 'completed' } } });
+        handler.routeSessionEvent(session, { type: 'turn/end', seq: 7, data: { turn: 2, reason: { kind: 'completed' } } });
         await closeMergeBatch(batch);
         assert.deepEqual(sent, [{ target, content: '普通最终回复' }],
             `${outcome}: the real outbound handler still delivers an ordinary assistant reply`);

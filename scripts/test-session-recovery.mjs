@@ -536,12 +536,12 @@ integration('real inbound drains the original reply after session removal, revok
         async whenIdle() {
             const doc = getDocumentTurn(oldAgent);
             assert.ok(doc, 'the original turn remains active until idle cleanup');
-            eventHandler({ header: { id: 'session-1' } }, { type: 'turn/start', data: { turn: 1 } });
-            eventHandler({ header: { id: 'session-1' } }, {
+            eventHandler.routeSessionEvent({ header: { id: 'session-1' } }, { type: 'turn/start', data: { turn: 1 } });
+            eventHandler.routeSessionEvent({ header: { id: 'session-1' } }, {
                 type: 'turn/end', data: { turn: 0, reason: { kind: 'error', error: qualifying() } },
             });
             assert.equal(operations.length, 0, 'stale turn/end cannot reset a newer turn');
-            eventHandler({ header: { id: 'session-1' } }, {
+            eventHandler.routeSessionEvent({ header: { id: 'session-1' } }, {
                 type: 'turn/end', data: { turn: { id: 'wrong-type' }, reason: { kind: 'error', error: qualifying() } },
             });
             assert.equal(operations.length, 0, 'turn IDs with the wrong native type are ignored');
@@ -552,8 +552,8 @@ integration('real inbound drains the original reply after session removal, revok
                     reason: { kind: 'error', error: qualifying() },
                 },
             };
-            eventHandler({ header: { id: 'session-1' } }, raw);
-            eventHandler({ header: { id: 'session-1' } }, raw);
+            eventHandler.routeSessionEvent({ header: { id: 'session-1' } }, raw);
+            eventHandler.routeSessionEvent({ header: { id: 'session-1' } }, raw);
             // The session event only records recovery. It must not destroy an
             // agent while the original turn is still inside whenIdle().
             assert.equal(operations.length, 0);
@@ -719,8 +719,8 @@ integration('real queued group history preserves its snapshot until reset, then 
                     },
                     async whenIdle() {
                         if (isFirst) {
-                            eventHandler({ header: { id: record.sessionId } }, { type: 'turn/start', data: { turn: 1 } });
-                            eventHandler({ header: { id: record.sessionId } }, {
+                            eventHandler.routeSessionEvent({ header: { id: record.sessionId } }, { type: 'turn/start', data: { turn: 1 } });
+                            eventHandler.routeSessionEvent({ header: { id: record.sessionId } }, {
                                 type: 'turn/end', data: { turn: 1, reason: { kind: 'error', error: qualifying() } },
                             });
                         }
@@ -928,7 +928,7 @@ integration('ordinary native HTTP 400 errors use a friendly fixed notice and do 
         textChunkLimit: 2000, streaming: false, showToolResults: false,
     }, { info() {}, debug() {}, warn() {}, error() {} }, {});
     const failure = { code: 'INVALID_REQUEST', message: 'OpenAI API error (400): {"message":"Invalid request sk-test-secret https://private.example request-secret-id"}' };
-    outbound({ header: { id: record.sessionId } }, {
+    outbound.routeSessionEvent({ header: { id: record.sessionId } }, {
         type: 'turn/end', data: { turn: 3, reason: { kind: 'error', error: failure } },
     });
     await new Promise((resolvePromise) => setImmediate(resolvePromise));
@@ -958,6 +958,7 @@ integration('real SessionManager commits a durable new session ID while preservi
     const logger = { info() {}, debug() {}, warn() {}, error() {} };
     const createPrefs = (path) => {
         const prefs = Object.create(PrefsStore.prototype);
+        prefs.deleted = { overrides: new Set(), sessionIds: new Set(), presets: new Set() };
         Object.assign(prefs, {
             prefsPath: path,
             overrides: new Map(),
@@ -1036,6 +1037,7 @@ integration('strict reset leaves the active session and history untouched when d
     manager.logger = { info() {}, debug() {}, warn() {}, error() {} };
     manager.modelResolver = Object.create(ModelResolver.prototype);
     const prefs = Object.create(PrefsStore.prototype);
+    prefs.deleted = { overrides: new Set(), sessionIds: new Set(), presets: new Set() };
     Object.assign(prefs, { prefsPath: blockedPath, overrides: new Map(), sessionIds: new Map(), presets: new Map() });
     const scope = 'group';
     const peerId = 'write-failure-group';
@@ -1080,6 +1082,7 @@ integration('strict reset keeps its durable commit when cancel or disposal throw
         const prefsPath = `${temp}/${failureMode}.json`;
         const createPrefs = () => {
             const prefs = Object.create(PrefsStore.prototype);
+            prefs.deleted = { overrides: new Set(), sessionIds: new Set(), presets: new Set() };
             Object.assign(prefs, { prefsPath, overrides: new Map(), sessionIds: new Map(), presets: new Map() });
             prefs.load();
             return prefs;
