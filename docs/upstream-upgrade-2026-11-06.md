@@ -29,3 +29,10 @@
 - 本地 JavaScript、Shell 语法与 diff 空白检查通过。
 - 当前执行环境没有 Docker，不能将本地检查等同于镜像、旧卷迁移、双架构或真实 QQ 验收。pnpm 在本地受限环境的 store lock 初始化受文件系统限制，完整 profile 安装也留给容器 CI。
 - 未登录 QQ、未调用付费模型、未进行生产投递。
+
+## 上游来源
+
+- https://www.npmjs.com/package/@deepseek-ai/dsh/v/0.2.2-rc.1
+- https://www.npmjs.com/package/@tencent-connect/dsh-qqbot/v/0.5.5
+- https://www.npmjs.com/package/pnpm/v/12.18.0
+- https://hub.docker.com/_/node
