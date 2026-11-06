@@ -10,8 +10,8 @@ import { createRequire } from 'node:module';
 const files = ['node_modules', 'package.json', 'pnpm-lock.yaml', 'pnpm-workspace.yaml'];
 const plugin = '@tencent-connect/dsh-qqbot';
 const sdk = '@tencent-connect/qqbot-nodejs';
-const targetVersion = '0.5.2';
-const supported = new Set(['0.5.0', targetVersion]);
+const targetVersion = '0.5.5';
+const supported = new Set(['0.5.0', '0.5.2', targetVersion]);
 const journalName = '.qqbot-runtime-migration.json';
 const exists = async path => { try { return await lstat(path); } catch (error) { if (error.code === 'ENOENT') return undefined; throw error; } };
 const json = async path => JSON.parse(await readFile(path, 'utf8'));
@@ -82,7 +82,7 @@ async function checkRuntime(profile, version) {
         || await realpath(peers) !== '/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai')) {
         throw new Error('Profile-local DSH core dependencies are unsupported; use the image-owned runtime.');
     }
-    const dist = join(profile, 'node_modules', plugin, 'dist');
+    const dist = join(profile, 'node_modules', plugin, version === targetVersion ? 'lib' : 'dist');
     for (const [file, anchor] of [['index.js', 'export async function apply(ctx, config) {'],
         ['gateway/bootstrap.js', 'export async function bootstrapGateway(ctx, agents, config, logger) {'],
         ['transport/inbound.js', 'export async function handleInbound(']]) {
@@ -96,7 +96,7 @@ async function ownership(path, owner) {
     if (process.getuid?.() === 0) await lchown(path, owner.uid, owner.gid);
 }
 function validateStage(stage) {
-    const dist = join(stage, 'node_modules', plugin, 'dist');
+    const dist = join(stage, 'node_modules', plugin, 'lib');
     for (const script of ['enforce-chat-only.mjs', 'instrument-qqbot-startup.mjs']) {
         execFileSync(process.execPath, [join('/usr/local/lib', script), dist], { stdio: 'pipe' });
     }

@@ -19,8 +19,9 @@ catch (error) { if (error.code !== 'EEXIST') throw error; }
 const { Context } = await import(`${dshRoot}cordis/lib/index.js`);
 const { default: SystemPrompt } = await import(`${dshRoot}dsh-system-prompt/lib/index.js`);
 const { default: ToolRuntime } = await import(`${dshRoot}dsh-tools/lib/index.js`);
+const NativeToolExecutor = await import(`${dshRoot}dsh-tool-executor-native/lib/index.js`);
 const { default: WebRuntime } = await import(`${dshRoot}dsh-web/lib/index.js`);
-const adapter = '/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/';
+const adapter = '/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/';
 const { handleInbound } = await import(`${adapter}transport/inbound.js`);
 const { setupMiddlewares } = await import(`${adapter}gateway/middleware-setup.js`);
 const { registerDescribeImageTool } = await import(`${adapter}media/vision-tool.js`);
@@ -50,7 +51,8 @@ test('native QQ chain keeps image-only messages lazy and analyzes recent images 
     const runtime = new Context();
     t.after(() => runtime.fiber.dispose());
     await runtime.plugin(SystemPrompt, {});
-    await runtime.plugin(ToolRuntime, { mode: 'native' });
+    await runtime.plugin(ToolRuntime);
+    await runtime.plugin(NativeToolExecutor);
     await runtime.plugin(WebRuntime, { fetchProvider: 'qqbot-pages' });
     await runtime.plugin({ inject: ['tools', 'web', 'systemPrompt'], apply: installChatPolicy });
 
@@ -165,7 +167,7 @@ test('native QQ chain keeps image-only messages lazy and analyzes recent images 
                     const observed = [];
                     for (const candidate of expected.useTools ? request.recentImages : []) {
                         expectedVisionColor = expected.colors[observed.length];
-                        const result = await runtime.tools.execute({ name: 'qqbot_describe_image',
+                        const result = await executeSingleTool(runtime, { name: 'qqbot_describe_image',
                             arguments: { image: candidate.imageRef, prompt: 'Read the supplied image.' }, agent,
                             callId: `recent-image-read-${request.requestId}-${observed.length}`,
                             signal: new AbortController().signal });
@@ -306,3 +308,9 @@ test('native QQ chain keeps image-only messages lazy and analyzes recent images 
     assert.equal(sent.some((entry) => entry.text.includes('Image prompt association')), false,
         'request metadata is supplied to the model, not sent as a QQ reply');
 });
+
+// Exercise the native executor's real single-call batch contract.
+async function executeSingleTool(ctx, { name, arguments: args, callId, ...input }) {
+    const batch = await ctx.tools.execute({ ...input, calls: [{ type: 'tool-call', id: callId, name, arguments: args }] });
+    return batch.results[0].result;
+}

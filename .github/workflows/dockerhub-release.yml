@@ -71,6 +71,9 @@ jobs:
       - name: Verify persistent runtime upgrade from v0.17.0
         run: IMAGE=dsh-qqbot:test-local-${{ matrix.arch }} ./scripts/test-runtime-upgrade.sh
 
+      - name: Verify persistent runtime upgrade from v0.18.2
+        run: IMAGE=dsh-qqbot:test-local-${{ matrix.arch }} LEGACY_IMAGE=tryao/qqbot-dsh:v0.18.2 LEGACY_VERSION=0.5.2 ./scripts/test-runtime-upgrade.sh
+
       - name: Run real MCP to SeaDice container regression
         run: python3 scripts/test-onebot-integration.py --qqbot-image dsh-qqbot:test-local-${{ matrix.arch }} --evidence /tmp/onebot-integration.json
 

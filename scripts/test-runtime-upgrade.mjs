@@ -9,11 +9,13 @@ import { migrateProfileRuntime } from '/usr/local/lib/migrate-profile-runtime.mj
 
 const execute = promisify(execFile);
 const legacy = process.env.QQBOT_LEGACY_PROFILE;
-if (!legacy) throw new Error('QQBOT_LEGACY_PROFILE must name the actual v0.17.0 image seed, not a relabeled fixture.');
+if (!legacy) throw new Error('QQBOT_LEGACY_PROFILE must name an actual previously published image seed, not a relabeled fixture.');
 const seed = '/opt/dsh-seed/profiles/qqbot';
 const pkg = 'node_modules/@tencent-connect/dsh-qqbot/package.json';
 const version = async profile => JSON.parse(await readFile(join(profile, pkg), 'utf8')).version;
-assert.equal(await version(legacy), '0.5.0');
+const legacyVersion = process.env.QQBOT_LEGACY_VERSION ?? '0.5.0';
+assert.ok(['0.5.0', '0.5.2'].includes(legacyVersion));
+assert.equal(await version(legacy), legacyVersion);
 
 async function fixture(t) {
     const root = await mkdtemp(join(tmpdir(), 'qqbot-runtime-upgrade-'));
@@ -49,11 +51,11 @@ const child = (profile, crashAt = '') => execute(process.execPath, ['--input-typ
 test('real old dependency tree upgrades offline, preserves user state and retains a rollback copy', async t => {
     const f = await fixture(t);
     assert.equal(await migrateProfileRuntime(f.profile, seed), true);
-    assert.equal(await version(f.profile), '0.5.2');
+    assert.equal(await version(f.profile), '0.5.5');
     assert.equal(JSON.parse(await readFile(join(f.profile, 'node_modules/@tencent-connect/qqbot-nodejs/package.json'))).version, '1.0.5');
     const backups = (await readdir(f.profile)).filter(name => name.startsWith('.qqbot-runtime-backup-'));
     assert.equal(backups.length, 1);
-    assert.equal(await version(join(f.profile, backups[0])), '0.5.0');
+    assert.equal(await version(join(f.profile, backups[0])), legacyVersion);
     assert.equal(await migrateProfileRuntime(f.profile, seed), false);
     assert.equal((await readdir(f.profile)).filter(name => name.startsWith('.qqbot-runtime-backup-')).length, 1);
     await preserved(f);
@@ -64,7 +66,7 @@ for (const point of ['prepared', ...['node_modules', 'package.json', 'pnpm-lock.
         const f = await fixture(t);
         await assert.rejects(child(f.profile, point), error => error.signal === 'SIGKILL');
         await child(f.profile);
-        assert.equal(await version(f.profile), '0.5.2');
+        assert.equal(await version(f.profile), '0.5.5');
         await preserved(f);
     });
 }
@@ -73,14 +75,14 @@ test('validation failure restores dependencies before returning', async t => {
     await assert.rejects(migrateProfileRuntime(f.profile, seed, { checkpoint(point) {
         if (point === 'installed:package.json') throw new Error('injected failure');
     } }), /injected failure/u);
-    assert.equal(await version(f.profile), '0.5.0');
-    assert.equal(JSON.parse(await readFile(join(f.profile, 'package.json'))).dependencies['@tencent-connect/dsh-qqbot'], '0.5.0');
+    assert.equal(await version(f.profile), legacyVersion);
+    assert.equal(JSON.parse(await readFile(join(f.profile, 'package.json'))).dependencies['@tencent-connect/dsh-qqbot'], legacyVersion);
     await preserved(f);
 });
 test('concurrent migrations serialize and commit once', async t => {
     const f = await fixture(t);
     await Promise.all([child(f.profile), child(f.profile)]);
-    assert.equal(await version(f.profile), '0.5.2');
+    assert.equal(await version(f.profile), '0.5.5');
     assert.equal((await readdir(f.profile)).filter(name => name.startsWith('.qqbot-runtime-backup-')).length, 1);
 });
 for (const kind of ['custom-dependency', 'custom-workspace', 'unknown-version', 'unknown-layout', 'foreign-core']) {

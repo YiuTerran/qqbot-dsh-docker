@@ -34,10 +34,12 @@ try {
 const { Context } = await import(`${dshRoot}cordis/lib/index.js`);
 const { default: SystemPrompt } = await import(`${dshRoot}dsh-system-prompt/lib/index.js`);
 const { default: ToolRuntime } = await import(`${dshRoot}dsh-tools/lib/index.js`);
+const NativeToolExecutor = await import(`${dshRoot}dsh-tool-executor-native/lib/index.js`);
+const { ToolExecutionPipeline } = await import(`${dshRoot}dsh-tools/lib/pipeline.js`);
 const { default: WebRuntime } = await import(`${dshRoot}dsh-web/lib/index.js`);
 const { applyWebFetchTool, applyWebSearchTool } = await import(`${dshRoot}dsh-tool-web/lib/index.js`);
 const { DeepSeekSearchProvider } = await import(`${dshRoot}dsh-web-search-deepseek/lib/index.js`);
-const adapter = '/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/';
+const adapter = '/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/';
 const { statusCommand } = await import(`${adapter}commands/status.js`);
 const { registerDescribeImageTool } = await import(`${adapter}media/vision-tool.js`);
 const { MEDIA_ROOT, cleanupExpiredMedia } = await import(`${adapter}media/media-cleaner.js`);
@@ -92,7 +94,8 @@ async function runtime(t) {
     const ctx = new Context();
     t.after(() => ctx.fiber.dispose());
     await ctx.plugin(SystemPrompt, {});
-    await ctx.plugin(ToolRuntime, { mode: 'native' });
+    await ctx.plugin(ToolRuntime);
+    await ctx.plugin(NativeToolExecutor);
     await ctx.plugin(WebRuntime, { fetchProvider: 'qqbot-pages' });
     await ctx.plugin({ inject: ['tools', 'web', 'systemPrompt'], apply: installChatPolicy });
     return ctx;
@@ -102,13 +105,14 @@ async function webSearchRuntime(t, provider) {
     const ctx = new Context();
     t.after(() => ctx.fiber.dispose());
     await ctx.plugin(SystemPrompt, {});
-    await ctx.plugin(ToolRuntime, { mode: 'native' });
+    await ctx.plugin(ToolRuntime);
+    await ctx.plugin(NativeToolExecutor);
     await ctx.plugin(WebRuntime, { fetchProvider: 'qqbot-pages' });
     if (provider) ctx.web.registerSearchProvider(provider);
     await ctx.plugin({
         inject: ['tools', 'web', 'systemPrompt'],
         apply(child) {
-            applyWebSearchTool(child, 8, 4, 60000, true);
+            applyWebSearchTool(child, 8, 4, 800, 60000, true);
             applyWebFetchTool(child, 30000, 100000);
             installChatPolicy(child);
         },
@@ -117,11 +121,11 @@ async function webSearchRuntime(t, provider) {
 }
 
 function call(ctx, name, args, agent, signal = new AbortController().signal) {
-    return ctx.tools.execute({ name, arguments: args, agent, callId: 'test-call', signal });
+    return executeSingleTool(ctx, { name, arguments: args, agent, callId: 'test-call', signal });
 }
 
 function nativeCall(ctx, name, args, agent, callId, signal = new AbortController().signal) {
-    return ctx.tools.execute({ name, arguments: args, agent, callId, signal });
+    return executeSingleTool(ctx, { name, arguments: args, agent, callId, signal });
 }
 
 function captureMiddlewareChain(config, manager = {}) {
@@ -1388,7 +1392,8 @@ test('prepared native executions cannot adopt grants from a newer QQ turn', asyn
     const url = 'https://public.example.com/old-turn';
     beginDocumentTurn(agent, { content: `Read ${url}` });
     t.after(() => endDocumentTurn(agent));
-    const prepared = await ctx.tools.prepareScheduledExecution({
+    const pipeline = new ToolExecutionPipeline(ctx);
+    const prepared = await pipeline.prepare({
         name: 'web_fetch', arguments: { url }, agent,
         callId: 'old-prepared-fetch', signal: new AbortController().signal,
     });
@@ -1398,9 +1403,10 @@ test('prepared native executions cannot adopt grants from a newer QQ turn', asyn
         url: 'https://files.example.com/note.txt',
     }] });
     assert.equal(isTurnUrlAllowed(agent, url), true, 'the new turn happens to allow the same URL');
-    const dispatched = await ctx.tools.dispatchScheduledExecution(prepared.exec);
-    assert.equal(dispatched.result.isError, true, 'old prepared execution remains expired despite the new grant');
-    assert.match(JSON.stringify(dispatched.result), /expired|scope|message/i);
+    const dispatched = await pipeline.dispatch(prepared.exec);
+    const result = await pipeline.complete(prepared.exec, dispatched);
+    assert.equal(result.isError, true, 'old prepared execution remains expired despite the new grant');
+    assert.match(JSON.stringify(result), /expired|scope|message/i);
 });
 
 test('QQ explicitly quoted documents trigger a turn even without new text or attachments', async () => {
@@ -1785,6 +1791,32 @@ test('QQ document byte limit rejects an overflowing stream rather than returning
     assert.equal(cancelled, 1, 'overflowing body is cancelled rather than downloaded fully');
 });
 
+test('public DNS validation rejects special ranges, mixed answers, and cancellation', async (t) => {
+    const provider = new WebPageProvider();
+    for (const address of [
+        '0.0.0.0', '10.0.0.1', '100.64.0.1', '127.0.0.1', '169.254.169.254',
+        '172.16.0.1', '192.168.0.1', '192.0.2.1', '198.18.0.1', '224.0.0.1', '240.0.0.1',
+        '[::]', '[::1]', '[::ffff:127.0.0.1]', '[64:ff9b::7f00:1]', '[2002:7f00:1::]',
+        '[fc00::1]', '[fe80::1]', '[ff02::1]', '[2001:db8::1]', '[3fff::1]', '[4000::1]',
+    ]) await assert.rejects(() => provider.resolveAddresses(address), /non-public/, address);
+    assert.deepEqual(await provider.resolveAddresses('93.184.216.34'), [{ address: '93.184.216.34', family: 4 }]);
+    assert.deepEqual(await provider.resolveAddresses('[2606:4700:4700::1111]'), [{ address: '2606:4700:4700::1111', family: 6 }]);
+    const original = dnsPromises.lookup;
+    t.after(() => { dnsPromises.lookup = original; syncBuiltinESMExports(); });
+    dnsPromises.lookup = async () => [{ address: '93.184.216.34', family: 4 }, { address: '10.0.0.1', family: 4 }];
+    syncBuiltinESMExports();
+    await assert.rejects(() => provider.resolveAddresses('mixed.example.com'), /non-public/);
+    dnsPromises.lookup = async () => [];
+    syncBuiltinESMExports();
+    await assert.rejects(() => provider.resolveAddresses('empty.example.com'), /non-public/);
+    dnsPromises.lookup = () => new Promise(() => {});
+    syncBuiltinESMExports();
+    const controller = new AbortController();
+    const resolution = provider.resolveAddresses('slow.example.com', controller.signal);
+    controller.abort(new Error('fixture DNS cancellation'));
+    await assert.rejects(() => resolution, /fixture DNS cancellation/);
+});
+
 test('actual public transport blocks private DNS and pins the validated answer against rebinding', async (t) => {
     const originalLookup = dns.lookup;
     const originalPromiseLookup = dnsPromises.lookup;
@@ -1940,6 +1972,26 @@ test('webpage redirect loops stop at three hops and close every response', async
     assert.equal(requests, 4);
 });
 
+test('public redirects reject origin changes and malformed targets while releasing transport', async () => {
+    for (const location of ['https://other.example.com/', 'http://example.com/', 'https://example.com:444/', 'https://user:pass@example.com/', 'file:///etc/passwd', 'http://[invalid', null]) {
+        const provider = new WebPageProvider();
+        let cancelled = 0, closed = 0, requests = 0;
+        provider.requestOnce = async () => {
+            requests++;
+            return {
+                response: new Response(new ReadableStream({ cancel() { cancelled++; } }), {
+                    status: 302, headers: location === null ? {} : { location },
+                }),
+                close: async () => { closed++; },
+            };
+        };
+        await assert.rejects(() => provider.fetch({ url: 'https://example.com/' }));
+        assert.equal(requests, 1);
+        assert.equal(cancelled, 1);
+        assert.equal(closed, 1);
+    }
+});
+
 test('current QQ image downloader validates bytes, bounds, redirects, and quoted images', async (t) => {
     await assert.rejects(() => downloadCurrentQQImage('http://example.com/image.png', 1024), /Only HTTPS allowed/);
     await assert.rejects(() => downloadCurrentQQImage('https://user:pass@example.com/image.png', 1024), /Credentials/);
@@ -2011,7 +2063,8 @@ test('native assembly and status share capabilities while concurrent requests re
     const ctx = new Context();
     t.after(() => ctx.fiber.dispose());
     await ctx.plugin(SystemPrompt, {});
-    await ctx.plugin(ToolRuntime, { mode: 'native' });
+    await ctx.plugin(ToolRuntime);
+    await ctx.plugin(NativeToolExecutor);
     await ctx.plugin(WebRuntime, { fetchProvider: 'qqbot-pages' });
     let capabilities;
     await ctx.plugin({ inject: ['tools', 'web', 'systemPrompt'], apply(child) { capabilities = installChatPolicy(child); } });
@@ -2069,3 +2122,12 @@ test('native assembly and status share capabilities while concurrent requests re
     assert.match(command.handler(cmdCtx), /OneBot: 未启用/u);
     assert.equal(calls, 0);
 });
+
+// Exercise the native executor's real single-call batch contract.
+async function executeSingleTool(ctx, { name, arguments: args, callId, ...input }) {
+    const toolSet = await ctx.tools.resolve({ agent: input.agent, signal: input.signal, modelSelection: { provider: 'fixture' } });
+    try {
+        const batch = await ctx.tools.execute({ ...input, toolSet, calls: [{ type: 'tool-call', id: callId, name, arguments: args }] });
+        return batch.results[0].result;
+    } finally { toolSet.dispose(); }
+}

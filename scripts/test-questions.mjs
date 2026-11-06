@@ -12,6 +12,7 @@ catch (error) { if (error.code !== 'EEXIST') throw error; }
 const { Context } = await import(`${dshRoot}cordis/lib/index.js`);
 const { default: SystemPrompt } = await import(`${dshRoot}dsh-system-prompt/lib/index.js`);
 const { default: ToolRuntime } = await import(`${dshRoot}dsh-tools/lib/index.js`);
+const NativeToolExecutor = await import(`${dshRoot}dsh-tool-executor-native/lib/index.js`);
 const defaultsRoot = process.env.QQBOT_NATIVE_DEFAULTS_ROOT ?? '/opt/qqbot-defaults';
 const questionModule = process.env.QQBOT_QUESTIONS_MODULE ?? `${defaultsRoot}/qqbot-questions.mjs`;
 const { QQ_QUESTION_TOOL, questionToolSchema, validateQuestionToolCall, QuestionChannel, registerQuestionTool } = await import(questionModule);
@@ -69,7 +70,8 @@ async function questionHarness(t, { sender, timeoutMs = 300_000, requireMention 
     const ctx = new Context();
     t.after(() => ctx.fiber.dispose());
     await ctx.plugin(SystemPrompt, {});
-    await ctx.plugin(ToolRuntime, { mode: 'native' });
+    await ctx.plugin(ToolRuntime);
+    await ctx.plugin(NativeToolExecutor);
     ctx.on('tools/execute', (exec, next) => runInDocumentExecution(exec, next));
 
     const agent = { session: { seq: 0 } };
@@ -142,7 +144,7 @@ function questions(...items) {
 function callQuestion(harness, questionList, callId = 'question-call', agent = harness.agent, signal = new AbortController().signal) {
     const args = { requestId: harness.requestId, questions: questionList };
     const exec = { name: QQ_QUESTION_TOOL, arguments: args, agent, callId, signal };
-    return runInDocumentExecution(exec, () => harness.ctx.tools.execute({
+    return runInDocumentExecution(exec, () => executeSingleTool(harness.ctx, {
         name: QQ_QUESTION_TOOL, arguments: args, agent, callId, signal,
     }));
 }
@@ -497,3 +499,9 @@ test('merged requests retain their original owners even when the other member ow
     assert.equal(harness.channel.tryAnswer('group', 'group-a', 'owner-b', '2', 'right-merged-owner', true), true);
     assert.deepEqual(outputValue(await pending), { status: 'answered', answers: [{ id: 'owner-b-choice', selected: ['B'] }] });
 });
+
+// Exercise the native executor's real single-call batch contract.
+async function executeSingleTool(ctx, { name, arguments: args, callId, ...input }) {
+    const batch = await ctx.tools.execute({ ...input, calls: [{ type: 'tool-call', id: callId, name, arguments: args }] });
+    return batch.results[0].result;
+}

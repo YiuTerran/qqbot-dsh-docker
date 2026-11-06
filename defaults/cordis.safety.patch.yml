@@ -16,7 +16,13 @@
     baseURL: https://api.deepseek.com/anthropic
 - id: tools
   config:
-    mode: native
+    # Clear the pre-0.2.2 selection even if a persisted profile still sets it.
+    mode: null
+# DSH 0.2.2 selects execution through a separately mounted executor.
+- id: tool-executor-native
+  disabled: false
+- id: tool-executor-ptc
+  disabled: true
 # Remove coding-agent capabilities and their model-facing guidance. The runtime
 # guard also denies unknown/preset/plugin tools, so this isn't a denylist alone.
 - id: tool-bash
@@ -36,8 +42,6 @@
 - id: tool-subagent-fork
   disabled: true
 - id: tool-subagent-control
-  disabled: true
-- id: tool-subagent-list-agents
   disabled: true
 - id: tool-workflow
   disabled: true
@@ -103,6 +107,8 @@
     appSecret: __FROM_ENV__
     cwd: /workspace
     requireMention: true
+    # Only dedicated, scoped tools may send files; never auto-deliver model paths.
+    sendPresentedFiles: false
     directPrompt: >-
       This is a chat-only bot. Never execute shell commands, code, general file
       operations, general file generation or sending, general downloads, or background tasks.

@@ -158,6 +158,7 @@ previous_v0_14_2_stock_agents_sha256=c1fc913722d9b620c36ab245a2424e119035dcfa07e
 previous_v0_15_0_stock_agents_sha256=2bfb225fe636f01df3a7ba285e27b93d99ad259563eea7beebd3f8c0329b3162
 previous_v0_16_0_stock_agents_sha256=d5a7a275a94e951b9d5e2dd4c516ba9ed780c570484e5ded2384c0de8b33c689
 legacy_stock_agents_sha256_list='
+a77b4f53d57c32234fd1b130a23b9c5d2674e8a4e576e72e596bd1bd792c6478
 ccbedd1e3662b22f16c80e8c7f5446d0175fac618eb7ce458691feeb675615e6
 1331ab3c6a3430a764f663f4bb82c19e42f80d647c639ceaf3a8db1bd05c856e
 af89bfbe1b1892d0d082fdf7de011fd63f41e38e80e76bec713896148dabd252
@@ -231,7 +232,7 @@ node /usr/local/lib/migrate-profile-runtime.mjs /data/profiles/qqbot /opt/dsh-se
 
 # Existing named volumes retain the originally seeded plugin. Apply the chat
 # policy and upgrade migrations before launch; policy errors stop startup.
-qqbot_dist=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
+qqbot_dist=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib
 if [ ! -d "$qqbot_dist" ]; then
     echo "[entrypoint] Pinned QQ plugin is missing; refusing to start without the qqbot runtime policy" >&2
     exit 78

@@ -85,7 +85,7 @@ function makeQuota() {
 }
 
 function nativeCall(ctx, args, agent, callId) {
-    return ctx.tools.execute({
+    return executeSingleTool(ctx, {
         name: GENERATE_IMAGE_TOOL,
         arguments: args,
         agent,
@@ -108,10 +108,12 @@ async function makeNativeRuntime(t, { imageService, sender }) {
     const { Context } = await import(`${dshRoot}cordis/lib/index.js`);
     const { default: SystemPrompt } = await import(`${dshRoot}dsh-system-prompt/lib/index.js`);
     const { default: ToolRuntime } = await import(`${dshRoot}dsh-tools/lib/index.js`);
+    const NativeToolExecutor = await import(`${dshRoot}dsh-tool-executor-native/lib/index.js`);
     const ctx = new Context();
     t.after(() => ctx.fiber.dispose());
     await ctx.plugin(SystemPrompt, {});
-    await ctx.plugin(ToolRuntime, { mode: 'native' });
+    await ctx.plugin(ToolRuntime);
+    await ctx.plugin(NativeToolExecutor);
     ctx.tools.guard((exec) => {
         bindDocumentExecution(exec);
         return validateGenerationToolCall(exec, route);
@@ -391,3 +393,9 @@ test('a recent image authorization from an earlier request cannot cross into a n
     oldCache.clear();
     newCache.clear();
 });
+
+// Exercise the native executor's real single-call batch contract.
+async function executeSingleTool(ctx, { name, arguments: args, callId, ...input }) {
+    const batch = await ctx.tools.execute({ ...input, calls: [{ type: 'tool-call', id: callId, name, arguments: args }] });
+    return batch.results[0].result;
+}

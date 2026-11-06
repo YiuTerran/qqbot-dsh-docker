@@ -8,7 +8,7 @@ const mode = process.argv[2];
 if (!['write', 'resume'].includes(mode) || !process.env.QQBOT_HISTORY_ROOT) throw new Error('Expected write/resume and QQBOT_HISTORY_ROOT.');
 try {
     for (const name of ['dsh-session-projection', 'dsh-session', 'dsh-session-persistence-jsonl',
-        'dsh-agent', 'dsh-system-prompt', 'dsh-llm', 'dsh-tools', 'dsh-agent-loop']) {
+        'dsh-agent', 'dsh-system-prompt', 'dsh-llm', 'dsh-tools', ...(mode === 'resume' ? ['dsh-tool-executor-native'] : []), 'dsh-agent-loop']) {
         const loaded = await import(`${root}/${name}/lib/index.js`);
         await ctx.plugin(loaded.default ?? loaded, name === 'dsh-session-persistence-jsonl'
             ? { root: process.env.QQBOT_HISTORY_ROOT } : name === 'dsh-agent-loop' ? { agents: [] } : {});

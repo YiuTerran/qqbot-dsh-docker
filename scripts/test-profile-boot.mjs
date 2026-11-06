@@ -221,17 +221,25 @@ try {
   assert.equal(defaultSelection.model, expectedModel, 'default chat model did not follow the active credential mode');
   assert.equal(web?.searchProviders?.has('deepseek-official'), true, 'native search provider must stay registered in every credential mode');
   const searchProvider = web.searchProviders.get('deepseek-official');
-  assert.equal(typeof searchProvider?.resolveOptions, 'function', 'the native search provider options are unavailable');
-  const searchOptions = searchProvider.resolveOptions();
-  assert.equal(searchOptions.apiKeyEnv, expectedSearchApiKeyEnv, 'search must use the highest-priority configured credential');
-  assert.equal(searchOptions.apiKey, undefined, 'persisted literal search keys must be cleared');
-  assert.equal(searchOptions.model, expectedSearchModel, 'native search model did not resolve independently from the chat model');
-  assert.equal(searchOptions.baseURL, expectedSearchBaseUrl, 'native search endpoint did not resolve from deployment configuration');
-  assert.equal(typeof searchOptions.resolveApiKey, 'function', 'native search must resolve its credential at request time');
+  assert.equal(typeof searchProvider?.search, 'function', 'native search facade is unavailable');
+  assert.equal(typeof searchProvider?.ready, 'function', 'native credential-readiness probe is unavailable');
+  assert.equal(await searchProvider.ready(expectedProvider), Boolean(expectedSearchApiKey),
+    'native search readiness does not match deployment credentials');
+  // 0.2.2 registers a facade, not the provider instance. Observe the real
+  // operation behind it without replacing resolution or HTTP behavior.
+  const { DeepSeekSearchProvider } = await import(
+    `${dshRoot}/node_modules/@deepseek-ai/dsh-web-search-deepseek/lib/index.js`);
+  const originalSearch = DeepSeekSearchProvider.prototype.search;
+  let searchOptions;
+  DeepSeekSearchProvider.prototype.search = function (...args) {
+    assert.equal(typeof this.resolveOptions, 'function', 'native operation options are unavailable');
+    searchOptions = this.resolveOptions();
+    return originalSearch.apply(this, args);
+  };
   const originalFetch = globalThis.fetch;
   const searchRequests = [];
   globalThis.fetch = async (url, init) => {
-    searchRequests.push({ url: String(url), headers: new Headers(init?.headers) });
+    searchRequests.push({ url: String(url), headers: new Headers(init?.headers), body: JSON.parse(init?.body) });
     return new Response(JSON.stringify({ error: 'fixture rejected request' }), {
       status: 401,
       headers: { 'content-type': 'application/json' },
@@ -253,9 +261,18 @@ try {
     }
   } finally {
     globalThis.fetch = originalFetch;
+    DeepSeekSearchProvider.prototype.search = originalSearch;
   }
+  assert.ok(searchOptions, 'search facade did not invoke the native provider');
+  assert.equal(searchOptions.apiKeyEnv, expectedSearchApiKeyEnv, 'search must use the highest-priority configured credential');
+  assert.equal(searchOptions.apiKey, undefined, 'persisted literal search keys must be cleared');
+  assert.equal(searchOptions.model, expectedSearchModel, 'native search model did not resolve independently from the chat model');
+  assert.equal(searchOptions.baseURL, expectedSearchBaseUrl, 'native search endpoint did not resolve from deployment configuration');
+  assert.equal(typeof searchOptions.resolveApiKey, 'function', 'native search must resolve its credential at request time');
   if (expectedSearchApiKey) {
     assert.equal(searchRequests.length, 1, 'failed search request must not retry with another credential');
+    assert.equal(searchRequests[0].body.model, expectedSearchModel, 'actual search request used the wrong model');
+    assert.equal(Object.hasOwn(searchRequests[0].body.tools[0], 'max_uses'), false, 'native search must omit the use cap');
     assert.equal(searchRequests[0].url, `${expectedSearchBaseUrl}/messages`, 'native search used an unexpected endpoint');
     assert.equal(searchRequests[0].headers.get('x-api-key'), expectedSearchApiKey, 'native search did not transmit the selected API key');
     assert.equal(searchRequests[0].headers.get('authorization'), `Bearer ${expectedSearchApiKey}`, 'native search authorization did not use the selected API key');
@@ -397,7 +414,7 @@ try {
     const requestId = onebotScope.onebotRequestMetadata(turn)[0]?.requestId;
     assert.ok(requestId, 'OneBot turn metadata did not include an opaque requestId');
     try {
-      const execution = await tools.execute({
+      const execution = await executeSingleTool(tools, {
         name: 'qqbot_onebot_command',
         arguments: { requestId, backend: 'sealdice', command: '.r 1d1' },
         agent,
@@ -417,7 +434,7 @@ try {
       if (onebotFixtureMode) {
         onebotFixtureState.backendReady = false;
         await waitForOnebotCatalog(tools, systemPrompt, false, 15_000, true);
-        const denied = await tools.execute({
+        const denied = await executeSingleTool(tools, {
           name: 'qqbot_onebot_command',
           arguments: { requestId, backend: 'sealdice', command: '.r 1d1' },
           agent,
@@ -452,7 +469,7 @@ try {
     }
   }
 
-  const dangerous = await tools.execute({
+  const dangerous = await executeSingleTool(tools, {
     name: 'exit_plan_mode',
     arguments: {},
     agent: {},
@@ -495,4 +512,10 @@ try {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
+}
+
+// Preserve real native batch admission and result materialization in probes.
+async function executeSingleTool(tools, { name, arguments: args, callId, ...input }) {
+  const batch = await tools.execute({ ...input, calls: [{ type: 'tool-call', id: callId, name, arguments: args }] });
+  return batch.results[0].result;
 }

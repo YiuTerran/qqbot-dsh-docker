@@ -3,13 +3,13 @@ import { join } from 'node:path';
 
 const root = process.argv[2];
 if (!root) {
-  throw new Error('usage: instrument-qqbot-startup.mjs <dsh-qqbot-dist-directory>');
+  throw new Error('usage: instrument-qqbot-startup.mjs <dsh-qqbot-lib-directory>');
 }
 
 const indexPath = join(root, 'index.js');
 const gatewayPath = join(root, 'gateway', 'bootstrap.js');
 const manifest = JSON.parse(await readFile(join(root, '..', 'package.json'), 'utf8'));
-if (manifest.version !== '0.5.2') throw new Error('Startup diagnostics require dsh-qqbot 0.5.2.');
+if (manifest.version !== '0.5.5') throw new Error('Startup diagnostics require dsh-qqbot 0.5.5.');
 
 function replaceOne(content, expression, replacement, label, path) {
   const matches = [...content.matchAll(expression)];

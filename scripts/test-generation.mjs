@@ -40,6 +40,7 @@ catch (error) {
 const { Context } = await import(`${dshRoot}cordis/lib/index.js`);
 const { default: SystemPrompt } = await import(`${dshRoot}dsh-system-prompt/lib/index.js`);
 const { default: ToolRuntime } = await import(`${dshRoot}dsh-tools/lib/index.js`);
+const NativeToolExecutor = await import(`${dshRoot}dsh-tool-executor-native/lib/index.js`);
 
 const png = createPngFixture();
 const execute = promisify(execFile);
@@ -95,7 +96,8 @@ async function nativeGenerationRuntime(t, options) {
     const ctx = new Context();
     t.after(() => ctx.fiber.dispose());
     await ctx.plugin(SystemPrompt, {});
-    await ctx.plugin(ToolRuntime, { mode: 'native' });
+    await ctx.plugin(ToolRuntime);
+    await ctx.plugin(NativeToolExecutor);
     ctx.tools.guard((exec) => {
         bindDocumentExecution(exec);
         return validateGenerationToolCall(exec, options.route);
@@ -110,7 +112,7 @@ async function nativeGenerationRuntime(t, options) {
 }
 
 function nativeCall(ctx, name, args, agent, callId, signal = new AbortController().signal) {
-    return ctx.tools.execute({ name, arguments: args, agent, callId, signal });
+    return executeSingleTool(ctx, { name, arguments: args, agent, callId, signal });
 }
 
 function assertRenderedMarkdownReceipt(output) {
@@ -1774,7 +1776,7 @@ test('image conversion enforces pixel bounds and drains its worker before cancel
 });
 
 for (const quoteMode of ['store', 'rendered-text']) test(`group quote (${quoteMode}) passes the original image bytes through inbound and the native editing tool`, async (t) => {
-    const adapter = '/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/';
+    const adapter = '/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/';
     const { setupMiddlewares } = await import(`${adapter}gateway/middleware-setup.js`);
     const { handleInbound } = await import(`${adapter}transport/inbound.js`);
     const { PublicHttpProvider } = await import(pathToFileURL(join(generationDir, 'qqbot-web-pages.mjs')).href);
@@ -2437,3 +2439,9 @@ test('native generation cancellation drains the call but cannot send after the Q
         endDocumentTurn(agent, firstDocument);
     }
 });
+
+// Exercise the native executor's real single-call batch contract.
+async function executeSingleTool(ctx, { name, arguments: args, callId, ...input }) {
+    const batch = await ctx.tools.execute({ ...input, calls: [{ type: 'tool-call', id: callId, name, arguments: args }] });
+    return batch.results[0].result;
+}

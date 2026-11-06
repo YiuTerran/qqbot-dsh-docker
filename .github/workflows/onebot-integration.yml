@@ -29,15 +29,19 @@ jobs:
         with:
           submodules: recursive
       - uses: docker/setup-buildx-action@v3
-      - name: Build validation images
-        run: |
-          docker build -t dsh-qqbot:onebot-${{ matrix.arch }} .
-          docker build -t qqbot-gensokyo:integration third_party/gensokyo-mcp
-          docker build -t qqbot-sealdice:integration third_party/sealdice-core
+      - name: Build QQ validation image
+        run: docker build -t dsh-qqbot:onebot-${{ matrix.arch }} .
       - name: Verify disabled tools and existing chat behavior
         run: IMAGE=dsh-qqbot:onebot-${{ matrix.arch }} SKIP_BUILD=1 ./scripts/test-local.sh
       - name: Verify persistent runtime upgrade from v0.17.0
         run: IMAGE=dsh-qqbot:onebot-${{ matrix.arch }} ./scripts/test-runtime-upgrade.sh
+      - name: Verify persistent runtime upgrade from v0.18.2
+        run: IMAGE=dsh-qqbot:onebot-${{ matrix.arch }} LEGACY_IMAGE=tryao/qqbot-dsh:v0.18.2 LEGACY_VERSION=0.5.2 ./scripts/test-runtime-upgrade.sh
+
+      - name: Build native backend validation images
+        run: |
+          docker build -t qqbot-gensokyo:integration third_party/gensokyo-mcp
+          docker build -t qqbot-sealdice:integration third_party/sealdice-core
       - name: Verify real MCP and native SeaDice behavior
         run: python3 scripts/test-onebot-integration.py --qqbot-image dsh-qqbot:onebot-${{ matrix.arch }} --evidence /tmp/onebot-integration.json
       - uses: actions/upload-artifact@v4

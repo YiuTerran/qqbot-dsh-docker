@@ -6,13 +6,14 @@
 
 | 组件 | 固定版本 |
 | --- | --- |
-| Node.js | `24.14.0`（Debian bookworm slim） |
-| pnpm | `12.6.0` |
-| dsh | `@deepseek-ai/dsh@0.2.1-rc.2` |
-| QQ 插件 | `@tencent-connect/dsh-qqbot@0.5.2` |
+| Node.js | `24.22.2`（Debian bookworm slim） |
+| pnpm | `12.18.0` |
+| 公网 IP 校验 | `ipaddr.js@2.5.0` |
+| dsh | `@deepseek-ai/dsh@0.2.2-rc.1` |
+| QQ 插件 | `@tencent-connect/dsh-qqbot@0.5.5` |
 | QQ Bot SDK | `@tencent-connect/qqbot-nodejs@1.0.5` |
 
-本版本镜像标签为 `tryao/qqbot-dsh:v0.18.2`；dsh 跟随 `next` 通道，但构建固定上述精确版本。可选 TRPG 组件独立发布：Gensokyo-MCP `v0.3.1`、海豹骰 `v1.6.2-bridge.8`。Dockerfile 固定基础镜像摘要及软件包版本；不发布 `latest` 标签。
+最近已发布镜像标签为 `tryao/qqbot-dsh:v0.18.2`；上表为当前升级源码的依赖，尚未发布新镜像。dsh 跟随 `next` 通道，但构建固定上述精确版本。可选 TRPG 组件独立发布：Gensokyo-MCP `v0.3.1`、海豹骰 `v1.6.2-bridge.8`。Dockerfile 固定基础镜像摘要及软件包版本；不发布 `latest` 标签。
 
 ## 快速部署
 

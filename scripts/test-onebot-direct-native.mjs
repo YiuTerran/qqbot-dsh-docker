@@ -21,7 +21,7 @@ catch (error) {
 }
 
 const adapterRoot = resolve(process.env.QQBOT_ADAPTER_DIST
-    ?? '/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist');
+    ?? '/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib');
 const sdkRoot = resolve(process.env.QQBOT_SDK_ROOT
     ?? '/data/profiles/qqbot/node_modules/@tencent-connect/qqbot-nodejs/dist');
 const directModulePath = process.env.QQBOT_ONEBOT_DIRECT_MODULE
@@ -801,7 +801,8 @@ test('bootstrap executes with stubs and passes the registered service and sender
     imports.set('@tencent-connect/qqbot-nodejs/protocol', { MediaApi: {}, MessageApi: {}, messagePath: '/messages' });
     imports.set('@tencent-connect/qqbot-nodejs', { QQBot: FakeBot });
     imports.set('../session/index.js', { SessionManager: FakeManager });
-    imports.set('../transport/index.js', { handleInbound() {}, createOutboundHandler() { return async () => {}; } });
+    imports.set('../transport/index.js', { handleInbound() {}, createOutboundHandler() { return { routeSessionEvent() {}, routeStreamFrame() {} }; } });
+    imports.set('../transport/events.js', { parseStreamFrame() { return undefined; } });
     imports.set('../transport/reply-limiter.js', { ReplyLimiter: FakeReplyLimiter });
     imports.set('../transport/msgid-cache.js', { cacheMsgId() {}, cacheEventId() {} });
     imports.set('../transport/reply-target.js', {

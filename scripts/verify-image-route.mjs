@@ -134,9 +134,11 @@ try {
     const { Context } = await import(`${dshRoot}cordis/lib/index.js`);
     const { default: SystemPrompt } = await import(`${dshRoot}dsh-system-prompt/lib/index.js`);
     const { default: ToolRuntime } = await import(`${dshRoot}dsh-tools/lib/index.js`);
+    const NativeToolExecutor = await import(`${dshRoot}dsh-tool-executor-native/lib/index.js`);
     ctx = new Context();
     await ctx.plugin(SystemPrompt, {});
-    await ctx.plugin(ToolRuntime, { mode: 'native' });
+    await ctx.plugin(ToolRuntime);
+    await ctx.plugin(NativeToolExecutor);
     ctx.tools.guard((exec) => {
         scopeModules.bindDocumentExecution(exec);
         return generation.validateGenerationToolCall(exec, route);
@@ -159,7 +161,7 @@ try {
     }], [], { documentScope });
     const [requestId] = generationScope.requests.keys();
     assert.equal(typeof requestId, 'string');
-    const execute = (name, args, callId) => ctx.tools.execute({ name, arguments: args, agent, callId, signal: new AbortController().signal });
+    const execute = (name, args, callId) => executeSingleTool(ctx, { name, arguments: args, agent, callId, signal: new AbortController().signal });
 
     phase = 'markdown-verification';
     const markdown = await execute(generation.CREATE_MARKDOWN_TOOL, { requestId, filename: 'live-probe.md', content: '# Live probe\n' }, 'live-markdown');
@@ -209,4 +211,10 @@ finally {
         console.error(JSON.stringify({ ok: false, classification: 'cleanup-failed', ...metadata() }));
         process.exitCode = 1;
     }
+}
+
+// Exercise the native executor's real single-call batch contract.
+async function executeSingleTool(ctx, { name, arguments: args, callId, ...input }) {
+    const batch = await ctx.tools.execute({ ...input, calls: [{ type: 'tool-call', id: callId, name, arguments: args }] });
+    return batch.results[0].result;
 }

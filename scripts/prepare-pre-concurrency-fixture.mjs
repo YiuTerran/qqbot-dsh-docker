@@ -73,8 +73,8 @@ function revertDeepSeekTimeoutNotices(source) {
         '            this.toolFailureTurns.delete(startRecord);\n            this.timeoutNoticeTurns.delete(startRecord);',
         '            this.toolFailureTurns.delete(startRecord);', 'timeout status accepted turn start');
     source = replaceOnce(source,
-        "    onTurnEnd(sessionId, record, event, turnId, originRecord = record) {\n        if (event.reason?.kind === 'cancelled') this.timeoutNoticeTurns.delete(originRecord);",
-        '    onTurnEnd(sessionId, record, event, turnId, originRecord = record) {', 'timeout status turn cancellation');
+        "    onTurnEnd(sessionId, record, event, turnId, originRecord = record) {\n        this.streamAttempts.delete(sessionId);\n        if (event.reason?.kind === 'cancelled') this.timeoutNoticeTurns.delete(originRecord);",
+        '    onTurnEnd(sessionId, record, event, turnId, originRecord = record) {\n        this.streamAttempts.delete(sessionId);', 'timeout status turn cancellation');
     source = replaceOnce(source, [
         "            if (classifyProviderFailure(failure) === 'timeout') {",
         '                const existingTimeoutNotice = this.timeoutNoticeTurns.get(originRecord);',
@@ -568,6 +568,33 @@ await edit('transport/inbound.js', (source) => {
 
 await edit('transport/outbound.js', (source) => {
     source = revertDeepSeekTimeoutNotices(source);
+    // Restore the pinned upstream transient method before removing batch policy.
+    const streamStart = source.indexOf('    routeStreamFrame(agentId, delta) {');
+    const streamEnd = source.indexOf('    /** 获取或创建', streamStart);
+    if (streamStart < 0 || streamEnd < streamStart || !source.slice(streamStart, streamEnd).includes('// Chat-only batch-bound transient streams v1.'))
+        throw new Error('pre-concurrency fixture expected current transient stream policy');
+    source = source.slice(0, streamStart) + [
+        "    routeStreamFrame(agentId, delta) {",
+        "        if (delta.kind === 'attempt-start') {",
+        "            this.streamAttempts.set(agentId, delta.attemptId);",
+        "            this.buffers.get(agentId)?.reset();",
+        "            return;",
+        "        }",
+        "        // text-delta：首帧未见 start 时自愈记录，迟到帧丢弃",
+        "        const current = this.streamAttempts.get(agentId);",
+        "        if (current === undefined) {",
+        "            this.streamAttempts.set(agentId, delta.attemptId);",
+        "        }",
+        "        else if (current !== delta.attemptId) {",
+        "            return;",
+        "        }",
+        "        const record = this.manager.findBySessionId(agentId);",
+        "        if (record === undefined)",
+        "            return;",
+        "        this.appendChunk(agentId, record, delta.text);",
+        "    }",
+    ].join('\n') + '\n' + source.slice(streamEnd);
+    source = replaceOnce(source, '        this.streamAttempts.delete(sessionId);\n', '', 'transient turn cleanup');
     if (source.includes('// Chat-only deferred tool failures v1.')) {
         source = replaceOnce(source,
             '    toolCalls = new Map();\n    // Chat-only deferred tool failures v1.\n    toolFailureTurns = new WeakMap();',
@@ -802,7 +829,7 @@ await edit('transport/outbound.js', (source) => {
         "import { captureMergeBatchReply, noteMergeBatchTurnStart, trackMergeBatchSend } from '" + helper + "';\n",
         '', 'outbound merge import');
     const routeStart = source.indexOf('    route(session, raw) {');
-    const routeEnd = source.indexOf('    /** 流式文本增量：累积到会话 buffer */', routeStart);
+    const routeEnd = source.indexOf('    /** durable assistant/chunk 事件的流式增量（历史格式兼容保留，当前宿主不再生产该事件） */', routeStart);
     if (routeStart < 0 || routeEnd <= routeStart) throw new Error('pre-concurrency fixture expected OutboundRouter.route()');
     const route = [
         '    route(session, raw) {',
@@ -838,13 +865,13 @@ await edit('transport/outbound.js', (source) => {
         '        }',
     ].join('\n'), [
         '        if (buffer !== undefined && buffer.text.trim()) {',
-        '            void buffer.flush();',
+        '            this.trackText(sessionId, buffer.flush());',
         '            this.buffers.delete(sessionId);',
         '            return;',
         '        }',
     ].join('\n'), 'outbound message buffer tracking');
     source = replaceOnce(source, "        trackMergeBatchSend(originRecord, this.send(record, fullText, 'sendMarkdown'));",
-        "        void this.send(record, fullText, 'sendMarkdown');", 'outbound message tracking');
+        "        this.trackText(sessionId, this.send(record, fullText, 'sendMarkdown'));", 'outbound message tracking');
     source = replaceOnce(source, '    onToolResult(record, event, raw, originRecord = record) {',
         '    onToolResult(record, event, raw) {', 'outbound tool signature');
     source = replaceOnce(source, "            trackMergeBatchSend(originRecord, this.send(record, formatToolFailure(), 'sendToolResultError'));",

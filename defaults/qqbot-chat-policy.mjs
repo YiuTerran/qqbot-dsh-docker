@@ -578,26 +578,80 @@ export function installChatPolicy(ctx) {
         text: (context) => context.agent ? acceptedCapabilities.get(context.agent) ?? '' : acceptedDeploymentCapabilities });
     ctx.systemPrompt.context({ name: 'qqbot:image-sources', order: 10255, required: true, interpolate: false,
         text: context => renderCurrentImageSources(context.agent) });
-    ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
-        const assembly = await next();
+    const snapshotFor = (toolSchemas, context = {}, admittedToolNames) => {
         const agent = context?.agent;
         const turn = agent ? getOnebotTurn(agent) : undefined;
         const onebotAuthorized = Boolean(turn?.active && !turn.externalSignal?.aborted
             && (!turn.isCurrentRecord || turn.isCurrentRecord())
             && [...turn.requests.keys()].some((id) => !turn.blockedRequests.has(id)));
         const { tools: visibleTools, snapshot } = capabilities.getSnapshot({
-            toolSchemas: assembly.tools,
+            toolSchemas,
+            admittedToolNames,
             requestContext: {
                 view: agent ? 'request' : 'deployment',
                 onebotAuthorized,
                 documentMode: Boolean(agent && getDocumentTurn(agent)?.documentMode),
             },
         });
+        return { visibleTools, snapshot };
+    };
+    // DSH 0.2.2 makes tool declarations provider-owned: the presentation
+    // waterfall cannot filter them. Narrow the actual step admission instead.
+    // Keep the upstream set's scope, registration identity and disposal checks.
+    const originalResolve = tools.resolve;
+    const stepSelections = new WeakMap();
+    tools.resolve = async function (context) {
+        const source = await originalResolve.call(this, context);
+        try {
+            const { visibleTools } = snapshotFor([...source.view(context.agent).values()], context);
+            const names = new Set(visibleTools.map(tool => tool.name));
+            const selection = Object.freeze({
+                dispose: () => source.dispose(),
+                view: scope => new Map([...source.view(scope)].filter(([name]) => names.has(name))),
+            });
+            stepSelections.set(selection, { names, source });
+            return selection;
+        } catch (error) {
+            source.dispose();
+            throw error;
+        }
+    };
+    const systemPrompt = ctx.systemPrompt;
+    const originalAssemble = systemPrompt.assemble;
+    systemPrompt.assemble = async function (context = {}) {
+        const assembly = await originalAssemble.call(this, context);
+        const step = stepSelections.get(context.toolSet);
+        // Keep registration facts for accurate restriction reasons, while only
+        // reporting names actually projected by the admitted native executor.
+        const nativeSchemas = tools.schemas(context.scope ?? context.agent, context.toolSet);
+        const nativeByName = new Map(nativeSchemas.map(tool => [tool.name, tool]));
+        const projectedNames = new Set(assembly.tools.map(tool => tool.name)
+            .filter(name => nativeByName.has(name) && (!step || step.names.has(name))));
+        const candidates = step ? [...step.source.view(context.agent).values()] : nativeSchemas;
+        const { visibleTools, snapshot } = snapshotFor(candidates, context, projectedNames);
+        // A state change while assembly awaited may revoke, never expand, the
+        // step's admission. Extra provider/preset schemas remain fail-closed.
+        const admitted = step?.names;
+        if (admitted) {
+            const visibleNames = new Set(visibleTools.map(tool => tool.name));
+            for (const name of admitted) if (!visibleNames.has(name)) admitted.delete(name);
+        }
+        const agent = context.agent;
         const runtimeContext = capabilityRuntimeContext(snapshot);
         if (agent) acceptedCapabilities.set(agent, runtimeContext.text);
         else acceptedDeploymentCapabilities = runtimeContext.text;
-        return { ...assembly, tools: visibleTools,
+        const visibleNames = new Set(visibleTools.map(tool => tool.name));
+        // Provider-only declarations cannot forge an admitted native capability
+        // or replace its schema, even by copying an allowlisted tool's name.
+        const finalTools = [...new Set(assembly.tools.map(tool => tool.name))]
+            .filter(name => visibleNames.has(name) && nativeByName.has(name))
+            .map(name => nativeByName.get(name));
+        return { ...assembly, tools: finalTools,
             contexts: [...assembly.contexts.filter((item) => item.name !== 'qqbot:capabilities'), runtimeContext] };
+    };
+    ctx.on('dispose', () => {
+        tools.resolve = originalResolve;
+        systemPrompt.assemble = originalAssemble;
     });
     console.log('[im-qqbot] chat-only policy installed; turn-scoped images, web search, and bounded plain-text reading');
     return capabilities;

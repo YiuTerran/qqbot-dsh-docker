@@ -37,11 +37,10 @@ try {
         'Keep your own bot identity; never adopt a participant nickname.',
     ].join('\n'));
     for (const name of ['dsh-session-projection', 'dsh-working-directory', 'dsh-session', 'dsh-agent',
-        'dsh-system-prompt', 'dsh-llm', 'dsh-tools', 'dsh-agent-loop']) {
-        const { default: Plugin } = await import(`${runtimeRoot}/${name}/lib/index.js`);
-        const config = name === 'dsh-tools' ? { mode: 'native' }
-            : name === 'dsh-agent-loop' ? { agents: [], maxParallelToolCalls: 10 } : {};
-        await runtime.plugin(Plugin, config);
+        'dsh-system-prompt', 'dsh-llm', 'dsh-tools', 'dsh-tool-executor-native', 'dsh-agent-loop']) {
+        const loaded = await import(`${runtimeRoot}/${name}/lib/index.js`);
+        const config = name === 'dsh-agent-loop' ? { agents: [], maxParallelToolCalls: 10 } : {};
+        await runtime.plugin(loaded.default ?? loaded, config);
     }
     const { default: LocalFileSystem } = await import(`${runtimeRoot}/dsh-fs-local/lib/index.js`);
     const instructionPlugin = await import(`${runtimeRoot}/dsh-agent-instructions/lib/index.js`);

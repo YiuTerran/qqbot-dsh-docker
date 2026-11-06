@@ -85,7 +85,7 @@ function makeQuota() {
 }
 
 function nativeCall(ctx, args, agent, callId) {
-    return ctx.tools.execute({
+    return executeSingleTool(ctx, {
         name: GENERATE_IMAGE_TOOL,
         arguments: args,
         agent,
@@ -108,10 +108,12 @@ async function makeNativeRuntime(t, { imageService, sender }) {
     const { Context } = await import(`${dshRoot}cordis/lib/index.js`);
     const { default: SystemPrompt } = await import(`${dshRoot}dsh-system-prompt/lib/index.js`);
     const { default: ToolRuntime } = await import(`${dshRoot}dsh-tools/lib/index.js`);
+    const NativeToolExecutor = await import(`${dshRoot}dsh-tool-executor-native/lib/index.js`);
     const ctx = new Context();
     t.after(() => ctx.fiber.dispose());
     await ctx.plugin(SystemPrompt, {});
-    await ctx.plugin(ToolRuntime, { mode: 'native' });
+    await ctx.plugin(ToolRuntime);
+    await ctx.plugin(NativeToolExecutor);
     ctx.tools.guard((exec) => {
         bindDocumentExecution(exec);
         return validateGenerationToolCall(exec, route);
@@ -187,7 +189,7 @@ function sourceRequest(options = {}) {
         text: options.text ?? 'Edit this image.', currentAttachments: options.current ?? [], quotedAttachments: options.quoted ?? [] };
 }
 async function executeLook(ctx, args, agent, callId) {
-    return ctx.tools.execute({ name: 'qqbot_describe_image', arguments: args, agent, callId,
+    return executeSingleTool(ctx, { name: 'qqbot_describe_image', arguments: args, agent, callId,
         signal: new AbortController().signal });
 }
 
@@ -199,7 +201,7 @@ test('native generation -> next-turn vision -> editing uses exactly the generate
         async generate(input) { calls.push(input);return Buffer.from(png); },
     } });
     // The real adapter vision tool must receive a call-local memory attachment.
-    const { registerDescribeImageTool } = await import('/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/vision-tool.js');
+    const { registerDescribeImageTool } = await import('/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/media/vision-tool.js');
     const attachments = { async saveImage() { assert.fail('source images must never be saved to disk'); },
         async readImage() { assert.fail('unbound memory read'); }, async readImageRequest() { assert.fail('unbound variant'); }, imageHostPath() { return undefined; } };
     let visionCalls = 0;
@@ -352,3 +354,9 @@ test('reset during an in-flight edit revokes source, suppresses late delivery an
     assert.equal(imageSources.stats().groups, 0);
     await finishTurn(agent, turn.documentScope, turn.generationScope);
 });
+
+// Exercise the native executor's real single-call batch contract.
+async function executeSingleTool(ctx, { name, arguments: args, callId, ...input }) {
+    const batch = await ctx.tools.execute({ ...input, calls: [{ type: 'tool-call', id: callId, name, arguments: args }] });
+    return batch.results[0].result;
+}

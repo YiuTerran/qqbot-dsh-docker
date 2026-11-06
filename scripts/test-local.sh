@@ -51,6 +51,7 @@ previous_stock_agents_v0_14_2_fixture="${repo_root}/scripts/fixtures/agents-v0.1
 previous_stock_agents_v0_15_0_fixture="${repo_root}/scripts/fixtures/agents-v0.15.0-stock.md"
 previous_stock_agents_v0_16_0_fixture="${repo_root}/scripts/fixtures/agents-v0.16.0-stock.md"
 legacy_stock_agents_fixtures=(
+    "${repo_root}/scripts/fixtures/agents-v0.18.2-stock.md"
     "${repo_root}/scripts/fixtures/agents-v0.18.0-stock.md"
     "${repo_root}/scripts/fixtures/agents-v0.17.0-stock.md"
     "${repo_root}/scripts/fixtures/agents-v0.16.1-stock.md"
@@ -80,6 +81,7 @@ legacy_stock_agents_fixtures=(
     "${repo_root}/scripts/fixtures/agents-v0.16.0-stock.md"
 )
 legacy_stock_agents_hashes=(
+    a77b4f53d57c32234fd1b130a23b9c5d2674e8a4e576e72e596bd1bd792c6478
     ccbedd1e3662b22f16c80e8c7f5446d0175fac618eb7ce458691feeb675615e6
     1331ab3c6a3430a764f663f4bb82c19e42f80d647c639ceaf3a8db1bd05c856e
     af89bfbe1b1892d0d082fdf7de011fd63f41e38e80e76bec713896148dabd252
@@ -956,7 +958,7 @@ docker create \
         test ! -L /data/qqbot-media
         test -w /data/qqbot-media
         node -e "const fs=require(\"node:fs\"); const p=\"/data/qqbot-media/cache-persistence-fixture.png\"; const b=Buffer.from(\"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/g3sAAAAASUVORK5CYII=\", \"base64\"); if(fs.existsSync(p)){if(!fs.readFileSync(p).equals(b)) throw new Error(\"media fixture changed\");} else fs.writeFileSync(p,b);"
-        media_cleaner=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/media-cleaner.js
+        media_cleaner=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/media/media-cleaner.js
         grep -Fq "// Chat-only persistent media root v1." "$media_cleaner"
         grep -Fq "export const MEDIA_ROOT = '\''/data/qqbot-media'\'';" "$media_cleaner"
         node --check "$media_cleaner"
@@ -969,11 +971,11 @@ docker create \
         test -L /usr/local/bin/dsh
         test -L /usr/local/bin/pnpm
         dsh --version
-        grep -Rqs "gateway initialization failed" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
-        grep -Rqs "QQ gateway is still not ready" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
-        grep -Fq "export const inject =" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/index.js
-        grep -Fq "systemPrompt" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/index.js
-        middleware_setup=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/gateway/middleware-setup.js
+        grep -Rqs "gateway initialization failed" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib
+        grep -Rqs "QQ gateway is still not ready" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib
+        grep -Fq "export const inject =" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/index.js
+        grep -Fq "systemPrompt" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/index.js
+        middleware_setup=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/gateway/middleware-setup.js
         grep -Fq "createScopedQuoteRef" "$middleware_setup"
         grep -Fq "bot.use(createScopedQuoteRef(quoteRef));" "$middleware_setup"
         grep -Fq "import { createHistorySnapshotBuffer } from '\''/opt/qqbot-defaults/qqbot-history-snapshot.mjs'\'';" "$middleware_setup"
@@ -999,58 +1001,44 @@ docker create \
         node --check /opt/qqbot-defaults/qqbot-onebot-scope.mjs
         node --check /opt/qqbot-defaults/qqbot-onebot-log.mjs
         node --check /opt/qqbot-defaults/qqbot-log-text.mjs
-        node --check /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/transport/inbound.js
-        node --check /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/transport/outbound.js
-        node --check /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/model/prefs-store.js
-        node --check /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/model/model-resolver.js
-        node --check /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/session/session-manager.js
+        node --check /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/transport/inbound.js
+        node --check /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/transport/outbound.js
+        node --check /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/model/prefs-store.js
+        node --check /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/model/model-resolver.js
+        node --check /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/session/session-manager.js
         dump=/tmp/qqbot-dump-config.yaml
         dsh --profile qqbot --patch /opt/qqbot-defaults/cordis.safety.patch.yml --dump-config >"$dump"
-        grep -A2 -F -- "- id: tool-bash" "$dump" | grep -Fq "disabled: true"
-        grep -A2 -F -- "- id: tool-fs" "$dump" | grep -Fq "disabled: true"
-        grep -A12 -F -- "- id: tool-subagent" "$dump" | grep -Fq "disabled: true"
-        grep -A2 -F -- "- id: ptc-runtime" "$dump" | grep -Fq "disabled: true"
-        grep -A4 -F -- "- id: web" "$dump" | grep -Fq "searchProvider: deepseek-official"
-        grep -A4 -F -- "- id: web" "$dump" | grep -Fq "fetchProvider: qqbot-pages"
-        grep -A6 -F -- "- id: web-fetch-http" "$dump" | grep -Fq "disabled: true"
-        grep -A9 -F -- "- id: tool-web" "$dump" | grep -Fq "searchMaxResults: 8"
-        grep -A9 -F -- "- id: tool-web" "$dump" | grep -Fq "searchMaxQueries: 4"
-        grep -A8 -F -- "- id: web-search-deepseek" "$dump" | grep -Fq "maxUses: 0"
-        grep -A9 -F -- "- id: tool-web" "$dump" | grep -Fq "searchTimeoutMs: 60000"
-        grep -A9 -F -- "- id: tool-web" "$dump" | grep -Fq "fetch: true"
-        grep -A3 -F -- "- id: tools" "$dump" | grep -Fq "mode: native"
-        grep -A4 -F -- "- id: agent-loop" "$dump" | grep -Fq "agents: []"
-        test "$(grep -A6 -F -- "- id: im-qqbot" "$dump" | grep -Fc "appId: __FROM_ENV__")" -eq 1
-        test "$(grep -A6 -F -- "- id: im-qqbot" "$dump" | grep -Fc "appSecret: __FROM_ENV__")" -eq 1
+        node /repo/scripts/verify-config-policy.mjs "$dump"
         node --test /tmp/test-chat-policy.mjs
         QQBOT_DEEPSEEK_STATUS_MODULE=/opt/qqbot-defaults/qqbot-deepseek-status.mjs node --test /tmp/test-deepseek-status.mjs
         node --test /tmp/test-qqbot-mention-text.mjs
-        QQBOT_LLM_MODULE=/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm/lib/index.js QQBOT_RUNTIME_ROOT=/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-model-context.mjs
+        QQBOT_LLM_MODULE=/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai/dsh-llm/lib/index.js QQBOT_RUNTIME_ROOT=/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib node --test /tmp/test-model-context.mjs
         QQBOT_HISTORY_SNAPSHOT_MODULE=/opt/qqbot-defaults/qqbot-history-snapshot.mjs node --test /tmp/test-group-history.mjs
         QQBOT_PENDING_IMAGES_MODULE=/opt/qqbot-defaults/qqbot-pending-images.mjs QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs node --test /tmp/test-pending-images.mjs
         node --test /tmp/test-pending-images-native.mjs
         node --test /tmp/test-memory-images.mjs
-        QQBOT_RECOVERY_MODULE=/opt/qqbot-defaults/qqbot-session-recovery.mjs QQBOT_HISTORY_SNAPSHOT_MODULE=/opt/qqbot-defaults/qqbot-history-snapshot.mjs QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-session-recovery.mjs
-        QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-provider-errors.mjs
-        QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-concurrency.mjs
-        QQBOT_GENERATION_MODULE=/opt/qqbot-defaults/qqbot-generation.mjs QQBOT_GENERATION_SCOPE_MODULE=/opt/qqbot-defaults/qqbot-generation-scope.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test --test-timeout=30000 /tmp/test-generation.mjs
-        QQBOT_GENERATION_MODULE=/opt/qqbot-defaults/qqbot-generation.mjs QQBOT_GENERATION_SCOPE_MODULE=/opt/qqbot-defaults/qqbot-generation-scope.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test --test-timeout=30000 /tmp/test-recent-image-generation.mjs
+        QQBOT_RECOVERY_MODULE=/opt/qqbot-defaults/qqbot-session-recovery.mjs QQBOT_HISTORY_SNAPSHOT_MODULE=/opt/qqbot-defaults/qqbot-history-snapshot.mjs QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib node --test /tmp/test-session-recovery.mjs
+        QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib node --test /tmp/test-provider-errors.mjs
+        QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib node --test /tmp/test-concurrency.mjs
+        QQBOT_GENERATION_MODULE=/opt/qqbot-defaults/qqbot-generation.mjs QQBOT_GENERATION_SCOPE_MODULE=/opt/qqbot-defaults/qqbot-generation-scope.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib node --test --test-timeout=30000 /tmp/test-generation.mjs
+        QQBOT_GENERATION_MODULE=/opt/qqbot-defaults/qqbot-generation.mjs QQBOT_GENERATION_SCOPE_MODULE=/opt/qqbot-defaults/qqbot-generation-scope.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib node --test --test-timeout=30000 /tmp/test-recent-image-generation.mjs
         QQBOT_GENERATION_SCOPE_MODULE=/opt/qqbot-defaults/qqbot-generation-scope.mjs node --test /tmp/test-generation-scope.mjs
         QQBOT_GENERATION_QUOTA_MODULE=/opt/qqbot-defaults/qqbot-generation-quotas.mjs node --test /tmp/test-generation-quotas.mjs
         QQBOT_ONEBOT_MODULE_ROOT=/opt/qqbot-defaults QQBOT_ONEBOT_PATCHER_SOURCE=/usr/local/lib/enforce-chat-only.mjs QQBOT_SDK_API_CLIENT_MODULE=/data/profiles/qqbot/node_modules/@tencent-connect/qqbot-nodejs/dist/protocol/api/api-client.js node --test /tmp/test-onebot-native.mjs
-        QQBOT_ONEBOT_MODULE_ROOT=/opt/qqbot-defaults QQBOT_ONEBOT_PATCHER_SOURCE=/usr/local/lib/enforce-chat-only.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-onebot-log.mjs
+        QQBOT_ONEBOT_MODULE_ROOT=/opt/qqbot-defaults QQBOT_ONEBOT_PATCHER_SOURCE=/usr/local/lib/enforce-chat-only.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib node --test /tmp/test-onebot-log.mjs
         QQBOT_ONEBOT_MODULE_ROOT=/opt/qqbot-defaults node --test /tmp/test-onebot-direct.mjs
         QQBOT_ONEBOT_MODULE_ROOT=/opt/qqbot-defaults QQBOT_SEALDICE_POLICY_FIXTURE=/tmp/onebot-bridge-policy.json node --test /tmp/test-sealdice-policy.mjs
-        QQBOT_ONEBOT_DIRECT_MODULE=/opt/qqbot-defaults/qqbot-onebot-direct.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-onebot-direct-native.mjs
-        QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist QQBOT_ENFORCER_SCRIPT=/usr/local/lib/enforce-chat-only.mjs node --test /tmp/test-recovery-upgrade.mjs
+        QQBOT_ONEBOT_DIRECT_MODULE=/opt/qqbot-defaults/qqbot-onebot-direct.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib node --test /tmp/test-onebot-direct-native.mjs
+        QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib QQBOT_ENFORCER_SCRIPT=/usr/local/lib/enforce-chat-only.mjs node --test /tmp/test-recovery-upgrade.mjs
         QQBOT_NATIVE_DEFAULTS_ROOT=/opt/qqbot-defaults QQBOT_QUESTIONS_MODULE=/opt/qqbot-defaults/qqbot-questions.mjs node --test /tmp/test-questions.mjs
-        QQBOT_NATIVE_DEFAULTS_ROOT=/opt/qqbot-defaults QQBOT_QUESTIONS_MODULE=/opt/qqbot-defaults/qqbot-questions.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist QQBOT_SDK_ROOT=/data/profiles/qqbot/node_modules/@tencent-connect/qqbot-nodejs/dist node --test /tmp/test-questions-native.mjs
+        QQBOT_NATIVE_DEFAULTS_ROOT=/opt/qqbot-defaults QQBOT_QUESTIONS_MODULE=/opt/qqbot-defaults/qqbot-questions.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib QQBOT_SDK_ROOT=/data/profiles/qqbot/node_modules/@tencent-connect/qqbot-nodejs/dist node --test /tmp/test-questions-native.mjs
         QQBOT_CAPABILITY_ROOT=/opt/qqbot-defaults node --test /repo/scripts/test-capabilities.mjs
         node --test /repo/scripts/test-capabilities-provider.mjs
-        QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /repo/scripts/test-compaction-native.mjs
+        QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib node --test /repo/scripts/test-compaction-native.mjs
         node --test /repo/scripts/test-vision-response.mjs
         node --test /repo/scripts/test-image-sources.mjs
         QQBOT_GENERATION_MODULE=/opt/qqbot-defaults/qqbot-generation.mjs node --test /repo/scripts/test-image-source-native.mjs
+        node /repo/scripts/test-qqbot-055-patches.mjs /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot
         node /tmp/test-profile-boot.mjs
         QQBOT_TEST_ONEBOT_FIXTURE=true QQBOT_APPID=123456789 node /tmp/test-profile-boot.mjs
     '
@@ -1066,7 +1054,7 @@ docker run --rm \
     "$IMAGE" \
     node -e '
         const plugin = require("/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/package.json");
-        if (plugin.version !== "0.5.2") process.exit(1);
+        if (plugin.version !== "0.5.5") process.exit(1);
         const fs = require("fs");
         if (!fs.readFileSync("/data/AGENTS.md", "utf8").includes("蓝色大肥鱼")) process.exit(1);
         if (!fs.existsSync("/workspace/.dsh-qqbot-test-writable")) process.exit(1);
@@ -1096,7 +1084,7 @@ docker run --rm --network none --entrypoint sh --volume "${dice_legacy_data_volu
 '
 docker run --rm --network none --entrypoint node --volume "${dice_legacy_data_volume}:/data" "$IMAGE" -e '
     const fs = require("node:fs");
-    const path = "/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/gateway/middleware-setup.js";
+    const path = "/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/gateway/middleware-setup.js";
     let source = fs.readFileSync(path, "utf8");
     const replaceExactlyOnce = (before, after, label) => {
         const parts = source.split(before);
@@ -1113,11 +1101,11 @@ docker run --rm --network none --entrypoint node --volume "${dice_legacy_data_vo
 docker run --rm --network none --entrypoint node \
     --volume "${dice_legacy_data_volume}:/data" \
     --mount "type=bind,src=${pre_concurrency_fixture},dst=/tmp/prepare-pre-concurrency-fixture.mjs,readonly" \
-    "$IMAGE" /tmp/prepare-pre-concurrency-fixture.mjs /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
+    "$IMAGE" /tmp/prepare-pre-concurrency-fixture.mjs /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib
 docker run --rm --network none --entrypoint node \
     --volume "${dice_legacy_data_volume}:/data" \
     --mount "type=bind,src=${pre_recovery_fixture},dst=/tmp/prepare-pre-recovery-fixture.mjs,readonly" \
-    "$IMAGE" /tmp/prepare-pre-recovery-fixture.mjs /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
+    "$IMAGE" /tmp/prepare-pre-recovery-fixture.mjs /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib
 check_dice_legacy_upgrade() {
     docker run --rm --network none \
         --volume "${dice_legacy_data_volume}:/data" \
@@ -1128,8 +1116,8 @@ check_dice_legacy_upgrade() {
         --mount "type=bind,src=${pre_recovery_fixture},dst=/tmp/prepare-pre-recovery-fixture.mjs,readonly" \
         "$IMAGE" sh -ec '
             test "$(cat /data/AGENTS.md)" = "legacy dice user instructions"
-            middleware=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/gateway/middleware-setup.js
-            inbound=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/transport/inbound.js
+            middleware=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/gateway/middleware-setup.js
+            inbound=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/transport/inbound.js
             ! grep -Fq "createDiceCommandMiddleware" "$middleware"
             ! grep -Fq "createDiceAwareHistoryBuffer" "$middleware"
             ! grep -Fq "qqbot-dice" "$middleware"
@@ -1140,16 +1128,16 @@ check_dice_legacy_upgrade() {
             grep -Fq "Chat-only per-turn document scope v1." "$inbound"
             grep -Fq "Chat-only content-risk recovery context v1." "$inbound"
             grep -Fq "Chat-only history snapshot epoch guard v1." "$inbound"
-            grep -Fq "Chat-only content-risk turn recovery v1." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/transport/outbound.js
-            grep -Fq "Chat-only friendly provider errors v1." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/transport/outbound.js
-            grep -Fq "Chat-only persistent model prefs v1." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/model/prefs-store.js
-            grep -Fq "Chat-only strict sessionId persistence v1." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/model/model-resolver.js
-            grep -Fq "Chat-only strict automatic session reset v1." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/session/session-manager.js
+            grep -Fq "Chat-only content-risk turn recovery v1." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/transport/outbound.js
+            grep -Fq "Chat-only friendly provider errors v1." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/transport/outbound.js
+            grep -Fq "Chat-only persistent model prefs v1." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/model/prefs-store.js
+            grep -Fq "Chat-only strict sessionId persistence v1." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/model/model-resolver.js
+            grep -Fq "Chat-only strict automatic session reset v1." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/session/session-manager.js
             node --check "$middleware"
             QQBOT_HISTORY_SNAPSHOT_MODULE=/opt/qqbot-defaults/qqbot-history-snapshot.mjs node --test /tmp/test-group-history.mjs
-            QQBOT_RECOVERY_MODULE=/opt/qqbot-defaults/qqbot-session-recovery.mjs QQBOT_HISTORY_SNAPSHOT_MODULE=/opt/qqbot-defaults/qqbot-history-snapshot.mjs QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-session-recovery.mjs
-            QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-provider-errors.mjs
-            QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist node --test /tmp/test-concurrency.mjs
+            QQBOT_RECOVERY_MODULE=/opt/qqbot-defaults/qqbot-session-recovery.mjs QQBOT_HISTORY_SNAPSHOT_MODULE=/opt/qqbot-defaults/qqbot-history-snapshot.mjs QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib node --test /tmp/test-session-recovery.mjs
+            QQBOT_PROVIDER_ERRORS_MODULE=/opt/qqbot-defaults/qqbot-provider-errors.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib node --test /tmp/test-provider-errors.mjs
+            QQBOT_CONCURRENCY_MODULE=/opt/qqbot-defaults/qqbot-concurrency.mjs QQBOT_ADAPTER_DIST=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib node --test /tmp/test-concurrency.mjs
         '
 }
 check_dice_legacy_upgrade
@@ -1162,13 +1150,13 @@ docker run --rm --network none --entrypoint sh --volume "${recovery_v1_data_volu
 '
 docker run --rm --network none --entrypoint node --volume "${recovery_v1_data_volume}:/data" \
     --mount "type=bind,src=${pre_concurrency_fixture},dst=/tmp/prepare-pre-concurrency-fixture.mjs,readonly" \
-    "$IMAGE" /tmp/prepare-pre-concurrency-fixture.mjs /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
+    "$IMAGE" /tmp/prepare-pre-concurrency-fixture.mjs /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib
 docker run --rm --network none --entrypoint node --volume "${recovery_v1_data_volume}:/data" \
     --mount "type=bind,src=${pre_recovery_fixture},dst=/tmp/prepare-pre-recovery-fixture.mjs,readonly" \
-    "$IMAGE" /tmp/prepare-pre-recovery-fixture.mjs /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist recovery-v1
+    "$IMAGE" /tmp/prepare-pre-recovery-fixture.mjs /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib recovery-v1
 for recovery_boot in 1 2; do
     docker run --rm --network none --volume "${recovery_v1_data_volume}:/data" "$IMAGE" sh -ec '
-        root=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
+        root=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib
         test "$(grep -Fc "Chat-only friendly provider errors v1." "$root/transport/outbound.js")" -eq 1
         test "$(grep -Fc "Chat-only safe inbound errors v1." "$root/transport/inbound.js")" -eq 1
         test "$(grep -Fc "Chat-only committed reset disposal v1." "$root/session/session-manager.js")" -eq 1
@@ -1186,7 +1174,7 @@ docker run --rm --network none --entrypoint sh --volume "${pre_concurrency_data_
 docker run --rm --network none --volume "${pre_concurrency_data_volume}:/data" "$IMAGE" sh -ec 'test -f /data/.initialized'
 docker run --rm --network none --entrypoint node --volume "${pre_concurrency_data_volume}:/data" \
     --mount "type=bind,src=${pre_concurrency_fixture},dst=/tmp/prepare-pre-concurrency-fixture.mjs,readonly" \
-    "$IMAGE" /tmp/prepare-pre-concurrency-fixture.mjs /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
+    "$IMAGE" /tmp/prepare-pre-concurrency-fixture.mjs /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib
 for concurrency_boot in 1 2; do
     docker run --rm --network none \
         --volume "${pre_concurrency_data_volume}:/data" \
@@ -1194,7 +1182,7 @@ for concurrency_boot in 1 2; do
         --mount "type=bind,src=${onebot_direct_native_test},dst=/tmp/test-onebot-direct-native.mjs,readonly" \
         "$IMAGE" sh -ec '
             test "$(cat /data/AGENTS.md)" = "pre-concurrency user instructions"
-            root=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
+            root=/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib
             test "$(grep -Fc "Chat-only native OneBot direct router v1." "$root/gateway/bootstrap.js")" -eq 1
             test "$(grep -Fc "Chat-only OneBot /new cancellation v1." "$root/gateway/middleware-setup.js")" -eq 1
             test "$(grep -Fc "Chat-only OneBot direct router middleware v1." "$root/gateway/middleware-setup.js")" -eq 1
@@ -1226,7 +1214,7 @@ docker run --rm --network none --volume "${partial_concurrency_data_volume}:/dat
 docker run --rm --network none --entrypoint node --volume "${partial_concurrency_data_volume}:/data" "$IMAGE" -e '
     const fs = require("node:fs");
     const crypto = require("node:crypto");
-    const root = "/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist";
+    const root = "/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib";
     const file = "gateway/middleware-setup.js";
     const path = `${root}/${file}`;
     const needle = "                await sendMergeQueueFullNotice(sender, droppedCtx);";
@@ -1244,7 +1232,7 @@ grep -Fq "serialized merge middleware, overflow notice, or ordering is incomplet
 docker run --rm --network none --entrypoint node --volume "${partial_concurrency_data_volume}:/data" "$IMAGE" -e '
     const fs = require("node:fs");
     const crypto = require("node:crypto");
-    const root = "/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist";
+    const root = "/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib";
     for (const [file, expected] of JSON.parse(fs.readFileSync("/data/.partial-concurrency-hashes", "utf8"))) {
         if (crypto.createHash("sha256").update(fs.readFileSync(`${root}/${file}`)).digest("hex") !== expected) throw new Error("fail-closed startup modified adapter files");
     }
@@ -1264,7 +1252,7 @@ docker run --rm --network none --entrypoint sh --volume "${partial_recovery_data
 '
 docker run --rm --network none --entrypoint node --volume "${partial_recovery_data_volume}:/data" "$IMAGE" -e '
     const fs = require("node:fs");
-    const root = "/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist";
+    const root = "/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib";
     const path = `${root}/session/session-manager.js`;
     const source = fs.readFileSync(path, "utf8");
     const needle = "            try { recoveryOptions.onCommitted?.(record); } catch { }";
@@ -1282,7 +1270,7 @@ grep -Fq "strict session reset atomic commit ordering is incomplete" "$incompati
 docker run --rm --network none --entrypoint node --volume "${partial_recovery_data_volume}:/data" "$IMAGE" -e '
     const fs = require("node:fs");
     const crypto = require("node:crypto");
-    const root = "/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist";
+    const root = "/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib";
     for (const [file, expected] of JSON.parse(fs.readFileSync("/data/.partial-profile-hashes", "utf8"))) {
         if (crypto.createHash("sha256").update(fs.readFileSync(`${root}/${file}`)).digest("hex") !== expected) throw new Error("fail-closed startup modified adapter files");
     }
@@ -1295,359 +1283,13 @@ docker run --rm --network none --entrypoint sh --volume "${legacy_data_volume}:/
 '
 docker run --rm --network none --entrypoint node --volume "${legacy_data_volume}:/data" \
     --mount "type=bind,src=${pre_concurrency_fixture},dst=/tmp/prepare-pre-concurrency-fixture.mjs,readonly" \
-    "$IMAGE" /tmp/prepare-pre-concurrency-fixture.mjs /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
+    "$IMAGE" /tmp/prepare-pre-concurrency-fixture.mjs /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib
 docker run --rm --network none --entrypoint node --volume "${legacy_data_volume}:/data" \
     --mount "type=bind,src=${pre_recovery_fixture},dst=/tmp/prepare-pre-recovery-fixture.mjs,readonly" \
-    "$IMAGE" /tmp/prepare-pre-recovery-fixture.mjs /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist
-docker run --rm --network none --entrypoint node --volume "${legacy_data_volume}:/data" "$IMAGE" -e '
-    const fs = require("node:fs");
-    const root = "/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist";
-    const originalDownload = "    const resp = await fetch(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });\n    if (!resp.ok)\n        throw new Error(`HTTP ${resp.status}`);\n    const buf = Buffer.from(await resp.arrayBuffer());\n    if (buf.length > maxBytes) {\n        throw new Error(`Download exceeds ${Math.floor(maxBytes / 1024 / 1024)}MB`);\n    }";
-    const originalQuoteBlock = [
-        "            // 引用消息附件：转成 RawAttachment 结构复用下载（voice 由 downloadMediaAttachments 自动跳过）",
-        "            const quoteAttachments = ctx.state.quote?.attachments;",
-        "            if (quoteAttachments && quoteAttachments.length > 0) {",
-        "                const rawQuote = quoteAttachments",
-        "                    .filter(a => a.url)",
-        "                    .map((a) => ({",
-        "                    content_type: a.contentType ?? \x27\x27,",
-        "                    filename: a.filename ?? \x27\x27,",
-        "                    size: 0,",
-        "                    url: a.url,",
-        "                }));",
-        "                const downloadedQuote = await downloadMediaAttachments(rawQuote, config.media, logger);",
-        "                ctx.state.downloadedQuoteFiles = downloadedQuote;",
-        "            }",
-    ].join("\n");
-    const inboundPath = `${root}/transport/inbound.js`;
-    const replaceExactlyOnce = (text, before, after, label) => {
-        const parts = text.split(before);
-        if (parts.length !== 2) throw new Error(`legacy fixture expected one ${label}`);
-        return parts[0] + after + parts[1];
-    };
-    let inbound = fs.readFileSync(inboundPath, "utf8");
-    if (inbound.includes("// Chat-only OneBot provenance v1.") || inbound.includes("onebotMetadata") || inbound.includes("let onebotTurn;")) {
-        const onebotScopeImport = "import { beginOnebotTurn, endOnebotTurn, renderOnebotRequestMetadata } from '/opt/qqbot-defaults/qqbot-onebot-scope.mjs';\n";
-        if (inbound.includes(onebotScopeImport)) inbound = replaceExactlyOnce(inbound, onebotScopeImport, "", "OneBot scope import");
-        const onebotPolicyImport = "import { setCurrentImages, clearCurrentImages, isOnebotToolAvailable } from '/opt/qqbot-defaults/qqbot-chat-policy.mjs';";
-        if (inbound.includes(onebotPolicyImport)) inbound = replaceExactlyOnce(inbound, onebotPolicyImport,
-            "import { setCurrentImages, clearCurrentImages } from '/opt/qqbot-defaults/qqbot-chat-policy.mjs';", "OneBot availability import");
-        const onebotBinding = [
-            "        // Chat-only OneBot provenance v1.",
-            "        if (isOnebotToolAvailable()) onebotTurn = beginOnebotTurn(",
-            "            chatOnlyAgent,",
-            "            getMergedGenerationRequests(ctx),",
-            "            { appId: config.appId, signal: ctx.signal, isCurrentRecord, record, documentScope: documentTurn },",
-            "        );",
-            "        const onebotMetadata = onebotTurn ? renderOnebotRequestMetadata(onebotTurn) : '';",
-        ].join("\n");
-        if (inbound.includes(onebotBinding + "\n")) inbound = replaceExactlyOnce(inbound, onebotBinding + "\n", "", "OneBot turn binding");
-        else if (inbound.includes("// Chat-only OneBot provenance v1.") || inbound.includes("onebotMetadata")) {
-            throw new Error("legacy fixture found a partial OneBot request binding");
-        }
-        const withOnebotMetadata = "        const requestBody = [documentBody, generationMetadata, onebotMetadata].filter(Boolean).join(\x27\\n\\n\x27);";
-        const withoutOnebotMetadata = "        const requestBody = [documentBody, generationMetadata].filter(Boolean).join(\x27\\n\\n\x27);";
-        if (inbound.includes(withOnebotMetadata)) inbound = replaceExactlyOnce(inbound, withOnebotMetadata, withoutOnebotMetadata, "OneBot model body");
-        const onebotCleanup = "                // Chat-only OneBot scope cleanup v1.\n                if (onebotTurn) await endOnebotTurn(chatOnlyAgent, onebotTurn);\n";
-        if (inbound.includes(onebotCleanup)) inbound = replaceExactlyOnce(inbound, onebotCleanup, "", "OneBot scope cleanup");
-        else if (inbound.includes("endOnebotTurn(chatOnlyAgent, onebotTurn)")) throw new Error("legacy fixture found a partial OneBot cleanup");
-        if (inbound.includes("    let onebotTurn;\n")) inbound = replaceExactlyOnce(inbound, "    let onebotTurn;\n", "", "OneBot turn declaration");
-    }
-    if (inbound.includes("onebotTurn") || inbound.includes("onebotMetadata") || inbound.includes("OneBot provenance"))
-        throw new Error("legacy fixture did not remove the OneBot scope");
-    const documentScopeBlock = [
-        "    const chatOnlyAgent = record.agent;",
-        "    let documentTurn;",
-        "    try {",
-        "        const documentMetadata = beginDocumentTurn(chatOnlyAgent, msg, mwState.quote);",
-        "        documentTurn = getDocumentTurn(chatOnlyAgent);",
-        "        const documentBody = documentMetadata.length > 0",
-        "            ? `${agentBody}\\n\\n[Untrusted QQ text attachments; use qqbot_read_document with one attachmentId only]\\n${JSON.stringify(documentMetadata)}`",
-        "            : agentBody;",
-        "        // Chat-only per-turn document scope v1.",
-        "        const content = [{ type: \x27text\x27, text: documentBody }];",
-    ].join("\n");
-    if (inbound.split(documentScopeBlock).length !== 2) throw new Error("legacy fixture expected one document scope block");
-    inbound = inbound.replace(documentScopeBlock, "    const content = [{ type: \x27text\x27, text: agentBody }];\n    const chatOnlyAgent = record.agent;");
-    inbound = inbound.replace("import { beginDocumentTurn, endDocumentTurn, getDocumentTurn } from \x27/opt/qqbot-defaults/qqbot-document-scope.mjs\x27;\n", "");
-    inbound = inbound.replace("        setCurrentImages(chatOnlyAgent, [...(mwState.downloadedFiles ?? []), ...(mwState.downloadedQuoteFiles ?? [])], documentTurn);",
-        "    setCurrentImages(chatOnlyAgent, [...(mwState.downloadedFiles ?? []), ...(mwState.downloadedQuoteFiles ?? [])]);");
-    const documentCleanup = [
-        "        await chatOnlyAgent.whenIdle();",
-        "    }",
-        "    catch (err) {",
-        "        logger.warn(`whenIdle/followup rejected: ${err instanceof Error ? err.message : String(err)}`);",
-        "    } finally {",
-        "        clearCurrentImages(chatOnlyAgent, documentTurn);",
-        "        if (documentTurn) endDocumentTurn(chatOnlyAgent, documentTurn);",
-        "    }",
-    ].join("\n");
-    if (inbound.split(documentCleanup).length !== 2) throw new Error("legacy fixture expected one document cleanup");
-    inbound = inbound.replace(documentCleanup, [
-        "    try {",
-        "        await chatOnlyAgent.whenIdle();",
-        "    }",
-        "    catch (err) {",
-        "        logger.warn(`whenIdle rejected: ${err instanceof Error ? err.message : String(err)}`);",
-        "    } finally {",
-        "        clearCurrentImages(chatOnlyAgent);",
-        "    }",
-    ].join("\n"));
-    fs.writeFileSync(inboundPath, inbound);
-    const edits = {
-        "gateway/bootstrap.js": [
-            ["import { installChatPolicy } from \x27/opt/qqbot-defaults/qqbot-chat-policy.mjs\x27;\n", ""],
-            ["    installChatPolicy(ctx);\n", ""],
-            ["    // Chat-only deployment: file sending is not registered.", "    registerSendFileTool(ctx, mediaSender, manager, config, logger);"]
-        ],
-        "gateway/middleware-setup.js": [
-            ["import {createScopedQuoteRef} from \x27/opt/qqbot-defaults/qqbot-chat-policy.mjs\x27;\n", ""],
-            ["    // Chat-only scoped quote references prevent cross-peer message-key collisions.\n", ""],
-            ["    // Chat-only generation quote capture v1.\n", ""],
-            ["    // Chat-only quoted attachment cache v2.\n", ""],
-            ["import { createPendingImageCaptureMiddleware, createPendingImagePromptMiddleware, createPendingImageNewCommandCleanup } from \x27/opt/qqbot-defaults/qqbot-pending-images.mjs\x27;\n", ""],
-            ["    // Chat-only deferred image prompts v1.\n", ""],
-            ["    bot.use(createPendingImageCaptureMiddleware({ appId: config.appId }));\n", ""],
-            ["    // Chat-only pending image /new cleanup v1.\n", ""],
-            ["    bot.use(createPendingImageNewCommandCleanup({ appId: config.appId }));\n", ""],
-            ["    // Chat-only deferred image prompt association v1.\n", ""],
-            ["    bot.use(createPendingImagePromptMiddleware({ appId: config.appId }));\n", ""],
-            ["import { createHistorySnapshotBuffer } from \x27/opt/qqbot-defaults/qqbot-history-snapshot.mjs\x27;\n", ""],
-            ["    // Chat-only history snapshot epoch guard v1.\n", ""],
-            ["bot.use(createHistorySnapshotBuffer(historyBuffer, {", "bot.use(historyBuffer({"],
-            [
-                [
-                    "    bot.use(createScopedQuoteRef(quoteRef));",
-                ].join("\n"),
-                [
-                    "    bot.use(quoteRef({",
-                    "        maxSize: 500,",
-                    "        preferMsgElements: true,",
-                    "    }));",
-                ].join("\n"),
-            ],
-        ],
-        "index.js": [
-            ["export const inject = [\x27agents\x27, \x27tools\x27, \x27web\x27, \x27systemPrompt\x27];", "export const inject = [\x27agents\x27];"],
-            ["export const inject = [\x27agents\x27, \x27tools\x27, \x27web\x27];", "export const inject = [\x27agents\x27];"]
-        ],
-        "transport/inbound.js": [
-            ["    // Chat-only explicit-quote text trigger v1.\n", ""],
-            ["    if (isEmptyMessage(userContent, [...(msg.attachments ?? []), ...(state.quote?.attachments ?? [])], isGroup, wasMentioned))", "    if (isEmptyMessage(userContent, msg.attachments, isGroup, wasMentioned))"],
-            ["import { setCurrentImages, clearCurrentImages } from \x27/opt/qqbot-defaults/qqbot-chat-policy.mjs\x27;\n", ""],
-            ["    const chatOnlyAgent = record.agent;\n", ""],
-            ["    // Chat-only current-and-quoted image scope v2.\n", ""],
-            ["// Chat-only current-and-quoted image scope v2.\n", ""],
-            ["    setCurrentImages(chatOnlyAgent, [...(mwState.downloadedFiles ?? []), ...(mwState.downloadedQuoteFiles ?? [])]);\n", ""],
-            ["    setCurrentImages(chatOnlyAgent, mwState.downloadedFiles ?? []);\n", ""],
-            ["    chatOnlyAgent.followup(message);", "    record.agent.followup(message);"],
-            ["        await chatOnlyAgent.whenIdle();", "        await record.agent.whenIdle();"],
-            ["    } finally {\n        clearCurrentImages(chatOnlyAgent);\n", ""]
-        ],
-        "transport/attachment.js": [
-            ["import { downloadCurrentQQImage } from \x27/opt/qqbot-defaults/qqbot-web-pages.mjs\x27;\n", ""],
-            ["import { downloadCurrentQQImage } from \x27/opt/qqbot-defaults/qqbot-chat-policy.mjs\x27;\n", ""],
-            ["// Chat-only current-image downloads v3.\n", ""],
-            ["    // Chat-only current-image downloads v3.\n", ""],
-            ["    // Chat-only downloads: images only.\n", ""],
-            ["    const targets = (attachments ?? []).filter(a => classifyContentType(a.content_type) === \x27image\x27 && a.url);", "    const targets = (attachments ?? []).filter(a => classifyContentType(a.content_type) !== \x27voice\x27 && a.url);"],
-            ["    const buf = await downloadCurrentQQImage(parsed.href, maxBytes);", "    " + "const resp = await fetch(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });\n    if (!resp.ok)\n        throw new Error(`HTTP ${resp.status}`);\n    const buf = Buffer.from(await resp.arrayBuffer());\n    if (buf.length > maxBytes) {\n        throw new Error(`Download exceeds ${Math.floor(maxBytes / 1024 / 1024)}MB`);\n    }"],
-            ["    const resp = await fetch(parsed.href, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS), redirect: \x27error\x27 });", "    const resp = await fetch(url, { signal: AbortSignal.timeout(DOWNLOAD_TIMEOUT_MS) });"],
-            ["    const chunks = [];\n    let total = 0;\n    for await (const chunk of resp.body) {\n        total += chunk.length;\n        if (total > maxBytes) throw new Error(\x27QQ image download exceeds size limit\x27);\n        chunks.push(chunk);\n    }\n    const buf = Buffer.concat(chunks, total);", "    const buf = Buffer.from(await resp.arrayBuffer());\n    if (buf.length > maxBytes) {\n        throw new Error(`Download exceeds ${Math.floor(maxBytes / 1024 / 1024)}MB`);\n    }"]
-        ],
-        "media/vision-tool.js": [["        timeoutMs: vision.timeoutMs,\n", ""]]
-    };
-    for (const [file, replacements] of Object.entries(edits)) {
-        const path = `${root}/${file}`;
-        let text = fs.readFileSync(path, "utf8");
-        for (const [before, after] of replacements) {
-            if (text.includes(before)) text = text.replace(before, after);
-        }
-        fs.writeFileSync(path, text);
-    }
-    const attachmentPath = `${root}/transport/attachment.js`;
-    let attachmentSource = fs.readFileSync(attachmentPath, "utf8");
-    const modernTargets = attachmentSource.split("\n").find((line) => line.includes("a.url && (classifyContentType"));
-    if (!modernTargets) throw new Error("legacy fixture expected the v3 image fallback target selector");
-    const apostrophe = String.fromCharCode(39);
-    const legacyTargets = "    const targets = (attachments ?? []).filter(a => classifyContentType(a.content_type) !== "
-        + apostrophe + "voice" + apostrophe + " && a.url);";
-    attachmentSource = attachmentSource.replace(modernTargets, legacyTargets);
-    const sourceUrlResult = "        results.push({ filename: att.filename, contentType, localPath, sourceUrl: att.url });";
-    const sourceUrlPatch = "        // Chat-only attachment source URL v2.\n" + sourceUrlResult;
-    if (attachmentSource.includes(sourceUrlPatch)) {
-        attachmentSource = attachmentSource.replace(sourceUrlPatch,
-            "        results.push({ filename: att.filename, contentType, localPath });");
-    }
-    else if (attachmentSource.includes("sourceUrl: att.url")
-        || attachmentSource.includes("Chat-only attachment source URL v2.")) {
-        throw new Error("legacy fixture found partial source URL provenance");
-    }
-    else if (!attachmentSource.includes("results.push({ filename: att.filename, contentType, localPath });")) {
-        throw new Error("legacy fixture did not restore the stock attachment result shape");
-    }
-    fs.writeFileSync(attachmentPath, attachmentSource);
-    const visionPath = `${root}/media/vision-tool.js`;
-    let vision = fs.readFileSync(visionPath, "utf8");
-    const visionImport = "import { existsSync, readFileSync, writeFileSync } from \x27node:fs\x27;\n";
-    vision = replaceExactlyOnce(vision, visionImport,
-        visionImport + "import { readFile, stat } from \x27node:fs/promises\x27;\n", "stock fs imports");
-    vision = replaceExactlyOnce(vision,
-        "import { loadChatImageBytes } from \x27/opt/qqbot-defaults/qqbot-chat-policy.mjs\x27;\n", "", "v3 helper import");
-    const v3Description = [
-        "// Chat-only image schema: scoped QQ media paths or public HTTPS image URLs v3.",
-        "const DESCRIPTION = \x27Inspect one image and return the text the user needs. The image must be either an absolute path \x27",
-        "    + \x27of an image attached to or explicitly quoted in the current QQ message and stored inside the QQ media directory, \x27",
-        "    + \x27or a public HTTPS image URL. Other local paths, non-HTTPS URLs, and non-image files are forbidden. \x27",
-        "    + \x27Use this when the user references an image, or when a task needs OCR, chart/diagram reading, screenshot or UI analysis, \x27",
-        "    + \x27translation of image text, or photo understanding. Always pass an explicit `prompt` with a precise \x27",
-        "    + \x27instruction (e.g. \"transcribe all text\", \"extract the table as CSV\", \"translate the text into Chinese\") \x27",
-        "    + \x27instead of relying on the generic default.\x27;",
-    ].join("\n");
-    const v2Description = [
-        "// Chat-only image schema: current and explicitly quoted QQ attachments v2.",
-        "const DESCRIPTION = \x27Inspect one image and return the text the user needs. The image must be an absolute path \x27",
-        "    + \x27of an image attached to or explicitly quoted in the current QQ message. URLs and other files are forbidden. \x27",
-        "    + \x27Use this when the user references an image, or when a task needs OCR, chart/diagram reading, screenshot or UI analysis, \x27",
-        "    + \x27translation of image text, or photo understanding. Always pass an explicit `prompt` with a precise \x27",
-        "    + \x27instruction (e.g. \"transcribe all text\", \"extract the table as CSV\", \"translate the text into Chinese\") \x27",
-        "    + \x27instead of relying on the generic default.\x27;",
-    ].join("\n");
-    vision = replaceExactlyOnce(vision, v3Description, v2Description, "v3 schema description");
-    vision = replaceExactlyOnce(vision,
-        "                    description: \x27Absolute path of a current-message or explicitly quoted image inside the QQ media directory, or a public HTTPS image URL.\x27,",
-        "                    description: \x27Absolute path of an image attached to or explicitly quoted in the current QQ message. URLs and other files are forbidden.\x27,",
-        "v3 image parameter description");
-    const v3Loader = [
-        "// Chat-only scoped image loader v3.",
-        "async function loadImageBytes(image, maxBytes, exec) {",
-        "    const data = await loadChatImageBytes(image, maxBytes, exec);",
-        "    const mediaType = sniffImageMediaType(data);",
-        "    if (mediaType === null)",
-        "        throw new Error(\x27qqbot_describe_image: unrecognized image format (png/jpeg/gif/webp only)\x27);",
-        "    return { data, mediaType };",
-        "}",
-    ].join("\n");
-    const stockLoader = [
-        "/** 加载图片字节（本地路径 / http URL），校验大小 + 嗅探 MIME */",
-        "async function loadImageBytes(image, maxBytes, signal) {",
-        "    let data;",
-        "    if (/^https?:\\/\\//i.test(image)) {",
-        "        const resp = await fetch(image, { signal, redirect: \x27error\x27 });",
-        "        if (!resp.ok)",
-        "            throw new Error(`qqbot_describe_image: download failed (HTTP ${resp.status})`);",
-        "        const buf = Buffer.from(await resp.arrayBuffer());",
-        "        if (buf.length > maxBytes)",
-        "            throw new Error(`qqbot_describe_image: image too large (${buf.length} bytes)`);",
-        "        data = new Uint8Array(buf);",
-        "    }",
-        "    else {",
-        "        const info = await stat(image).catch(() => null);",
-        "        if (!info?.isFile())",
-        "            throw new Error(`qqbot_describe_image: image file not found: ${image}`);",
-        "        if (info.size > maxBytes)",
-        "            throw new Error(`qqbot_describe_image: image too large (${info.size} bytes)`);",
-        "        data = new Uint8Array(await readFile(image));",
-        "    }",
-        "    const mediaType = sniffImageMediaType(data);",
-        "    if (mediaType === null)",
-        "        throw new Error(\x27qqbot_describe_image: unrecognized image format (png/jpeg/gif/webp only)\x27);",
-        "    return { data, mediaType };",
-        "}",
-    ].join("\n");
-    vision = replaceExactlyOnce(vision, v3Loader, stockLoader, "v3 image loader");
-    vision = replaceExactlyOnce(vision,
-        "loadImageBytes(image, vision.maxBytes, exec)",
-        "loadImageBytes(image, vision.maxBytes, exec.signal)", "v3 execute argument");
-    fs.writeFileSync(visionPath, vision);
-    const middlewarePath = `${root}/middleware/attachment.js`;
-    let middleware = fs.readFileSync(middlewarePath, "utf8");
-    const quoteMarker = "            // Chat-only quoted-image downloads v2.\n";
-    const patchedQuote = "            // Chat-only quote attachments: never downloaded.\n            // Keep quote text/metadata available to the conversation, but only current-message images may enter the cache.\n            ctx.state.downloadedQuoteFiles = [];";
-    if (middleware.includes("// Chat-only lazy quoted images v1.")) {
-        const start = middleware.indexOf(quoteMarker);
-        const end = middleware.indexOf("\n        }\n        catch (err)", start);
-        if (start < 0 || end < start) throw new Error("legacy fixture expected the lazy quote block");
-        middleware = middleware.slice(0, start) + originalQuoteBlock + middleware.slice(end);
-        fs.writeFileSync(middlewarePath, middleware);
-    }
-    else if (middleware.includes(quoteMarker)) {
-        middleware = middleware.replace(quoteMarker, "");
-        fs.writeFileSync(middlewarePath, middleware);
-    }
-    else if (middleware.includes(patchedQuote)) {
-        middleware = middleware.replace(patchedQuote, originalQuoteBlock);
-        fs.writeFileSync(middlewarePath, middleware);
-    }
-    const mediaCleanerPath = `${root}/media/media-cleaner.js`;
-    let mediaCleaner = fs.readFileSync(mediaCleanerPath, "utf8");
-    mediaCleaner = replaceExactlyOnce(mediaCleaner,
-        "// Chat-only persistent media root v1.\nexport const MEDIA_ROOT = \x27/data/qqbot-media\x27;",
-        "export const MEDIA_ROOT = resolve(homedir(), \x27.dsh-qqbot\x27, \x27media\x27);",
-        "persistent media root");
-    mediaCleaner = replaceExactlyOnce(mediaCleaner,
-        "import { join } from \x27node:path\x27;\n",
-        "import { join, resolve } from \x27node:path\x27;\n",
-        "media cleaner path import");
-    mediaCleaner = replaceExactlyOnce(mediaCleaner,
-        "import { join, resolve } from \x27node:path\x27;\n",
-        "import { join, resolve } from \x27node:path\x27;\nimport { homedir } from \x27node:os\x27;\n",
-        "legacy media cleaner os import");
-    fs.writeFileSync(mediaCleanerPath, mediaCleaner);
-    if (!mediaCleaner.includes("export const MEDIA_ROOT = resolve(homedir(), \x27.dsh-qqbot\x27, \x27media\x27);")
-        || !mediaCleaner.includes("import { join, resolve } from \x27node:path\x27;")
-        || !mediaCleaner.includes("import { homedir } from \x27node:os\x27;")
-        || mediaCleaner.includes("Chat-only persistent media root v1.")) {
-        throw new Error("legacy fixture did not restore the original media root");
-    }
-    const legacyMarkers = [
-        ["gateway/bootstrap.js", "installChatPolicy"],
-        ["gateway/bootstrap.js", "Chat-only deployment: file sending is not registered."],
-        ["gateway/middleware-setup.js", "createScopedQuoteRef"],
-        ["gateway/middleware-setup.js", "Chat-only scoped quote references prevent cross-peer message-key collisions."],
-        ["gateway/middleware-setup.js", "createHistorySnapshotBuffer"],
-        ["gateway/middleware-setup.js", "Chat-only history snapshot epoch guard v1."],
-        ["gateway/middleware-setup.js", "createPendingImageCaptureMiddleware"],
-        ["gateway/middleware-setup.js", "createPendingImageNewCommandCleanup"],
-        ["gateway/middleware-setup.js", "createPendingImagePromptMiddleware"],
-        ["gateway/middleware-setup.js", "Chat-only deferred image prompts v1."],
-        ["gateway/middleware-setup.js", "Chat-only pending image /new cleanup v1."],
-        ["gateway/middleware-setup.js", "Chat-only deferred image prompt association v1."],
-        ["index.js", "export const inject = [\x27agents\x27, \x27tools\x27, \x27web\x27, \x27systemPrompt\x27];"],
-        ["transport/inbound.js", "Chat-only current-and-quoted image scope v2."],
-        ["transport/inbound.js", "Chat-only per-turn document scope v1."],
-        ["transport/inbound.js", "Chat-only explicit-quote text trigger v1."],
-        ["transport/inbound.js", "beginDocumentTurn"],
-        ["transport/inbound.js", "endDocumentTurn"],
-        ["transport/inbound.js", "setCurrentImages"],
-        ["transport/inbound.js", "clearCurrentImages"],
-        ["transport/attachment.js", "downloadCurrentQQImage"],
-        ["transport/attachment.js", "Chat-only current-image downloads v3."],
-        ["transport/attachment.js", "Chat-only attachment source URL v2."],
-        ["transport/attachment.js", "sourceUrl: att.url"],
-        ["transport/attachment.js", "a.url && (classifyContentType"],
-        ["middleware/attachment.js", "Chat-only quoted-image downloads v2."],
-        ["media/vision-tool.js", "timeoutMs: vision.timeoutMs"],
-        ["media/vision-tool.js", "loadChatImageBytes"],
-        ["media/vision-tool.js", "Chat-only scoped image loader v3."],
-        ["media/vision-tool.js", "Chat-only image schema: fixed bundled Dayu image assets v5."],
-        ["media/vision-tool.js", "/opt/qqbot-assets/dayu/"],
-        ["media/media-cleaner.js", "Chat-only persistent media root v1."]
-    ];
-    const restoredAttachment = fs.readFileSync(root + "/transport/attachment.js", "utf8");
-    if (!restoredAttachment.includes("classifyContentType(a.content_type) !== \x27voice\x27 && a.url")) {
-        throw new Error("legacy fixture did not restore the original non-voice attachment target selector");
-    }
-    for (const [file, marker] of legacyMarkers) {
-        if (fs.readFileSync(`${root}/${file}`, "utf8").includes(marker)) throw new Error(`legacy fixture still patched: ${file}`);
-    }
-    const restoredVision = fs.readFileSync(visionPath, "utf8");
-    if (!restoredVision.includes("async function loadImageBytes(image, maxBytes, signal)")
-        || !restoredVision.includes("loadImageBytes(image, vision.maxBytes, exec.signal)")
-        || !restoredVision.includes("Chat-only image schema: current and explicitly quoted QQ attachments v2.")) {
-        throw new Error("legacy fixture did not restore the original loader and v2 schema");
-    }
-'
+    "$IMAGE" /tmp/prepare-pre-recovery-fixture.mjs /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib
+docker run --rm --network none --entrypoint node --volume "${legacy_data_volume}:/data" \
+    --mount "type=bind,src=${repo_root}/scripts/prepare-legacy-policy-fixture.mjs,dst=/tmp/prepare-legacy-policy-fixture.mjs,readonly" \
+    "$IMAGE" /tmp/prepare-legacy-policy-fixture.mjs /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib
 docker run --rm \
     --network none \
     --volume "${legacy_data_volume}:/data" \
@@ -1665,23 +1307,23 @@ docker run --rm \
         middleware/attachment.js \
         media/vision-tool.js \
         media/media-cleaner.js; do
-        node --check "/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/$file"
+        node --check "/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/$file"
     done
-    grep -Fq "import { installChatPolicy } from '\''/opt/qqbot-defaults/qqbot-chat-policy.mjs'\'';" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/gateway/bootstrap.js
-    grep -Fq "import {createScopedQuoteRef} from '\''/opt/qqbot-defaults/qqbot-chat-policy.mjs'\'';" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/gateway/middleware-setup.js
-    grep -Fq "bot.use(createScopedQuoteRef(quoteRef));" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/gateway/middleware-setup.js
-    grep -Fq "import { createHistorySnapshotBuffer } from '\''/opt/qqbot-defaults/qqbot-history-snapshot.mjs'\'';" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/gateway/middleware-setup.js
-    grep -Fq "bot.use(createHistorySnapshotBuffer(historyBuffer, {" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/gateway/middleware-setup.js
-    grep -Fq "Chat-only current-image downloads v3." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/transport/attachment.js
-    grep -Fq "Chat-only quoted-image downloads v2." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/middleware/attachment.js
-    grep -Fq "timeoutMs: vision.timeoutMs" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/vision-tool.js
-    grep -Fq "import { loadChatImageBytes } from '\''/opt/qqbot-defaults/qqbot-chat-policy.mjs'\'';" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/vision-tool.js
-    grep -Fq "Chat-only scoped image loader v3." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/vision-tool.js
-    grep -Fq "Chat-only image schema: fixed bundled Dayu image assets v5." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/vision-tool.js
-    grep -Fq "/opt/qqbot-assets/dayu/" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/vision-tool.js
-    grep -Fq "loadImageBytes(image, vision.maxBytes, exec)" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/vision-tool.js
-    grep -Fq "// Chat-only persistent media root v1." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/media-cleaner.js
-    grep -Fq "export const MEDIA_ROOT = '\''/data/qqbot-media'\'';" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/media-cleaner.js
+    grep -Fq "import { installChatPolicy } from '\''/opt/qqbot-defaults/qqbot-chat-policy.mjs'\'';" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/gateway/bootstrap.js
+    grep -Fq "import {createScopedQuoteRef} from '\''/opt/qqbot-defaults/qqbot-chat-policy.mjs'\'';" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/gateway/middleware-setup.js
+    grep -Fq "bot.use(createScopedQuoteRef(quoteRef));" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/gateway/middleware-setup.js
+    grep -Fq "import { createHistorySnapshotBuffer } from '\''/opt/qqbot-defaults/qqbot-history-snapshot.mjs'\'';" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/gateway/middleware-setup.js
+    grep -Fq "bot.use(createHistorySnapshotBuffer(historyBuffer, {" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/gateway/middleware-setup.js
+    grep -Fq "Chat-only current-image downloads v3." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/transport/attachment.js
+    grep -Fq "Chat-only quoted-image downloads v2." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/middleware/attachment.js
+    grep -Fq "timeoutMs: vision.timeoutMs" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/media/vision-tool.js
+    grep -Fq "import { loadChatImageBytes } from '\''/opt/qqbot-defaults/qqbot-chat-policy.mjs'\'';" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/media/vision-tool.js
+    grep -Fq "Chat-only scoped image loader v3." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/media/vision-tool.js
+    grep -Fq "Chat-only image schema: fixed bundled Dayu image assets v5." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/media/vision-tool.js
+    grep -Fq "/opt/qqbot-assets/dayu/" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/media/vision-tool.js
+    grep -Fq "loadImageBytes(image, vision.maxBytes, exec)" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/media/vision-tool.js
+    grep -Fq "// Chat-only persistent media root v1." /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/media/media-cleaner.js
+    grep -Fq "export const MEDIA_ROOT = '\''/data/qqbot-media'\'';" /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/media/media-cleaner.js
     node --test /tmp/test-chat-policy.mjs
     QQBOT_HISTORY_SNAPSHOT_MODULE=/opt/qqbot-defaults/qqbot-history-snapshot.mjs node --test /tmp/test-group-history.mjs
 '

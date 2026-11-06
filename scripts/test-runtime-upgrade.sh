@@ -3,6 +3,7 @@ set -euo pipefail
 repo_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 image="${IMAGE:-dsh-qqbot:test-local}"
 legacy_image="${LEGACY_IMAGE:-tryao/qqbot-dsh:v0.17.0}"
+legacy_version="${LEGACY_VERSION:-0.5.0}"
 temporary="$(mktemp -d /tmp/qqbot-upgrade-XXXXXX)"
 container=''
 volumes=()
@@ -18,7 +19,7 @@ docker cp "$container:/opt/dsh-seed/profiles/qqbot" "$temporary/legacy-profile"
 docker run --rm --network none --entrypoint node \
     --volume "$temporary/legacy-profile:/legacy-profile:ro" \
     --volume "$repo_root/scripts/test-runtime-upgrade.mjs:/tmp/test-runtime-upgrade.mjs:ro" \
-    --env QQBOT_LEGACY_PROFILE=/legacy-profile \
+    --env QQBOT_LEGACY_PROFILE=/legacy-profile --env QQBOT_LEGACY_VERSION="$legacy_version" \
     "$image" --test /tmp/test-runtime-upgrade.mjs
 mkdir "$temporary/sessions"
 for mode in write resume; do
@@ -39,10 +40,10 @@ docker run --rm --network none --entrypoint sh --volume "${volumes[0]}:/data" --
     "$legacy_image" -ec 'cp -a /opt/dsh-seed/. /data/; touch /data/.initialized; printf "custom persona\n" > /data/AGENTS.md; cp -a /data/. /snapshot/'
 docker run --rm --network none --volume "${volumes[0]}:/data" --env QQBOT_APPID=fixture --env QQBOT_SECRET=fixture \
     --env DEEPSEEK_API_KEY=fixture "$image" node -e \
-    'const fs=require("fs"); if(require("/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/package.json").version!=="0.5.2")throw Error("upgrade failed"); if(fs.readFileSync("/data/AGENTS.md","utf8")!=="custom persona\n")throw Error("persona overwritten")'
+    'const fs=require("fs"); if(require("/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/package.json").version!=="0.5.5")throw Error("upgrade failed"); if(fs.readFileSync("/data/AGENTS.md","utf8")!=="custom persona\n")throw Error("persona overwritten")'
 docker run --rm --network none --entrypoint sh --volume "${volumes[1]}:/snapshot:ro" --volume "${volumes[2]}:/data" \
     "$legacy_image" -ec 'cp -a /snapshot/. /data/'
 docker run --rm --network none --volume "${volumes[2]}:/data" --env QQBOT_APPID=fixture --env QQBOT_SECRET=fixture \
-    --env DEEPSEEK_API_KEY=fixture "$legacy_image" node -e \
-    'const fs=require("fs"); if(require("/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/package.json").version!=="0.5.0")throw Error("rollback failed"); if(fs.readFileSync("/data/AGENTS.md","utf8")!=="custom persona\n")throw Error("snapshot was not restored")'
+    --env DEEPSEEK_API_KEY=fixture --env QQBOT_LEGACY_VERSION="$legacy_version" "$legacy_image" node -e \
+    'const fs=require("fs"); if(require("/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/package.json").version!==process.env.QQBOT_LEGACY_VERSION)throw Error("rollback failed"); if(fs.readFileSync("/data/AGENTS.md","utf8")!=="custom persona\n")throw Error("snapshot was not restored")'
 echo 'Actual entrypoint upgrade and full-volume rollback passed'

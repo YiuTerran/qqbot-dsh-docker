@@ -8,13 +8,14 @@ const { LlmAdapter, createUserMessage } = await import(`${root}/dsh-llm/lib/inde
 await mkdir('/data/profiles/qqbot/node_modules', { recursive: true });
 try { await symlink(root, '/data/profiles/qqbot/node_modules/@deepseek-ai', 'dir'); }
 catch (error) { if (error.code !== 'EEXIST') throw error; }
+const { createHostAdapter } = await import(`${process.env.QQBOT_ADAPTER_DIST}/host/adapter.js`);
 const { SessionManager } = await import(`${process.env.QQBOT_ADAPTER_DIST}/session/session-manager.js`);
 
 test('QQ manual compaction preserves the session and refreshes current capabilities afterwards', async t => {
     const ctx = new Context();
     t.after(() => ctx.fiber.dispose());
     for (const name of ['dsh-session-projection', 'dsh-session', 'dsh-agent', 'dsh-system-prompt',
-        'dsh-llm', 'dsh-tools', 'dsh-agent-loop', 'dsh-web', 'dsh-token-meter', 'dsh-compaction-basic']) {
+        'dsh-llm', 'dsh-tools', 'dsh-tool-executor-native', 'dsh-agent-loop', 'dsh-web', 'dsh-token-meter', 'dsh-compaction-basic']) {
         const loaded = await import(`${root}/${name}/lib/index.js`);
         await ctx.plugin(loaded.default ?? loaded, name === 'dsh-agent-loop' ? { agents: [] }
             : name === 'dsh-compaction-basic' ? { auto: false } : {});
@@ -43,7 +44,7 @@ test('QQ manual compaction preserves the session and refreshes current capabilit
     await send('A historical topic. '.repeat(100));
     await send('More historical context. '.repeat(100));
     const manager = Object.create(SessionManager.prototype);
-    Object.assign(manager, { ctx, sessions: new Map([['c2c:owner', { agent }]]),
+    Object.assign(manager, { ctx, host: createHostAdapter(ctx, { warn() {}, debug() {} }), sessions: new Map([['c2c:owner', { agent }]]),
         sessionKey: (scope, peer) => `${scope}:${peer}`, getPresetsService: () => undefined,
         modelResolver: { getEffectiveRoute: () => ({ provider: 'fixture', model: 'fixture' }) }, logger: { warn() {}, error() {} } });
     assert.deepEqual(await manager.compact('c2c', 'missing'), { ok: false, reason: 'no-session' });

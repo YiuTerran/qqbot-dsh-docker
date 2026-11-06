@@ -724,7 +724,7 @@ integration('native group inbound/outbound handlers hold the shared-group lock t
         followup(body) {
             followups.push(body);
             if (followups.length === 2) {
-                outbound({ header: { id: record.sessionId } }, {
+                outbound.routeSessionEvent({ header: { id: record.sessionId } }, {
                     type: 'assistant/message', seq: 3, data: {
                         turn: 1,
                         message: { content: [{ type: 'text', text: 'stale-reply-from-A' }] },
@@ -734,10 +734,10 @@ integration('native group inbound/outbound handlers hold the shared-group lock t
         },
         async whenIdle() {
             const currentTurn = ++turn;
-            outbound({ header: { id: record.sessionId } }, {
+            outbound.routeSessionEvent({ header: { id: record.sessionId } }, {
                 type: 'turn/start', seq: currentTurn === 1 ? seq++ : 4, data: { turn: currentTurn },
             });
-            outbound({ header: { id: record.sessionId } }, {
+            outbound.routeSessionEvent({ header: { id: record.sessionId } }, {
                 type: 'assistant/message', seq: currentTurn === 1 ? seq++ : 5, data: {
                     turn: currentTurn,
                     message: { content: [{ type: 'text', text: `reply-${currentTurn}` }] },

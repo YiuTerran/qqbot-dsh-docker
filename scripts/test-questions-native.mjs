@@ -21,7 +21,7 @@ const sdkRoot = process.env.QQBOT_QQ_SDK_API_ROOT
 const sdkDist = process.env.QQBOT_SDK_ROOT
     ?? '/data/profiles/qqbot/node_modules/@tencent-connect/qqbot-nodejs/dist';
 const adapterDist = process.env.QQBOT_ADAPTER_DIST
-    ?? '/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist';
+    ?? '/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib';
 const { MessageApi } = await import(`${sdkRoot}/messages.js`);
 const { MediaApi } = await import(`${sdkRoot}/media.js`);
 const { QQBot } = await import(pathToFileURL(join(sdkDist, 'QQBot.js')).href);
@@ -31,6 +31,7 @@ const { createOnebotDirectRouter } = await import(`${defaultsRoot}/qqbot-onebot-
 const { Context } = await import(`${dshRoot}cordis/lib/index.js`);
 const { default: SystemPrompt } = await import(`${dshRoot}dsh-system-prompt/lib/index.js`);
 const { default: ToolRuntime } = await import(`${dshRoot}dsh-tools/lib/index.js`);
+const NativeToolExecutor = await import(`${dshRoot}dsh-tool-executor-native/lib/index.js`);
 const { default: WebRuntime } = await import(`${dshRoot}dsh-web/lib/index.js`);
 const { installChatPolicy } = await import(`${defaultsRoot}/qqbot-chat-policy.mjs`);
 const { resolveReplyTarget, sendResolvedMarkdown } = await import(`${adapterDist}/transport/reply-target.js`);
@@ -207,7 +208,8 @@ test('pinned UserQuestionService and native Tools runtime deliver a real bound q
     const ctx = new Context();
     t.after(() => ctx.fiber.dispose());
     await ctx.plugin(SystemPrompt, {});
-    await ctx.plugin(ToolRuntime, { mode: 'native' });
+    await ctx.plugin(ToolRuntime);
+    await ctx.plugin(NativeToolExecutor);
     await ctx.plugin(WebRuntime, { fetchProvider: 'qqbot-pages' });
     await ctx.plugin({ inject: ['tools', 'web', 'systemPrompt'], apply: installChatPolicy });
 
@@ -309,19 +311,19 @@ test('pinned UserQuestionService and native Tools runtime deliver a real bound q
         output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] },
         execute() { blockedBodyCalls++; return 'forbidden'; } });
     ctx.on('tools/pre-execute', () => { approvalCalls++; return { kind: 'allow' }; });
-    assert.equal((await ctx.tools.execute({ name: 'bash', arguments: {}, agent, callId: 'blocked-shell', signal: new AbortController().signal })).isError, true);
+    assert.equal((await executeSingleTool(ctx, { name: 'bash', arguments: {}, agent, callId: 'blocked-shell', signal: new AbortController().signal })).isError, true);
     assert.equal(blockedBodyCalls, 0, 'mounting questions does not expose shell execution');
     assert.equal(approvalCalls, 0, 'the actual chat guard refuses shell before approval');
     for (const [invalidAgent, invalidRequestId, callId] of [
         [childAgent, requestId, 'delegated-tool'], [agent, 'unbound-request', 'unbound-tool'],
     ]) {
-        const denied = await ctx.tools.execute({ name: QQ_QUESTION_TOOL,
+        const denied = await executeSingleTool(ctx, { name: QQ_QUESTION_TOOL,
             arguments: { ...args, requestId: invalidRequestId }, agent: invalidAgent, callId, signal: new AbortController().signal });
         assert.equal(denied.isError, true, 'native pre-execution refuses unbound or delegated question tools');
     }
     assert.equal(fetchRequests.length, 0, 'unauthorized tool calls never reach QQ transport');
     const exec = { name: QQ_QUESTION_TOOL, arguments: args, agent, callId: 'native-call', signal: new AbortController().signal };
-    const resultPromise = ctx.tools.execute({ ...exec });
+    const resultPromise = executeSingleTool(ctx, { ...exec });
     const firstSendOrResult = await Promise.race([
         waitFor(() => fetchRequests.length > 0, 'the initial native question send').then(() => 'sent'),
         resultPromise.then((result) => ({ returned: result })),
@@ -394,8 +396,8 @@ test('pinned UserQuestionService and native Tools runtime deliver a real bound q
             return sendResolvedMarkdown(qqBot, resolveReplyTarget(target, finalLimiter, true), content);
         },
     }, { appId, streaming: false, textChunkLimit: 21, showToolResults: false }, logger, {});
-    outbound({ header: { id: record.sessionId } }, { type: 'turn/start', seq: 1, data: { turn: 1 } });
-    outbound({ header: { id: record.sessionId } }, {
+    outbound.routeSessionEvent({ header: { id: record.sessionId } }, { type: 'turn/start', seq: 1, data: { turn: 1 } });
+    outbound.routeSessionEvent({ header: { id: record.sessionId } }, {
         type: 'assistant/message', seq: 2,
         data: { turn: 1, message: { content: [{ type: 'text', text: 'Final answer part one\nFinal answer part two' }] } },
     });
@@ -410,7 +412,7 @@ test('pinned UserQuestionService and native Tools runtime deliver a real bound q
     const stopExec = { name: QQ_QUESTION_TOOL,
         arguments: { requestId, questions: [{ id: 'stop-wait', question: 'Waiting for /stop.' }] },
         agent, callId: 'native-stop-call', signal: new AbortController().signal };
-    const stopPromise = ctx.tools.execute({ ...stopExec });
+    const stopPromise = executeSingleTool(ctx, { ...stopExec });
     await waitFor(() => fetchRequests.length >= 3, 'the question cancelled by /stop');
     assert.equal(fetchRequests.length, 3, 'a second request is genuinely waiting in the native QQ tool path');
     await dispatchGroupText(qqBot, makeRawGroupEvent({ id: 'native-stop-control', senderId: 'owner-a', text: '/stop', mention: true }));
@@ -420,7 +422,7 @@ test('pinned UserQuestionService and native Tools runtime deliver a real bound q
 
     await closeMergeBatch(batch);
     const sendsBeforeLateEvent = finalPosts.length;
-    outbound({ header: { id: record.sessionId } }, {
+    outbound.routeSessionEvent({ header: { id: record.sessionId } }, {
         type: 'assistant/message', seq: 20,
         data: { turn: 1, message: { content: [{ type: 'text', text: 'Late final reply after stop' }] } },
     });
@@ -441,7 +443,7 @@ test('pinned UserQuestionService and native Tools runtime deliver a real bound q
     const newExec = { name: QQ_QUESTION_TOOL,
         arguments: { requestId: newRequestId, questions: [{ id: 'new-wait', question: 'Waiting for /new.' }] },
         agent, callId: 'native-new-call', signal: new AbortController().signal };
-    const newPromise = ctx.tools.execute({ ...newExec });
+    const newPromise = executeSingleTool(ctx, { ...newExec });
     await waitFor(() => fetchRequests.length >= 4, 'the question cancelled by /new');
     assert.equal(fetchRequests.length, 4, 'the fresh question is pending before /new is dispatched');
     await dispatchGroupText(qqBot, makeRawGroupEvent({ id: 'native-new-control', senderId: 'owner-a', text: '/new', mention: true }));
@@ -469,7 +471,8 @@ test('native C2C raw messages and callbacks bind the peer owner without a group 
     const ctx = new Context();
     t.after(() => ctx.fiber.dispose());
     await ctx.plugin(SystemPrompt, {});
-    await ctx.plugin(ToolRuntime, { mode: 'native' });
+    await ctx.plugin(ToolRuntime);
+    await ctx.plugin(NativeToolExecutor);
     await ctx.plugin(WebRuntime, { fetchProvider: 'qqbot-pages' });
     await ctx.plugin({ inject: ['tools', 'web', 'systemPrompt'], apply: installChatPolicy });
     const agent = { id: 'c2c-root', session: { seq: 0 } };
@@ -501,7 +504,7 @@ test('native C2C raw messages and callbacks bind the peer owner without a group 
         await endDocumentTurn(agent, documentScope);
     });
     const requestId = generationRequestMetadata(scope)[0].requestId;
-    const result = ctx.tools.execute({ name: QQ_QUESTION_TOOL, agent, callId: 'private-question', signal: new AbortController().signal,
+    const result = executeSingleTool(ctx, { name: QQ_QUESTION_TOOL, agent, callId: 'private-question', signal: new AbortController().signal,
         arguments: { requestId, questions: [
             { id: 'private-one', question: 'Pick A or B', options: [{ label: 'A' }, { label: 'B' }] },
             { id: 'private-two', question: 'Pick X or Y', options: [{ label: 'X' }, { label: 'Y' }] },
@@ -548,7 +551,7 @@ test('native outbound hides question answers and errors even when tool results a
             async sendMarkdown(actualTarget, content) { sent.push({ target: actualTarget, content }); },
         }, { appId, streaming: false, textChunkLimit: 2000, showToolResults: true }, logger, {});
         const session = { header: { id: record.sessionId } };
-        const emit = (type, seq, data) => handler(session, { type, seq, data: { turn: 1, ...data } });
+        const emit = (type, seq, data) => handler.routeSessionEvent(session, { type, seq, data: { turn: 1, ...data } });
         const callId = `question-receipt-${outcome}`;
         const value = outcome === 'answered'
             ? { status: 'answered', answers: [{ id: 'private-choice', selected: ['B'], custom: 'private user answer' }] }
@@ -566,13 +569,19 @@ test('native outbound hides question answers and errors even when tool results a
         emit('turn/end', 4, { reason: { kind: 'completed' } });
         await new Promise((resolve) => setImmediate(resolve));
         assert.deepEqual(sent, [], `${outcome}: question errors do not trigger an extra generic tool-failure notice`);
-        handler(session, { type: 'turn/start', seq: 5, data: { turn: 2 } });
-        handler(session, { type: 'assistant/message', seq: 6, data: { turn: 2,
+        handler.routeSessionEvent(session, { type: 'turn/start', seq: 5, data: { turn: 2 } });
+        handler.routeSessionEvent(session, { type: 'assistant/message', seq: 6, data: { turn: 2,
             message: { content: [{ type: 'text', text: '普通最终回复' }] },
         } });
-        handler(session, { type: 'turn/end', seq: 7, data: { turn: 2, reason: { kind: 'completed' } } });
+        handler.routeSessionEvent(session, { type: 'turn/end', seq: 7, data: { turn: 2, reason: { kind: 'completed' } } });
         await closeMergeBatch(batch);
         assert.deepEqual(sent, [{ target, content: '普通最终回复' }],
             `${outcome}: the real outbound handler still delivers an ordinary assistant reply`);
     }
 });
+
+// Exercise the native executor's real single-call batch contract.
+async function executeSingleTool(ctx, { name, arguments: args, callId, ...input }) {
+    const batch = await ctx.tools.execute({ ...input, calls: [{ type: 'tool-call', id: callId, name, arguments: args }] });
+    return batch.results[0].result;
+}
