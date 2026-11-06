@@ -26,7 +26,7 @@ async function run(script, args = []) {
 async function isolatedAdapter(t) {
     const temporary = await mkdtemp(join(tmpdir(), 'qqbot-recovery-upgrade-'));
     t.after(() => rm(temporary, { recursive: true, force: true }));
-    const copiedDist = join(temporary, 'dist');
+    const copiedDist = join(temporary, 'lib');
     await cp(resolve(sourceDist), copiedDist, { recursive: true });
     await cp(join(dirname(resolve(sourceDist)), 'package.json'), join(temporary, 'package.json'));
     return copiedDist;
@@ -48,6 +48,7 @@ async function hashes(root, relative = '') {
 async function assertCurrentPatch(root) {
     const expected = {
         'gateway/bootstrap.js': [
+            '// Chat-only disable automatic presented files v1.',
             '// Chat-only merge batch reply adapter v1.',
             '// Chat-only native OneBot delivery integration v1.',
             '    let onebotService;',
@@ -118,6 +119,9 @@ async function assertCurrentPatch(root) {
             'if (documentTurn) await finishContentRiskRecovery(documentTurn);',
         ],
         'transport/outbound.js': [
+            '// Chat-only batch-bound transient streams v1.',
+            'attempt.batch !== binding.batch',
+            'this.streamAttempts.delete(sessionId);',
             '// Chat-only content-risk turn recovery v1.',
             '// Chat-only friendly provider errors v1.',
             '// Chat-only batch-bound outbound routing v1.',
@@ -166,9 +170,11 @@ async function assertCurrentPatch(root) {
             'return Promise.all([this.flushPromise, completion].filter(Boolean));',
         ],
         'transport/events.js': ['// Chat-only structured provider failures v1.'],
-        'model/prefs-store.js': ['// Chat-only persistent model prefs v1.'],
+        'model/prefs-store.js': ['// Chat-only persistent model prefs v1.',
+            'this.mergeDisk(this.readDiskState())', 'if (wasDeleted) this.deleted.sessionIds.add(sessionKey)'],
         'model/model-resolver.js': ['// Chat-only strict sessionId persistence v1.'],
         'session/session-manager.js': [
+            'this.modelResolver.setSessionId(key, mintSessionId(), { strict: true });',
             '// Chat-only strict automatic session reset v1.',
             '// Chat-only committed reset disposal v1.',
             'recoveryOptions.onCommitted?.(record)',
@@ -176,6 +182,10 @@ async function assertCurrentPatch(root) {
     };
     const inbound = await readFile(join(root, 'transport/inbound.js'), 'utf8');
     const bootstrap = await readFile(join(root, 'gateway/bootstrap.js'), 'utf8');
+    const outbound = await readFile(join(root, 'transport/outbound.js'), 'utf8');
+    assert.equal(bootstrap.includes('DeliverablesDeliverer'), false);
+    assert.equal(outbound.includes('this.deliverer.deliver('), false);
+    assert.equal(outbound.includes("case 'deliverables/presented':"), false);
     const middlewareSetup = await readFile(join(root, 'gateway/middleware-setup.js'), 'utf8');
     for (const obsolete of ['QQBOT_GROUP_CURRENT_ONLY', 'beginGroupModelContext', 'projectGroupModelMessages',
         'logContextInbound', 'logContextProjection', 'quoteFilter', 'createGroupHistoryBuffer']) {
@@ -262,6 +272,10 @@ for (const version of ['pre-capabilities', 'v0.12.4', 'pre-thinking', 'pre-concu
         else if (version === 'onebot-v11.2') {
             await run(concurrencyFixture, [root, 'log-only']);
             const bootstrap = await readFile(join(root, 'gateway/bootstrap.js'), 'utf8');
+    const outbound = await readFile(join(root, 'transport/outbound.js'), 'utf8');
+    assert.equal(bootstrap.includes('DeliverablesDeliverer'), false);
+    assert.equal(outbound.includes('this.deliverer.deliver('), false);
+    assert.equal(outbound.includes("case 'deliverables/presented':"), false);
             assert.equal(bootstrap.split('// Chat-only native OneBot direct router v1.').length, 2,
                 'the released v0.11.2 direct-router marker survives the fixture');
             assert.equal(bootstrap.includes('const onebotService = registerOnebotCommandTool(ctx, {'), true,

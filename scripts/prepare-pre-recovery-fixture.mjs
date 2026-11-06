@@ -115,23 +115,38 @@ await edit('transport/outbound.js', (source) => {
     const end = source.indexOf('    /** 统一发送：切分 + 逐 chunk 发送 + 错误记录 */', start);
     if (start < 0 || end < 0) throw new Error('pre-recovery fixture expected the content-risk onTurnEnd handler');
     const originalHandler = [
-        '    onTurnEnd(sessionId, record, event) {',
-        '        const buffer = this.buffers.get(sessionId);',
-        '        if (buffer !== undefined) {',
-        '            if (buffer.text.trim()) {',
-        '                void buffer.flush();',
-        '            }',
-        '            else {',
-        '                buffer.cancel();',
-        '            }',
-        '            this.buffers.delete(sessionId);',
-        '        }',
-        '        const failure = extractTurnError(event.reason);',
-        "        if (failure !== undefined && !SILENT_TURN_ERROR_CODES.has(failure.code)) {",
-        '            void this.send(record, `⚠️ 本轮异常结束\\n\\`${failure.code}\\`: ${failure.message}`, \'sendTurnEndError\');',
-        '        }',
-        '        this.logger.debug(`im-qqbot: turn/end sessionId=${sessionId}`);',
-        '    }',
+        "    onTurnEnd(sessionId, record, event) {",
+        "        const buffer = this.buffers.get(sessionId);",
+        "        // 文本 flush 可等待，保证回复先于交付文件到达用户",
+        "        let flushTask = Promise.resolve();",
+        "        if (buffer !== undefined) {",
+        "            if (buffer.text.trim()) {",
+        "                flushTask = buffer.flush();",
+        "            }",
+        "            else {",
+        "                buffer.cancel();",
+        "            }",
+        "            this.buffers.delete(sessionId);",
+        "        }",
+        "        this.streamAttempts.delete(sessionId);",
+        "        const files = this.presentedFiles.get(sessionId) ?? [];",
+        "        this.presentedFiles.delete(sessionId);",
+        "        this.presentedCalls.delete(sessionId);",
+        "        // assistant/message 已在轮内先行发送的文本可能仍在途：与 turn/end 自身的 flush 一起等待",
+        "        const pending = this.pendingText.get(sessionId) ?? Promise.resolve();",
+        "        this.pendingText.delete(sessionId);",
+        "        const failure = extractTurnError(event.reason);",
+        "        void (async () => {",
+        "            await Promise.all([flushTask, pending]);",
+        "            if (failure !== undefined && !SILENT_TURN_ERROR_CODES.has(failure.code)) {",
+        "                await this.send(record, `⚠️ 本轮异常结束\\n\\`${failure.code}\\`: ${failure.message}`, 'sendTurnEndError');",
+        "            }",
+        "            if (files.length > 0 && this.deliverer !== undefined) {",
+        "                await this.deliverer.deliver(record, files);",
+        "            }",
+        "            this.logger.debug(`im-qqbot: turn/end sessionId=${sessionId}`);",
+        "        })();",
+        "    }",
     ].join('\n');
     return source.slice(0, start) + originalHandler + '\n' + source.slice(end);
 });
@@ -151,62 +166,79 @@ await edit('model/prefs-store.js', (source) => {
         "import { resolve, dirname } from 'node:path';",
         "import { homedir } from 'node:os';",
     ].join('\n'), [
-        "import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';",
+        "import { readFileSync, writeFileSync, renameSync, unlinkSync, existsSync, mkdirSync } from 'node:fs';",
+        "import { randomBytes } from 'node:crypto';",
         "import { resolve, dirname } from 'node:path';",
-        "import { homedir } from 'node:os';",
+        "import { PLUGIN_HOME } from \"../shared/dirs.js\";",
     ].join('\n'), 'PrefsStore imports');
-    const constructorStart = source.indexOf('    constructor(debugLog) {');
+    const constructorStart = source.indexOf('    constructor(debugLog, options) {');
     const constructorEnd = source.indexOf('    // ── Override 操作 ──', constructorStart);
     if (constructorStart < 0 || constructorEnd < 0 || !source.slice(constructorStart, constructorEnd).includes('// Chat-only persistent model prefs v1.'))
         throw new Error('pre-recovery fixture expected persistent PrefsStore constructor');
     const originalConstructor = [
-        '    constructor(debugLog) {',
-        "        this.prefsPath = resolve(homedir(), '.dsh-qqbot', 'model-prefs.json');",
-        '        this.debugLog = debugLog;',
-        '        this.load();',
-        '    }',
-        '',
-    ].join('\n');
+        "    constructor(debugLog, options) {",
+        "        this.prefsPath = options?.path ?? resolve(PLUGIN_HOME, 'model-prefs.json');",
+        "        this.debugLog = debugLog;",
+        "        this.onError = options?.onError;",
+        "        this.load();",
+        "    }",
+    ].join('\n') + '\n';
     source = source.slice(0, constructorStart) + originalConstructor + source.slice(constructorEnd);
     source = replaceOnce(source, [
-        '    setSessionId(sessionKey, sessionId, options = {}) {',
-        '        const hadPrevious = this.sessionIds.has(sessionKey);',
-        '        const previous = this.sessionIds.get(sessionKey);',
-        '        this.sessionIds.set(sessionKey, sessionId);',
-        '        const written = this.write();',
-        '        if (options?.strict && !written) {',
-        '            if (hadPrevious) this.sessionIds.set(sessionKey, previous);',
-        '            else this.sessionIds.delete(sessionKey);',
+        "    setSessionId(sessionKey, sessionId, options = {}) {",
+        "        const hadPrevious = this.sessionIds.has(sessionKey);",
+        "        const previous = this.sessionIds.get(sessionKey);",
+        "        const wasDeleted = this.deleted.sessionIds.has(sessionKey);",
+        "        this.deleted.sessionIds.delete(sessionKey);",
+        "        this.sessionIds.set(sessionKey, sessionId);",
+        "        const written = this.write();",
+        "        if (options?.strict && !written) {",
+        "            if (wasDeleted) this.deleted.sessionIds.add(sessionKey);",
+        "            if (hadPrevious) this.sessionIds.set(sessionKey, previous);",
+        "            else this.sessionIds.delete(sessionKey);",
         "            throw new Error('Unable to persist automatic session reset.');",
-        '        }',
-        '        return written;',
-        '    }',
+        "        }",
+        "        return written;",
+        "    }",
     ].join('\n'), [
-        '    setSessionId(sessionKey, sessionId) {',
-        '        this.sessionIds.set(sessionKey, sessionId);',
-        '        this.write();',
-        '    }',
+        "    setSessionId(sessionKey, sessionId) {",
+        "        this.sessionIds.set(sessionKey, sessionId);",
+        "        this.deleted.sessionIds.delete(sessionKey);",
+        "        this.write();",
+        "    }",
     ].join('\n'), 'PrefsStore strict setter');
     const writeStart = source.indexOf('    write() {');
     const classEnd = source.indexOf('\n}\n//# sourceMappingURL', writeStart);
     if (writeStart < 0 || classEnd < 0 || !source.slice(writeStart, classEnd).includes('renameSync(tempPath, this.prefsPath);'))
         throw new Error('pre-recovery fixture expected atomic PrefsStore.write()');
     const originalWrite = [
-        '    write() {',
-        '        try {',
-        '            mkdirSync(dirname(this.prefsPath), { recursive: true });',
-        '            const data = {',
-        '                overrides: Object.fromEntries(this.overrides.entries()),',
-        '                sessionIds: Object.fromEntries(this.sessionIds.entries()),',
-        '                presets: Object.fromEntries(this.presets.entries()),',
-        '            };',
-        "            writeFileSync(this.prefsPath, JSON.stringify(data, null, 2), 'utf8');",
-        '        }',
-        '        catch (err) {',
-        '            this.debugLog?.(`writePrefs failed: ${err instanceof Error ? err.message : String(err)}`);',
-        '        }',
-        '    }',
-    ].join('\n');
+        "    write() {",
+        "        try {",
+        "            mkdirSync(dirname(this.prefsPath), { recursive: true });",
+        "            const data = this.mergeDisk(this.readDiskState());",
+        "            // 原子写：同目录临时文件 + rename（同分区保证原子，崩溃不留半份文件）。",
+        "            // tmp 名带进程+随机后缀：跨进程并发写时各自的临时文件互不覆盖，",
+        "            // rename 只会带走自己写的那份（固定名会让 A 的 rename 落盘 B 的内容）",
+        "            const tmpPath = `${this.prefsPath}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;",
+        "            try {",
+        "                writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf8');",
+        "                renameSync(tmpPath, this.prefsPath);",
+        "            }",
+        "            catch (err) {",
+        "                try {",
+        "                    unlinkSync(tmpPath);",
+        "                }",
+        "                catch { /* 临时文件可能不存在 */ }",
+        "                throw err;",
+        "            }",
+        "        }",
+        "        catch (err) {",
+        "            const msg = `writePrefs failed: ${err instanceof Error ? err.message : String(err)}`;",
+        "            this.onError?.(msg);",
+        "            this.debugLog?.(msg);",
+        "        }",
+        "    }",
+    ].join('\n') + '\n';
     return source.slice(0, writeStart) + originalWrite + source.slice(classEnd);
 });
 
@@ -223,13 +255,13 @@ await edit('model/model-resolver.js', (source) => replaceOnce(source, [
 
 await edit('session/session-manager.js', (source) => {
     const start = source.indexOf('    // Chat-only strict automatic session reset v1.');
-    const end = source.indexOf('    /**\n     * 原地压缩当前会话历史', start);
+    const end = source.indexOf('    /** Agent 工作目录', start);
     if (start < 0 || end < 0) throw new Error('pre-recovery fixture expected strict SessionManager.remove()');
     const originalRemove = [
         '    async remove(scope, peerId) {',
         '        const key = this.sessionKey(scope, peerId);',
         '        const record = this.sessions.get(key);',
-        '        this.modelResolver.setSessionId(key, randomUUID());',
+        '        this.modelResolver.setSessionId(key, mintSessionId());',
         '        if (!record)',
         '            return;',
         '        this.sessions.delete(key);',

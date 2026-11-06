@@ -1008,24 +1008,7 @@ docker create \
         node --check /data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/session/session-manager.js
         dump=/tmp/qqbot-dump-config.yaml
         dsh --profile qqbot --patch /opt/qqbot-defaults/cordis.safety.patch.yml --dump-config >"$dump"
-        grep -A2 -F -- "- id: tool-bash" "$dump" | grep -Fq "disabled: true"
-        grep -A2 -F -- "- id: tool-fs" "$dump" | grep -Fq "disabled: true"
-        grep -A12 -F -- "- id: tool-subagent" "$dump" | grep -Fq "disabled: true"
-        grep -A2 -F -- "- id: ptc-runtime" "$dump" | grep -Fq "disabled: true"
-        grep -A4 -F -- "- id: web" "$dump" | grep -Fq "searchProvider: deepseek-official"
-        grep -A4 -F -- "- id: web" "$dump" | grep -Fq "fetchProvider: qqbot-pages"
-        grep -A6 -F -- "- id: web-fetch-http" "$dump" | grep -Fq "disabled: true"
-        grep -A9 -F -- "- id: tool-web" "$dump" | grep -Fq "searchMaxResults: 8"
-        grep -A9 -F -- "- id: tool-web" "$dump" | grep -Fq "searchMaxQueries: 4"
-        grep -A8 -F -- "- id: web-search-deepseek" "$dump" | grep -Fq "maxUses: 0"
-        grep -A9 -F -- "- id: tool-web" "$dump" | grep -Fq "searchTimeoutMs: 60000"
-        grep -A9 -F -- "- id: tool-web" "$dump" | grep -Fq "fetch: true"
-        ! grep -A3 -F -- "- id: tools" "$dump" | grep -Eq "mode: (native|ptc)"
-        grep -A3 -F -- "- id: tool-executor-native" "$dump" | grep -Fq "disabled: false"
-        grep -A3 -F -- "- id: tool-executor-ptc" "$dump" | grep -Fq "disabled: true"
-        grep -A4 -F -- "- id: agent-loop" "$dump" | grep -Fq "agents: []"
-        test "$(grep -A6 -F -- "- id: im-qqbot" "$dump" | grep -Fc "appId: __FROM_ENV__")" -eq 1
-        test "$(grep -A6 -F -- "- id: im-qqbot" "$dump" | grep -Fc "appSecret: __FROM_ENV__")" -eq 1
+        node /repo/scripts/verify-config-policy.mjs "$dump"
         node --test /tmp/test-chat-policy.mjs
         QQBOT_DEEPSEEK_STATUS_MODULE=/opt/qqbot-defaults/qqbot-deepseek-status.mjs node --test /tmp/test-deepseek-status.mjs
         node --test /tmp/test-qqbot-mention-text.mjs

@@ -43,8 +43,6 @@
   disabled: true
 - id: tool-subagent-control
   disabled: true
-- id: tool-subagent-list-agents
-  disabled: true
 - id: tool-workflow
   disabled: true
 - id: ptc-runtime
