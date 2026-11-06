@@ -35,6 +35,7 @@ const { Context } = await import(`${dshRoot}cordis/lib/index.js`);
 const { default: SystemPrompt } = await import(`${dshRoot}dsh-system-prompt/lib/index.js`);
 const { default: ToolRuntime } = await import(`${dshRoot}dsh-tools/lib/index.js`);
 const NativeToolExecutor = await import(`${dshRoot}dsh-tool-executor-native/lib/index.js`);
+const { ToolExecutionPipeline } = await import(`${dshRoot}dsh-tools/lib/pipeline.js`);
 const { default: WebRuntime } = await import(`${dshRoot}dsh-web/lib/index.js`);
 const { applyWebFetchTool, applyWebSearchTool } = await import(`${dshRoot}dsh-tool-web/lib/index.js`);
 const { DeepSeekSearchProvider } = await import(`${dshRoot}dsh-web-search-deepseek/lib/index.js`);
@@ -1391,7 +1392,8 @@ test('prepared native executions cannot adopt grants from a newer QQ turn', asyn
     const url = 'https://public.example.com/old-turn';
     beginDocumentTurn(agent, { content: `Read ${url}` });
     t.after(() => endDocumentTurn(agent));
-    const prepared = await ctx.tools.prepareScheduledExecution({
+    const pipeline = new ToolExecutionPipeline(ctx);
+    const prepared = await pipeline.prepare({
         name: 'web_fetch', arguments: { url }, agent,
         callId: 'old-prepared-fetch', signal: new AbortController().signal,
     });
@@ -1401,9 +1403,10 @@ test('prepared native executions cannot adopt grants from a newer QQ turn', asyn
         url: 'https://files.example.com/note.txt',
     }] });
     assert.equal(isTurnUrlAllowed(agent, url), true, 'the new turn happens to allow the same URL');
-    const dispatched = await ctx.tools.dispatchScheduledExecution(prepared.exec);
-    assert.equal(dispatched.result.isError, true, 'old prepared execution remains expired despite the new grant');
-    assert.match(JSON.stringify(dispatched.result), /expired|scope|message/i);
+    const dispatched = await pipeline.dispatch(prepared.exec);
+    const result = await pipeline.complete(prepared.exec, dispatched);
+    assert.equal(result.isError, true, 'old prepared execution remains expired despite the new grant');
+    assert.match(JSON.stringify(result), /expired|scope|message/i);
 });
 
 test('QQ explicitly quoted documents trigger a turn even without new text or attachments', async () => {

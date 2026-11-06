@@ -397,7 +397,7 @@ try {
     const requestId = onebotScope.onebotRequestMetadata(turn)[0]?.requestId;
     assert.ok(requestId, 'OneBot turn metadata did not include an opaque requestId');
     try {
-      const execution = await tools.execute({
+      const execution = await executeSingleTool(tools, {
         name: 'qqbot_onebot_command',
         arguments: { requestId, backend: 'sealdice', command: '.r 1d1' },
         agent,
@@ -417,7 +417,7 @@ try {
       if (onebotFixtureMode) {
         onebotFixtureState.backendReady = false;
         await waitForOnebotCatalog(tools, systemPrompt, false, 15_000, true);
-        const denied = await tools.execute({
+        const denied = await executeSingleTool(tools, {
           name: 'qqbot_onebot_command',
           arguments: { requestId, backend: 'sealdice', command: '.r 1d1' },
           agent,
@@ -452,7 +452,7 @@ try {
     }
   }
 
-  const dangerous = await tools.execute({
+  const dangerous = await executeSingleTool(tools, {
     name: 'exit_plan_mode',
     arguments: {},
     agent: {},
@@ -495,4 +495,10 @@ try {
     if (value === undefined) delete process.env[key];
     else process.env[key] = value;
   }
+}
+
+// Preserve real native batch admission and result materialization in probes.
+async function executeSingleTool(tools, { name, arguments: args, callId, ...input }) {
+  const batch = await tools.execute({ ...input, calls: [{ type: 'tool-call', id: callId, name, arguments: args }] });
+  return batch.results[0].result;
 }
