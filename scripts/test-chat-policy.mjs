@@ -34,6 +34,7 @@ try {
 const { Context } = await import(`${dshRoot}cordis/lib/index.js`);
 const { default: SystemPrompt } = await import(`${dshRoot}dsh-system-prompt/lib/index.js`);
 const { default: ToolRuntime } = await import(`${dshRoot}dsh-tools/lib/index.js`);
+const NativeToolExecutor = await import(`${dshRoot}dsh-tool-executor-native/lib/index.js`);
 const { default: WebRuntime } = await import(`${dshRoot}dsh-web/lib/index.js`);
 const { applyWebFetchTool, applyWebSearchTool } = await import(`${dshRoot}dsh-tool-web/lib/index.js`);
 const { DeepSeekSearchProvider } = await import(`${dshRoot}dsh-web-search-deepseek/lib/index.js`);
@@ -92,7 +93,8 @@ async function runtime(t) {
     const ctx = new Context();
     t.after(() => ctx.fiber.dispose());
     await ctx.plugin(SystemPrompt, {});
-    await ctx.plugin(ToolRuntime, { mode: 'native' });
+    await ctx.plugin(ToolRuntime);
+    await ctx.plugin(NativeToolExecutor);
     await ctx.plugin(WebRuntime, { fetchProvider: 'qqbot-pages' });
     await ctx.plugin({ inject: ['tools', 'web', 'systemPrompt'], apply: installChatPolicy });
     return ctx;
@@ -102,7 +104,8 @@ async function webSearchRuntime(t, provider) {
     const ctx = new Context();
     t.after(() => ctx.fiber.dispose());
     await ctx.plugin(SystemPrompt, {});
-    await ctx.plugin(ToolRuntime, { mode: 'native' });
+    await ctx.plugin(ToolRuntime);
+    await ctx.plugin(NativeToolExecutor);
     await ctx.plugin(WebRuntime, { fetchProvider: 'qqbot-pages' });
     if (provider) ctx.web.registerSearchProvider(provider);
     await ctx.plugin({
@@ -117,11 +120,11 @@ async function webSearchRuntime(t, provider) {
 }
 
 function call(ctx, name, args, agent, signal = new AbortController().signal) {
-    return ctx.tools.execute({ name, arguments: args, agent, callId: 'test-call', signal });
+    return executeSingleTool(ctx, { name, arguments: args, agent, callId: 'test-call', signal });
 }
 
 function nativeCall(ctx, name, args, agent, callId, signal = new AbortController().signal) {
-    return ctx.tools.execute({ name, arguments: args, agent, callId, signal });
+    return executeSingleTool(ctx, { name, arguments: args, agent, callId, signal });
 }
 
 function captureMiddlewareChain(config, manager = {}) {
@@ -2011,7 +2014,8 @@ test('native assembly and status share capabilities while concurrent requests re
     const ctx = new Context();
     t.after(() => ctx.fiber.dispose());
     await ctx.plugin(SystemPrompt, {});
-    await ctx.plugin(ToolRuntime, { mode: 'native' });
+    await ctx.plugin(ToolRuntime);
+    await ctx.plugin(NativeToolExecutor);
     await ctx.plugin(WebRuntime, { fetchProvider: 'qqbot-pages' });
     let capabilities;
     await ctx.plugin({ inject: ['tools', 'web', 'systemPrompt'], apply(child) { capabilities = installChatPolicy(child); } });
@@ -2069,3 +2073,9 @@ test('native assembly and status share capabilities while concurrent requests re
     assert.match(command.handler(cmdCtx), /OneBot: 未启用/u);
     assert.equal(calls, 0);
 });
+
+// Exercise the native executor's real single-call batch contract.
+async function executeSingleTool(ctx, { name, arguments: args, callId, ...input }) {
+    const batch = await ctx.tools.execute({ ...input, calls: [{ type: 'tool-call', id: callId, name, arguments: args }] });
+    return batch.results[0].result;
+}

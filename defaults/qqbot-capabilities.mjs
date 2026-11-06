@@ -89,14 +89,15 @@ export function createCapabilityRegistry({ now = Date.now } = {}) {
         },
         isOnebotAvailable() { return readOnebot().toolAvailable; },
         /** Filter and describe one detached set of schemas without any awaits. */
-        getSnapshot({ toolSchemas = [], requestContext = {} } = {}) {
+        getSnapshot({ toolSchemas = [], requestContext = {}, admittedToolNames } = {}) {
             const deployment = requestContext.view === 'deployment';
             const onebot = readOnebot();
             const tools = toolSchemas.filter((tool) => Object.entries(CAPABILITY_TOOLS).some(([id, name]) => name === tool.name
                     && !['disabled', 'invalid'].includes(configured.get(id)))
                 && (tool.name !== CAPABILITY_TOOLS.onebot || onebot.toolAvailable
                     && (deployment || requestContext.onebotAuthorized === true) && !requestContext.documentMode)
-                && (tool.name !== CAPABILITY_TOOLS.image_generation || !requestContext.documentMode));
+                && (tool.name !== CAPABILITY_TOOLS.image_generation || !requestContext.documentMode)
+                && (admittedToolNames === undefined || admittedToolNames.has(tool.name)));
             const names = new Set(tools.map((tool) => tool.name));
             const registered = new Set(toolSchemas.map((tool) => tool.name));
             const capabilities = Object.fromEntries(Object.entries(CAPABILITY_TOOLS).map(([id, tool]) => {

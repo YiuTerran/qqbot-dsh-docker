@@ -15,8 +15,12 @@
     # stale persisted or ambient endpoint overrides exist.
     baseURL: https://api.deepseek.com/anthropic
 - id: tools
-  config:
-    mode: native
+  config: {}
+# DSH 0.2.2 selects execution through a separately mounted executor.
+- id: tool-executor-native
+  disabled: false
+- id: tool-executor-ptc
+  disabled: true
 # Remove coding-agent capabilities and their model-facing guidance. The runtime
 # guard also denies unknown/preset/plugin tools, so this isn't a denylist alone.
 - id: tool-bash

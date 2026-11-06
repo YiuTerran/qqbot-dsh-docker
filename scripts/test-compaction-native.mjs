@@ -14,7 +14,7 @@ test('QQ manual compaction preserves the session and refreshes current capabilit
     const ctx = new Context();
     t.after(() => ctx.fiber.dispose());
     for (const name of ['dsh-session-projection', 'dsh-session', 'dsh-agent', 'dsh-system-prompt',
-        'dsh-llm', 'dsh-tools', 'dsh-agent-loop', 'dsh-web', 'dsh-token-meter', 'dsh-compaction-basic']) {
+        'dsh-llm', 'dsh-tools', 'dsh-tool-executor-native', 'dsh-agent-loop', 'dsh-web', 'dsh-token-meter', 'dsh-compaction-basic']) {
         const loaded = await import(`${root}/${name}/lib/index.js`);
         await ctx.plugin(loaded.default ?? loaded, name === 'dsh-agent-loop' ? { agents: [] }
             : name === 'dsh-compaction-basic' ? { auto: false } : {});

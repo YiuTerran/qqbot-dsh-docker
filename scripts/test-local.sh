@@ -1020,7 +1020,8 @@ docker create \
         grep -A8 -F -- "- id: web-search-deepseek" "$dump" | grep -Fq "maxUses: 0"
         grep -A9 -F -- "- id: tool-web" "$dump" | grep -Fq "searchTimeoutMs: 60000"
         grep -A9 -F -- "- id: tool-web" "$dump" | grep -Fq "fetch: true"
-        grep -A3 -F -- "- id: tools" "$dump" | grep -Fq "mode: native"
+        grep -A3 -F -- "- id: tool-executor-native" "$dump" | grep -Fq "disabled: false"
+        grep -A3 -F -- "- id: tool-executor-ptc" "$dump" | grep -Fq "disabled: true"
         grep -A4 -F -- "- id: agent-loop" "$dump" | grep -Fq "agents: []"
         test "$(grep -A6 -F -- "- id: im-qqbot" "$dump" | grep -Fc "appId: __FROM_ENV__")" -eq 1
         test "$(grep -A6 -F -- "- id: im-qqbot" "$dump" | grep -Fc "appSecret: __FROM_ENV__")" -eq 1

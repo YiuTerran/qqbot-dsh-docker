@@ -36,3 +36,10 @@
 - https://www.npmjs.com/package/@tencent-connect/dsh-qqbot/v/0.5.5
 - https://www.npmjs.com/package/pnpm/v/12.18.0
 - https://hub.docker.com/_/node
+
+## DSH 0.2.2 接口兼容
+
+- 上游移除 `tools.mode`，安全 overlay 显式启用 native executor、禁用 PTC executor；原生回归改用新的批量执行 API。
+- 上游在 presentation waterfall 之后重新追加模型工具。策略改在真实步骤 admission 和最终工具列表同时过滤，保留作用域、注册身份及销毁检查，执行时仍有单调拒绝 guard。
+- 实际 Harness 普通、addition-only、in-history 请求，以及全局/作用域/额外 provider 工具、撤销和同名替换的安全测试通过。
+- 首次双架构 CI 已完成三个镜像构建，随后因被删除的 `mode: native` 配置在启动检查失败；该项已修复，最终完整回归仍需后续 CI 确认。
