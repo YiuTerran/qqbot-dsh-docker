@@ -103,6 +103,8 @@
     appSecret: __FROM_ENV__
     cwd: /workspace
     requireMention: true
+    # Only dedicated, scoped tools may send files; never auto-deliver model paths.
+    sendPresentedFiles: false
     directPrompt: >-
       This is a chat-only bot. Never execute shell commands, code, general file
       operations, general file generation or sending, general downloads, or background tasks.

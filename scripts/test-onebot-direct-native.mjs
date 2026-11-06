@@ -21,7 +21,7 @@ catch (error) {
 }
 
 const adapterRoot = resolve(process.env.QQBOT_ADAPTER_DIST
-    ?? '/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist');
+    ?? '/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib');
 const sdkRoot = resolve(process.env.QQBOT_SDK_ROOT
     ?? '/data/profiles/qqbot/node_modules/@tencent-connect/qqbot-nodejs/dist');
 const directModulePath = process.env.QQBOT_ONEBOT_DIRECT_MODULE

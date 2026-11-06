@@ -2,9 +2,9 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 const root = process.argv[2];
-if (!root) throw new Error('usage: enforce-chat-only.mjs <dsh-qqbot-dist-directory>');
+if (!root) throw new Error('usage: enforce-chat-only.mjs <dsh-qqbot-lib-directory>');
 const manifest = JSON.parse(await readFile(join(root, '..', 'package.json'), 'utf8'));
-if (manifest.version !== '0.5.2') throw new Error('Chat-only patches require dsh-qqbot 0.5.2; refusing an unverified adapter.');
+if (manifest.version !== '0.5.5') throw new Error('Chat-only patches require dsh-qqbot 0.5.5; refusing an unverified adapter.');
 const policy = '/opt/qqbot-defaults/qqbot-chat-policy.mjs';
 const historySnapshotPolicy = '/opt/qqbot-defaults/qqbot-history-snapshot.mjs';
 const pendingImagesPolicy = '/opt/qqbot-defaults/qqbot-pending-images.mjs';
@@ -51,6 +51,18 @@ await patch('gateway/bootstrap.js', `import { installChatPolicy } from '${policy
         'export async function bootstrapGateway(ctx, agents, config, logger) {\n    installChatPolicy(ctx);', file);
     return replaceOne(content, '    registerSendFileTool(ctx, mediaSender, manager, config, logger);',
         '    // Chat-only deployment: file sending is not registered.', file);
+});
+
+// Upstream 0.5.5 can send arbitrary presented filesystem paths independently
+// of qqbot_send_file. Do not construct or pass that deliverer in chat-only mode.
+await patch('gateway/bootstrap.js', '// Chat-only disable automatic presented files v1.', (content, file) => {
+    content = replaceOne(content, 'import { DeliverablesDeliverer } from "../transport/deliverables.js";\n', '', file);
+    content = replaceOne(content,
+        '    const deliverablesDeliverer = new DeliverablesDeliverer(sender, mediaSender, config, logger);',
+        '    // Chat-only disable automatic presented files v1.', file);
+    return replaceOne(content,
+        '    const outbound = createOutboundHandler(manager, sender, config, logger, toolsRegistry, deliverablesDeliverer);',
+        '    const outbound = createOutboundHandler(manager, sender, config, logger, toolsRegistry);', file);
 });
 
 await patch('gateway/bootstrap.js', '// Chat-only generation tools v1.', (content, file) => {
@@ -1286,24 +1298,41 @@ await patch('transport/outbound.js', '// Chat-only content-risk turn recovery v1
     if (content.includes(oldDispatch)) content = replaceOne(content, oldDispatch, newDispatch, file);
     else if (!content.includes(newDispatch)) throw new Error(`Chat-only patch: expected turn/end dispatch in ${file}`);
 
+    // Pinned 0.5.5 handler includes automatic file delivery. Replace it entirely
+    // with the policy-controlled turn handler; only dedicated tools may send files.
     const oldHandler = [
-        '    onTurnEnd(sessionId, record, event) {',
-        '        const buffer = this.buffers.get(sessionId);',
-        '        if (buffer !== undefined) {',
-        '            if (buffer.text.trim()) {',
-        '                void buffer.flush();',
-        '            }',
-        '            else {',
-        '                buffer.cancel();',
-        '            }',
-        '            this.buffers.delete(sessionId);',
-        '        }',
-        '        const failure = extractTurnError(event.reason);',
-        "        if (failure !== undefined && !SILENT_TURN_ERROR_CODES.has(failure.code)) {",
-        '            void this.send(record, `⚠️ 本轮异常结束\\n\\`${failure.code}\\`: ${failure.message}`, \'sendTurnEndError\');',
-        '        }',
-        '        this.logger.debug(`im-qqbot: turn/end sessionId=${sessionId}`);',
-        '    }',
+        "    onTurnEnd(sessionId, record, event) {",
+        "        const buffer = this.buffers.get(sessionId);",
+        "        // 文本 flush 可等待，保证回复先于交付文件到达用户",
+        "        let flushTask = Promise.resolve();",
+        "        if (buffer !== undefined) {",
+        "            if (buffer.text.trim()) {",
+        "                flushTask = buffer.flush();",
+        "            }",
+        "            else {",
+        "                buffer.cancel();",
+        "            }",
+        "            this.buffers.delete(sessionId);",
+        "        }",
+        "        this.streamAttempts.delete(sessionId);",
+        "        const files = this.presentedFiles.get(sessionId) ?? [];",
+        "        this.presentedFiles.delete(sessionId);",
+        "        this.presentedCalls.delete(sessionId);",
+        "        // assistant/message 已在轮内先行发送的文本可能仍在途：与 turn/end 自身的 flush 一起等待",
+        "        const pending = this.pendingText.get(sessionId) ?? Promise.resolve();",
+        "        this.pendingText.delete(sessionId);",
+        "        const failure = extractTurnError(event.reason);",
+        "        void (async () => {",
+        "            await Promise.all([flushTask, pending]);",
+        "            if (failure !== undefined && !SILENT_TURN_ERROR_CODES.has(failure.code)) {",
+        "                await this.send(record, `⚠️ 本轮异常结束\\n\\`${failure.code}\\`: ${failure.message}`, 'sendTurnEndError');",
+        "            }",
+        "            if (files.length > 0 && this.deliverer !== undefined) {",
+        "                await this.deliverer.deliver(record, files);",
+        "            }",
+        "            this.logger.debug(`im-qqbot: turn/end sessionId=${sessionId}`);",
+        "        })();",
+        "    }",
     ].join('\n');
     const recoveryHandler = [
         '    onTurnEnd(sessionId, record, event, turnId) {',
@@ -1387,7 +1416,7 @@ await patch('transport/outbound.js', '// Chat-only batch-bound outbound routing 
     const bindingImport = `import { captureMergeBatchReply, noteMergeBatchTurnStart, trackMergeBatchSend } from '${concurrencyPolicy}';`;
     if (!content.includes(bindingImport)) content = `${bindingImport}\n${content}`;
     const routeStart = content.indexOf('    route(session, raw) {');
-    const routeEnd = content.indexOf('    /** 流式文本增量：累积到会话 buffer */', routeStart);
+    const routeEnd = content.indexOf('    /** durable assistant/chunk 事件的流式增量（历史格式兼容保留，当前宿主不再生产该事件） */', routeStart);
     if (routeStart < 0 || routeEnd <= routeStart) throw new Error(`Chat-only patch: expected OutboundRouter.route() in ${file}`);
     const route = [
         '    route(session, raw) {',
@@ -1435,7 +1464,7 @@ await patch('transport/outbound.js', '// Chat-only batch-bound outbound routing 
         "    onMessage(sessionId, record, event, originRecord = record) {", file);
     const messageBufferFlush = [
         '        if (buffer !== undefined && buffer.text.trim()) {',
-        '            void buffer.flush();',
+        '            this.trackText(sessionId, buffer.flush());',
         '            this.buffers.delete(sessionId);',
         '            return;',
         '        }',
@@ -1449,7 +1478,7 @@ await patch('transport/outbound.js', '// Chat-only batch-bound outbound routing 
     ].join('\n');
     content = replaceOne(content, messageBufferFlush, trackedMessageBufferFlush, file);
     content = replaceOne(content,
-        "        void this.send(record, fullText, 'sendMarkdown');",
+        "        this.trackText(sessionId, this.send(record, fullText, 'sendMarkdown'));",
         "        trackMergeBatchSend(originRecord, this.send(record, fullText, 'sendMarkdown'));", file);
     content = replaceOne(content,
         '    onToolResult(record, event, raw) {',
@@ -1807,9 +1836,10 @@ await patch('transport/events.js', '// Chat-only structured provider failures v1
 
 await patch('model/prefs-store.js', '// Chat-only persistent model prefs v1.', (content, file) => {
     const originalImports = [
-        "import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';",
+        "import { readFileSync, writeFileSync, renameSync, unlinkSync, existsSync, mkdirSync } from 'node:fs';",
+        "import { randomBytes } from 'node:crypto';",
         "import { resolve, dirname } from 'node:path';",
-        "import { homedir } from 'node:os';",
+        "import { PLUGIN_HOME } from \"../shared/dirs.js\";",
     ].join('\n');
     const patchedImports = [
         "import { readFileSync, writeFileSync, existsSync, mkdirSync, renameSync, unlinkSync } from 'node:fs';",
@@ -1821,17 +1851,19 @@ await patch('model/prefs-store.js', '// Chat-only persistent model prefs v1.', (
     else if (!content.includes(patchedImports)) throw new Error(`Chat-only patch: expected pinned PrefsStore imports in ${file}`);
 
     const originalConstructor = [
-        '    constructor(debugLog) {',
-        "        this.prefsPath = resolve(homedir(), '.dsh-qqbot', 'model-prefs.json');",
-        '        this.debugLog = debugLog;',
-        '        this.load();',
-        '    }',
+        "    constructor(debugLog, options) {",
+        "        this.prefsPath = options?.path ?? resolve(PLUGIN_HOME, 'model-prefs.json');",
+        "        this.debugLog = debugLog;",
+        "        this.onError = options?.onError;",
+        "        this.load();",
+        "    }",
     ].join('\n');
     const patchedConstructor = [
-        '    constructor(debugLog) {',
+        '    constructor(debugLog, options) {',
         '        // Chat-only persistent model prefs v1.',
         "        this.prefsPath = '/data/qqbot-model-prefs.json';",
         '        this.debugLog = debugLog;',
+        '        this.onError = options?.onError;',
         "        const legacyPath = resolve(homedir(), '.dsh-qqbot', 'model-prefs.json');",
         '        let migrationTemp;',
         '        try {',
@@ -1857,18 +1889,22 @@ await patch('model/prefs-store.js', '// Chat-only persistent model prefs v1.', (
         throw new Error(`Chat-only patch: expected PrefsStore constructor in ${file}`);
 
     const originalSetter = [
-        '    setSessionId(sessionKey, sessionId) {',
-        '        this.sessionIds.set(sessionKey, sessionId);',
-        '        this.write();',
-        '    }',
+        "    setSessionId(sessionKey, sessionId) {",
+        "        this.sessionIds.set(sessionKey, sessionId);",
+        "        this.deleted.sessionIds.delete(sessionKey);",
+        "        this.write();",
+        "    }",
     ].join('\n');
     const patchedSetter = [
         '    setSessionId(sessionKey, sessionId, options = {}) {',
         '        const hadPrevious = this.sessionIds.has(sessionKey);',
         '        const previous = this.sessionIds.get(sessionKey);',
+        '        const wasDeleted = this.deleted.sessionIds.has(sessionKey);',
+        '        this.deleted.sessionIds.delete(sessionKey);',
         '        this.sessionIds.set(sessionKey, sessionId);',
         '        const written = this.write();',
         '        if (options?.strict && !written) {',
+        '            if (wasDeleted) this.deleted.sessionIds.add(sessionKey);',
         '            if (hadPrevious) this.sessionIds.set(sessionKey, previous);',
         '            else this.sessionIds.delete(sessionKey);',
         "            throw new Error('Unable to persist automatic session reset.');",
@@ -1881,31 +1917,39 @@ await patch('model/prefs-store.js', '// Chat-only persistent model prefs v1.', (
         throw new Error(`Chat-only patch: expected PrefsStore.setSessionId() in ${file}`);
 
     const originalWrite = [
-        '    write() {',
-        '        try {',
-        '            mkdirSync(dirname(this.prefsPath), { recursive: true });',
-        '            const data = {',
-        '                overrides: Object.fromEntries(this.overrides.entries()),',
-        '                sessionIds: Object.fromEntries(this.sessionIds.entries()),',
-        '                presets: Object.fromEntries(this.presets.entries()),',
-        '            };',
-        "            writeFileSync(this.prefsPath, JSON.stringify(data, null, 2), 'utf8');",
-        '        }',
-        '        catch (err) {',
-        '            this.debugLog?.(`writePrefs failed: ${err instanceof Error ? err.message : String(err)}`);',
-        '        }',
-        '    }',
+        "    write() {",
+        "        try {",
+        "            mkdirSync(dirname(this.prefsPath), { recursive: true });",
+        "            const data = this.mergeDisk(this.readDiskState());",
+        "            // 原子写：同目录临时文件 + rename（同分区保证原子，崩溃不留半份文件）。",
+        "            // tmp 名带进程+随机后缀：跨进程并发写时各自的临时文件互不覆盖，",
+        "            // rename 只会带走自己写的那份（固定名会让 A 的 rename 落盘 B 的内容）",
+        "            const tmpPath = `${this.prefsPath}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`;",
+        "            try {",
+        "                writeFileSync(tmpPath, JSON.stringify(data, null, 2), 'utf8');",
+        "                renameSync(tmpPath, this.prefsPath);",
+        "            }",
+        "            catch (err) {",
+        "                try {",
+        "                    unlinkSync(tmpPath);",
+        "                }",
+        "                catch { /* 临时文件可能不存在 */ }",
+        "                throw err;",
+        "            }",
+        "        }",
+        "        catch (err) {",
+        "            const msg = `writePrefs failed: ${err instanceof Error ? err.message : String(err)}`;",
+        "            this.onError?.(msg);",
+        "            this.debugLog?.(msg);",
+        "        }",
+        "    }",
     ].join('\n');
     const patchedWrite = [
         '    write() {',
         '        let tempPath;',
         '        try {',
         '            mkdirSync(dirname(this.prefsPath), { recursive: true });',
-        '            const data = {',
-        '                overrides: Object.fromEntries(this.overrides.entries()),',
-        '                sessionIds: Object.fromEntries(this.sessionIds.entries()),',
-        '                presets: Object.fromEntries(this.presets.entries()),',
-        '            };',
+        '            const data = this.mergeDisk(this.readDiskState());',
         '            tempPath = `${this.prefsPath}.${process.pid}.${randomUUID()}.tmp`;',
         "            writeFileSync(tempPath, JSON.stringify(data, null, 2), { encoding: 'utf8', flag: 'wx', mode: 0o600 });",
         '            renameSync(tempPath, this.prefsPath);',
@@ -1916,6 +1960,7 @@ await patch('model/prefs-store.js', '// Chat-only persistent model prefs v1.', (
         '                try { unlinkSync(tempPath); } catch {}',
         '            }',
         '            this.debugLog?.(`writePrefs failed: ${err instanceof Error ? err.message : String(err)}`);',
+        '            this.onError?.(`writePrefs failed: ${err instanceof Error ? err.message : String(err)}`);',
         '            return false;',
         '        }',
         '    }',
@@ -1955,7 +2000,9 @@ await patch('model/model-resolver.js', '// Chat-only strict sessionId persistenc
 await patch('session/session-manager.js', '// Chat-only derived message statistics v1.', (content, file) => {
     const original = [
         '    countMessages(record) {',
-        '        const events = record?.agent.session.events;',
+        '        if (!record)',
+        '            return 0;',
+        '        const events = this.host.sessionEvents(record.agent.session);',
         '        if (!events)',
         '            return 0;',
         '        let count = 0;',
@@ -1981,7 +2028,7 @@ await patch('session/session-manager.js', '// Chat-only strict automatic session
         '    async remove(scope, peerId) {',
         '        const key = this.sessionKey(scope, peerId);',
         '        const record = this.sessions.get(key);',
-        '        this.modelResolver.setSessionId(key, randomUUID());',
+        '        this.modelResolver.setSessionId(key, mintSessionId());',
         '        if (!record)',
         '            return;',
         '        this.sessions.delete(key);',
@@ -2000,7 +2047,7 @@ await patch('session/session-manager.js', '// Chat-only strict automatic session
         '                || record !== recoveryOptions.expectedRecord',
         '                || record.agent !== recoveryOptions.expectedAgent',
         '                || record.sessionId !== recoveryOptions.expectedSessionId) return false;',
-        '            this.modelResolver.setSessionId(key, randomUUID(), { strict: true });',
+        '            this.modelResolver.setSessionId(key, mintSessionId(), { strict: true });',
         '            this.sessions.delete(key);',
         '            try { recoveryOptions.onCommitted?.(record); } catch { }',
         "            try { record.agent.cancel({ kind: 'user' }); } catch { this.logger.warn('automatic session reset cancellation failed'); }",
@@ -2008,7 +2055,7 @@ await patch('session/session-manager.js', '// Chat-only strict automatic session
         '            this.logger.info(`session removed: key=${key}`);',
         '            return true;',
         '        }',
-        '        this.modelResolver.setSessionId(key, randomUUID());',
+        '        this.modelResolver.setSessionId(key, mintSessionId());',
         '        if (!record)',
         '            return;',
         '        this.sessions.delete(key);',
@@ -2022,7 +2069,7 @@ await patch('session/session-manager.js', '// Chat-only strict automatic session
         throw new Error(`Chat-only patch: expected SessionManager.remove() in ${file}`);
     if (content.split('// Chat-only strict automatic session reset v1.').length !== 2
         || !content.includes('recoveryOptions.expectedRecord')
-        || !content.includes('this.modelResolver.setSessionId(key, randomUUID(), { strict: true });')
+        || !content.includes('this.modelResolver.setSessionId(key, mintSessionId(), { strict: true });')
         || !content.includes('recoveryOptions.onCommitted?.(record)')) {
         throw new Error(`Chat-only patch: strict automatic session reset is incomplete in ${file}`);
     }
@@ -2152,8 +2199,8 @@ await patch('transport/attachment.js', '// Chat-only image download diagnostics 
         '    // Chat-only image download diagnostics v1.\n    logDownloadSelection(attachments, media);\n    if (!media.enabled)', file);
     content = replaceOne(content, '        if (att.size > maxBytes) {',
         "        if (att.size > maxBytes) {\n            logDownloadDiagnostics(att, 'too_large');", file);
-    content = replaceOne(content, '            bytes = await download(att.url, localPath, maxBytes);',
-        "            logDownloadDiagnostics(att, 'start');\n            bytes = await download(att.url, localPath, maxBytes);\n            logDownloadDiagnostics(att, 'success');", file);
+    content = replaceOne(content, '            buf = await download(att.url, maxBytes);',
+        "            logDownloadDiagnostics(att, 'start');\n            buf = await download(att.url, maxBytes);\n            logDownloadDiagnostics(att, 'success');", file);
     return replaceOne(content, '        catch (err) {',
         "        catch (err) {\n            logDownloadDiagnostics(att, 'failed', err);", file);
 });
@@ -2258,9 +2305,9 @@ const mediaRootMarker = '// Chat-only persistent media root v1.';
 await patch('media/media-cleaner.js', mediaRootMarker, (content, file) => {
     content = replaceOne(content, "import { join, resolve } from 'node:path';\n",
         "import { join } from 'node:path';\n", file);
-    content = replaceOne(content, "import { homedir } from 'node:os';\n", '', file);
+    content = replaceOne(content, 'import { PLUGIN_HOME } from "../shared/dirs.js";\n', '', file);
     return replaceOne(content,
-        "export const MEDIA_ROOT = resolve(homedir(), '.dsh-qqbot', 'media');",
+        "export const MEDIA_ROOT = resolve(PLUGIN_HOME, 'media');",
         `${mediaRootMarker}\nexport const MEDIA_ROOT = '/data/qqbot-media';`, file);
 });
 
@@ -2460,8 +2507,8 @@ await patch('media/vision-tool.js', imageLoaderV3Marker, (content, file) => {
         '}',
     ].join('\n');
     content = replaceOne(content, 'import { readFile, stat } from \'node:fs/promises\';\n', '', file);
-    content = replaceOne(content, "import { existsSync, readFileSync, writeFileSync } from 'node:fs';\n",
-        `import { existsSync, readFileSync, writeFileSync } from 'node:fs';\n${imageToolPolicyImport}\n`, file);
+    content = replaceOne(content, "import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';\n",
+        `import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';\n${imageToolPolicyImport}\n`, file);
     content = replaceOne(content, originalLoader, scopedLoader, file);
     content = replaceOne(content, 'loadImageBytes(image, vision.maxBytes, exec.signal)',
         'loadImageBytes(image, vision.maxBytes, exec)', file);
@@ -2570,9 +2617,9 @@ await patch('commands/status.js', '// Chat-only capability status v1.', (content
 
 await patch('session/session-manager.js', '// Chat-only image source reset v1.', (content, file) => {
     if (!content.includes("import { imageSources } from '/opt/qqbot-defaults/qqbot-image-sources.mjs';")) content = "import { imageSources } from '/opt/qqbot-defaults/qqbot-image-sources.mjs';\n" + content;
-    const reset = "            this.modelResolver.setSessionId(key, randomUUID(), { strict: true });";
+    const reset = "            this.modelResolver.setSessionId(key, mintSessionId(), { strict: true });";
     content = replaceOne(content, reset, reset + "\n            // Chat-only image source reset v1.\n            imageSources.clearPeer({ appId: this.config.appId, scope, peerId, ownerId: peerId });", file);
-    const manual = '        this.modelResolver.setSessionId(key, randomUUID());';
+    const manual = '        this.modelResolver.setSessionId(key, mintSessionId());';
     return replaceOne(content, manual, manual + "\n        imageSources.clearPeer({ appId: this.config.appId, scope, peerId, ownerId: peerId });", file);
 });
 await patch('transport/outbound.js', '// Chat-only image handle redaction v1.', (content, file) => {
@@ -2587,6 +2634,58 @@ await patch('transport/outbound-buffer.js', '// Chat-only streaming image handle
     content = replaceOne(content, '                    await this.writer.finish();', '                    this.writer.append(this.sourceRedactor.finish());\n                    await this.writer.finish();', file);
     return replaceOne(content, 'chunkMarkdownText(this.buffer, this.limit)', 'chunkMarkdownText(redactImageSourceHandles(this.buffer), this.limit)', file);
 });
+
+// Transient frames do not carry durable event sequence numbers. Bind them at
+// attempt start to the active batch, and never let a late frame adopt a new one.
+await patch('transport/outbound.js', '// Chat-only batch-bound transient streams v1.', (content, file) => {
+    content = replaceOne(content, [
+        "    routeStreamFrame(agentId, delta) {",
+        "        if (delta.kind === 'attempt-start') {",
+        "            this.streamAttempts.set(agentId, delta.attemptId);",
+        "            this.buffers.get(agentId)?.reset();",
+        "            return;",
+        "        }",
+        "        // text-delta：首帧未见 start 时自愈记录，迟到帧丢弃",
+        "        const current = this.streamAttempts.get(agentId);",
+        "        if (current === undefined) {",
+        "            this.streamAttempts.set(agentId, delta.attemptId);",
+        "        }",
+        "        else if (current !== delta.attemptId) {",
+        "            return;",
+        "        }",
+        "        const record = this.manager.findBySessionId(agentId);",
+        "        if (record === undefined)",
+        "            return;",
+        "        this.appendChunk(agentId, record, delta.text);",
+        "    }",
+    ].join('\n'), [
+        "    routeStreamFrame(agentId, delta) {",
+        "        // Chat-only batch-bound transient streams v1.",
+        "        const record = this.manager.findBySessionId(agentId);",
+        "        if (!record) return;",
+        "        const binding = captureMergeBatchReply(record, { sessionId: record.sessionId });",
+        "        if (!binding) return;",
+        "        if (delta.kind === 'attempt-start') {",
+        "            this.streamAttempts.set(agentId, { attemptId: delta.attemptId, record, agent: record.agent, batch: binding.batch });",
+        "            this.buffers.get(agentId)?.reset();",
+        "            return;",
+        "        }",
+        "        const attempt = this.streamAttempts.get(agentId);",
+        "        if (!attempt || attempt.attemptId !== delta.attemptId || attempt.record !== record",
+        "            || attempt.agent !== record.agent || attempt.batch !== binding.batch) return;",
+        "        const turn = this.toolFailureTurns.get(record);",
+        "        if (turn?.toolFailed) turn.streamAfterFailure = true;",
+        "        this.appendChunk(agentId, binding.replyRecord, delta.text);",
+        "    }",
+    ].join('\n'), file);
+    content = replaceOne(content,
+        '    onTurnEnd(sessionId, record, event, turnId, originRecord = record) {',
+        '    onTurnEnd(sessionId, record, event, turnId, originRecord = record) {\n        this.streamAttempts.delete(sessionId);', file);
+    return content;
+});
+await patch('transport/outbound-buffer.js', '// Chat-only reset stream redaction v1.', (content, file) =>
+    replaceOne(content, "    reset() {\n        this.buffer = '';",
+        "    reset() {\n        // Chat-only reset stream redaction v1.\n        this.sourceRedactor = createImageSourceRedactor();\n        this.buffer = '';", file));
 
 async function finalText(file) {
     const filename = join(root, file);
@@ -2751,6 +2850,14 @@ if (nativeServicePosition < finalBootstrap.indexOf('const bot = new QQBot({')
 }
 
 const finalOutbound = await finalText('transport/outbound.js');
+assertOnce(finalBootstrap, '// Chat-only disable automatic presented files v1.', 'presented file delivery disabled');
+if (finalBootstrap.includes('DeliverablesDeliverer') || finalOutbound.includes('this.deliverer.deliver(')
+    || finalOutbound.includes("case 'deliverables/presented':"))
+    throw new Error('Chat-only patch: automatic file delivery must stay disabled');
+assertOnce(finalOutbound, '// Chat-only batch-bound transient streams v1.', 'transient stream batch binding');
+assertOnce(finalOutbound, 'attempt.batch !== binding.batch', 'late transient stream batch guard');
+assertOnce(finalOutbound, 'this.streamAttempts.delete(sessionId);', 'transient stream turn cleanup');
+
 const mergeOutboundImports = [
     `import { captureMergeBatchReply, noteMergeBatchTurnStart, trackMergeBatchSend } from '${concurrencyPolicy}';`,
     `import { captureMergeBatchReply, enqueueMergeBatchSend, noteMergeBatchTurnStart } from '${concurrencyPolicy}';`,
@@ -2876,7 +2983,7 @@ assertOnce(finalManager, "return record.agent.session.deriveMessages().filter((m
 assertOnce(finalManager, '// Chat-only strict automatic session reset v1.', 'strict session manager marker');
 const strictRemoveStart = finalManager.indexOf('async remove(scope, peerId, recoveryOptions) {');
 const strictBranchStart = finalManager.indexOf('if (recoveryOptions?.requirePersisted === true) {', strictRemoveStart);
-const durableResetPosition = finalManager.indexOf('this.modelResolver.setSessionId(key, randomUUID(), { strict: true });', strictBranchStart);
+const durableResetPosition = finalManager.indexOf('this.modelResolver.setSessionId(key, mintSessionId(), { strict: true });', strictBranchStart);
 const expectedRecordPosition = finalManager.indexOf('record !== recoveryOptions.expectedRecord', strictBranchStart);
 const expectedAgentPosition = finalManager.indexOf('record.agent !== recoveryOptions.expectedAgent', strictBranchStart);
 const expectedSessionPosition = finalManager.indexOf('record.sessionId !== recoveryOptions.expectedSessionId', strictBranchStart);

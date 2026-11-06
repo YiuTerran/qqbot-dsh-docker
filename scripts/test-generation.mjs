@@ -1774,7 +1774,7 @@ test('image conversion enforces pixel bounds and drains its worker before cancel
 });
 
 for (const quoteMode of ['store', 'rendered-text']) test(`group quote (${quoteMode}) passes the original image bytes through inbound and the native editing tool`, async (t) => {
-    const adapter = '/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/';
+    const adapter = '/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/';
     const { setupMiddlewares } = await import(`${adapter}gateway/middleware-setup.js`);
     const { handleInbound } = await import(`${adapter}transport/inbound.js`);
     const { PublicHttpProvider } = await import(pathToFileURL(join(generationDir, 'qqbot-web-pages.mjs')).href);

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 
 const mode = process.argv[2];
-const root = '/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist';
+const root = '/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib';
 try {
     await symlink('/usr/local/lib/node_modules/@deepseek-ai/dsh/node_modules/@deepseek-ai',
         '/data/profiles/qqbot/node_modules/@deepseek-ai', 'dir');

@@ -21,7 +21,7 @@ const sdkRoot = process.env.QQBOT_QQ_SDK_API_ROOT
 const sdkDist = process.env.QQBOT_SDK_ROOT
     ?? '/data/profiles/qqbot/node_modules/@tencent-connect/qqbot-nodejs/dist';
 const adapterDist = process.env.QQBOT_ADAPTER_DIST
-    ?? '/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist';
+    ?? '/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib';
 const { MessageApi } = await import(`${sdkRoot}/messages.js`);
 const { MediaApi } = await import(`${sdkRoot}/media.js`);
 const { QQBot } = await import(pathToFileURL(join(sdkDist, 'QQBot.js')).href);

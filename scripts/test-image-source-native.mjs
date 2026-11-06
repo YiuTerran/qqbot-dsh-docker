@@ -199,7 +199,7 @@ test('native generation -> next-turn vision -> editing uses exactly the generate
         async generate(input) { calls.push(input);return Buffer.from(png); },
     } });
     // The real adapter vision tool must receive a call-local memory attachment.
-    const { registerDescribeImageTool } = await import('/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/dist/media/vision-tool.js');
+    const { registerDescribeImageTool } = await import('/data/profiles/qqbot/node_modules/@tencent-connect/dsh-qqbot/lib/media/vision-tool.js');
     const attachments = { async saveImage() { assert.fail('source images must never be saved to disk'); },
         async readImage() { assert.fail('unbound memory read'); }, async readImageRequest() { assert.fail('unbound variant'); }, imageHostPath() { return undefined; } };
     let visionCalls = 0;
