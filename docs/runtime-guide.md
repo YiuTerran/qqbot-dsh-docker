@@ -124,14 +124,14 @@ mkdir -p /tmp/qqbot-image-probe
 docker run --rm --entrypoint node --env-file .env \
   --mount "type=bind,src=$PWD/scripts/verify-image-route.mjs,dst=/tmp/verify-image-route.mjs,readonly" \
   --mount type=bind,src=/tmp/qqbot-image-probe,dst=/probe-output \
-  tryao/qqbot-dsh:v0.18.2 /tmp/verify-image-route.mjs /probe-output
+  tryao/qqbot-dsh:v0.19.0 /tmp/verify-image-route.mjs /probe-output
 ```
 
 探测会发起真实图片服务请求并消耗服务额度；不会发送真实 QQ 消息或修改生产额度。真实 QQ 图片和文件投递仍需用机器人账号验证。
 
 ## 升级、回滚与备份
 
-持久化状态位于 `dsh-qqbot-data` 和 `dsh-qqbot-workspace` 命名卷。**操作员在升级前停止机器人并备份两个卷及部署配置**；升级使用明确版本标签，继续挂载相同的卷。当前升级源码对应 dsh `0.2.2-rc.1`、QQ 插件 `0.5.5` 和 SDK `1.0.5`，尚未发布新镜像；最近已发布镜像仍为 `v0.18.2`。
+持久化状态位于 `dsh-qqbot-data` 和 `dsh-qqbot-workspace` 命名卷。**操作员在升级前停止机器人并备份两个卷及部署配置**；升级使用明确版本标签，继续挂载相同的卷。`tryao/qqbot-dsh:v0.19.0` 对应 dsh `0.2.2-rc.1`、QQ 插件 `0.5.5` 和 SDK `1.0.5`。将现有 `.env` 的 `IMAGE_TAG` 改为 `v0.19.0` 后，先执行 `docker compose -f docker-compose.qnap.yml pull qqbot`，再执行 `docker compose -f docker-compose.qnap.yml up -d qqbot`；仅修改示例文件不会更新已有部署。
 
 启动器识别由本项目管理的 `0.5.0`、`0.5.2` 或 `0.5.5` QQ profile，使用镜像内置依赖离线迁移到 `0.5.5`，不在启动时联网安装。只替换 `node_modules`、`package.json` 的托管依赖版本、`pnpm-lock.yaml` 和 `pnpm-workspace.yaml`；用户的 `cordis.patch.yml`、AGENTS、人设、模型偏好、会话、媒体和额度数据继续保留。配置关闭、凭据选择及模型路由沿用现有环境变量；新版本的账户登录、持久凭据、扫码管理界面和原生 Search/Fetch API 不会自动启用。
 
@@ -139,7 +139,7 @@ docker run --rm --entrypoint node --env-file .env \
 
 新版启动异常时，先停止容器，再同时恢复升级前的数据卷备份并使用旧镜像标签。新引擎即使仍写 v4 会话日志，也可能使用旧引擎不理解的事件，不能只降低镜像版本。不要用空卷替换现有卷，也不要把缺少 `/opt/qqbot-defaults/{chat-policy,web-pages}.mjs` 的旧镜像用于已升级的卷。
 
-迁移专项回归：`IMAGE=dsh-qqbot:test-local ./scripts/test-runtime-upgrade.sh`。它只使用临时容器、临时卷和已发布的 `v0.17.0` 旧镜像，覆盖中断恢复、真实旧日志续接、实际入口升级和整卷回滚；缺少旧镜像时会先拉取。两个原生架构的 CI 均执行此项。
+迁移专项回归：`IMAGE=dsh-qqbot:test-local ./scripts/test-runtime-upgrade.sh` 默认使用真实 `v0.17.0` 旧镜像；增加 `LEGACY_IMAGE=tryao/qqbot-dsh:v0.18.2 LEGACY_VERSION=0.5.2` 可验证 `v0.18.2` 旧卷。两者都只使用临时容器、临时卷，覆盖中断恢复、真实旧日志续接、实际入口升级和整卷回滚；缺少旧镜像时会先拉取。两个原生架构的 CI 均执行这两项。
 
 本地构建和离线回归不操作线上数据，也不代表 QQ 验收。发布前在独立测试环境检查 `.userid`、能力询问、命令用法、图片、文件及互动澄清，并分别记录真实模型与 QQ 投递结果。
 
