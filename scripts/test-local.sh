@@ -3,6 +3,7 @@ set -euo pipefail
 
 IMAGE="${IMAGE:-dsh-qqbot:test-local}"
 repo_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+"${repo_root}/scripts/check-release-version.sh"
 chat_policy_test="${repo_root}/scripts/test-chat-policy.mjs"
 model_context_test="${repo_root}/scripts/test-model-context.mjs"
 group_history_test="${repo_root}/scripts/test-group-history.mjs"
@@ -51,6 +52,7 @@ previous_stock_agents_v0_14_2_fixture="${repo_root}/scripts/fixtures/agents-v0.1
 previous_stock_agents_v0_15_0_fixture="${repo_root}/scripts/fixtures/agents-v0.15.0-stock.md"
 previous_stock_agents_v0_16_0_fixture="${repo_root}/scripts/fixtures/agents-v0.16.0-stock.md"
 legacy_stock_agents_fixtures=(
+    "${repo_root}/scripts/fixtures/agents-upstream-2026-11-06-stock.md"
     "${repo_root}/scripts/fixtures/agents-v0.18.2-stock.md"
     "${repo_root}/scripts/fixtures/agents-v0.18.0-stock.md"
     "${repo_root}/scripts/fixtures/agents-v0.17.0-stock.md"
@@ -81,6 +83,7 @@ legacy_stock_agents_fixtures=(
     "${repo_root}/scripts/fixtures/agents-v0.16.0-stock.md"
 )
 legacy_stock_agents_hashes=(
+    a1aad5b65c3ab8fcf58194af35275ae0681e40bbedd0cd02e87468eea9ebc9fa
     a77b4f53d57c32234fd1b130a23b9c5d2674e8a4e576e72e596bd1bd792c6478
     ccbedd1e3662b22f16c80e8c7f5446d0175fac618eb7ce458691feeb675615e6
     1331ab3c6a3430a764f663f4bb82c19e42f80d647c639ceaf3a8db1bd05c856e
